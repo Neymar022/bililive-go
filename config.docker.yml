@@ -3,7 +3,7 @@ rpc:
   bind: :8080
 debug: false
 interval: 20
-out_put_path: /srv/bililive
+out_put_path: /srv/bililive-source
 app_data_path: /srv/bililive/.appdata
 read_only_tool_folder: /opt/bililive/tools
 feature:
@@ -39,3 +39,32 @@ notify:
     URL: https://ntfy.sh/xxxx
     token: tk_xxxxxxxxx
     tag: new
+
+# 字幕增强配置
+subtitle:
+  # 启用后会在录制转 MP4 成功后自动生成 SRT 和烧录版
+  enabled: false
+  auto_generate: true
+  default_provider: dashscope
+  # 原始录屏根目录，供 bililive-go 与 subtitle-worker 共享
+  source_root: /srv/bililive-source
+  # 正式展示目录，建议由外部脚本整理成绿联可扫描的剧集结构
+  library_root: /srv/bililive
+  # DashScope 文件转写要求可公网访问的音频 URL。
+  # 若只使用 local-whisper，可留空。
+  public_url_base: ""
+  retention_days: 7
+  language: zh
+  local:
+    model: small
+    compute_type: int8
+  cloud:
+    vendor: aliyun
+    model: qwen3-asr-flash-filetrans
+  burn_style:
+    preset: vizard_classic_cn
+    font_name: Noto Sans CJK SC
+    font_size: 24
+    margin_v: 24
+    outline: 2
+    shadow: 0

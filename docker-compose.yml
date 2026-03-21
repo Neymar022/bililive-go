@@ -2,16 +2,46 @@ version: "3.7"
 
 volumes:
     prometheus_data: {}
+    subtitle_worker_cache: {}
 services:
   bililive-go:
-    image: chigusa/bililive-go
+    build:
+      context: .
+      dockerfile: Dockerfile.build-and-run
+    image: bililive-go:latest
     restart: unless-stopped
     container_name: bililive-go
+    environment:
+      - SUBTITLE_WORKER_URL=http://subtitle-worker:8091
     volumes:
-      - ./Videos:/srv/bililive
+      - ./Videos/source:/srv/bililive-source
+      - ./Videos/library:/srv/bililive
       - ./config.docker.yml:/etc/bililive-go/config.yml
     ports:
       - 8080:8080
+
+  subtitle-worker:
+    build:
+      context: ./contrib/subtitle-worker
+      dockerfile: Dockerfile
+    image: bililive-go-subtitle-worker:latest
+    restart: unless-stopped
+    container_name: bililive-go-subtitle-worker
+    environment:
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - DASHSCOPE_BASE_URL=${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - ALL_PROXY=${ALL_PROXY:-}
+      - HF_ENDPOINT=${HF_ENDPOINT:-}
+      - SUBTITLE_SOURCE_ROOT=/srv/bililive-source
+      - SUBTITLE_PUBLIC_URL_BASE=${SUBTITLE_PUBLIC_URL_BASE:-}
+      - PLAYWRIGHT_BROWSERS_PATH=/root/.cache/ms-playwright
+    volumes:
+      - ./Videos/source:/srv/bililive-source
+      - ./Videos/library:/srv/bililive
+      - subtitle_worker_cache:/root/.cache
 
 #  prometheus:
 #    image: quay.io/prometheus/prometheus
