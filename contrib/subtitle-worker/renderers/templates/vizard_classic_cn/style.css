@@ -1,0 +1,26 @@
+:root {
+  --card-bg: rgba(18, 18, 20, 0.9);
+  --card-border: rgba(255, 255, 255, 0.08);
+  --card-border-width: 2;
+  --card-radius: 36;
+  --bottom-offset: 88;
+  --text-color: #ffffff;
+  --shadow-color: rgba(0, 0, 0, 0.18);
+  --shadow-offset: 10;
+}
+
+body {
+  margin: 0;
+  background: transparent;
+}
+
+.frame {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.cue-card {
+  backdrop-filter: blur(12px);
+  letter-spacing: 0.02em;
+}
