@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -127,4 +128,12 @@ func TestSaveMetadataPersistsRendererFields(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "vizard_classic_cn", loaded.RenderPreset)
 	assert.Equal(t, StatusCompleted, loaded.RendererStatus)
+}
+
+func TestResolveRenderPresetPrefersOverrideThenRecordThenDefault(t *testing.T) {
+	style := configs.SubtitleBurnStyle{Preset: "bottom_center"}
+
+	assert.Equal(t, "modern_card_cn", ResolveRenderPreset("modern_card_cn", "vizard_classic_cn", style))
+	assert.Equal(t, "vizard_classic_cn", ResolveRenderPreset("", "bottom_center", style))
+	assert.Equal(t, "vizard_classic_cn", ResolveRenderPreset("", "", style))
 }
