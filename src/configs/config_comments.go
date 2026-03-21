@@ -127,6 +127,24 @@ func DecorateConfigNode(node *yaml.Node) {
 # 这可以避免因编码参数变化导致的花屏问题
 # 注意：启用后会在本地启动一个 FLV 代理服务器，FFmpeg 从代理读取流`, "")
 	}
+
+	subtitleNode := findNode(root, "subtitle")
+	if subtitleNode != nil {
+		setFieldHeadComment(root, "subtitle", "# 字幕增强配置")
+		setFieldComment(subtitleNode, "default_provider",
+			`# 默认字幕 provider
+# 可选值：dashscope、local-whisper`, "")
+		setFieldComment(subtitleNode, "public_url_base",
+			`# DashScope 文件转写所需的外部可访问 /files 根地址
+# 仅使用 local-whisper 时可以留空`, "")
+		burnStyleNode := findNode(subtitleNode, "burn_style")
+		if burnStyleNode != nil {
+			setFieldComment(burnStyleNode, "preset",
+				`# 字幕卡片渲染预设
+# vizard_classic_cn: 当前默认的 Vizard 风格中文卡片
+# bottom_center 会自动兼容映射到 vizard_classic_cn`, "")
+		}
+	}
 }
 
 func findNode(mapNode *yaml.Node, key string) *yaml.Node {

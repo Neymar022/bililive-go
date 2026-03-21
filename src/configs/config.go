@@ -265,6 +265,92 @@ type Bark struct {
 	Level     string `yaml:"level" json:"level"`         // 通知级别: active/timeSensitive/passive/critical
 }
 
+const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
+const DefaultSubtitleRenderPreset = "vizard_classic_cn"
+
+type SubtitleLocalConfig struct {
+	Model       string `yaml:"model" json:"model"`
+	ComputeType string `yaml:"compute_type" json:"compute_type"`
+}
+
+type SubtitleCloudConfig struct {
+	Vendor string `yaml:"vendor" json:"vendor"`
+	Model  string `yaml:"model" json:"model"`
+}
+
+type SubtitleBurnStyle struct {
+	Preset   string `yaml:"preset" json:"preset"`
+	FontName string `yaml:"font_name" json:"font_name"`
+	FontSize int    `yaml:"font_size" json:"font_size"`
+	MarginV  int    `yaml:"margin_v" json:"margin_v"`
+	Outline  int    `yaml:"outline" json:"outline"`
+	Shadow   int    `yaml:"shadow" json:"shadow"`
+}
+
+func (s SubtitleBurnStyle) GetEffectivePreset() string {
+	preset := strings.TrimSpace(s.Preset)
+	switch preset {
+	case "", "bottom_center":
+		return DefaultSubtitleRenderPreset
+	default:
+		return preset
+	}
+}
+
+type SubtitleConfig struct {
+	Enabled         bool                `yaml:"enabled" json:"enabled"`
+	AutoGenerate    bool                `yaml:"auto_generate" json:"auto_generate"`
+	DefaultProvider string              `yaml:"default_provider" json:"default_provider"`
+	SourceRoot      string              `yaml:"source_root,omitempty" json:"source_root,omitempty"`
+	LibraryRoot     string              `yaml:"library_root,omitempty" json:"library_root,omitempty"`
+	PublicURLBase   string              `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
+	RetentionDays   int                 `yaml:"retention_days" json:"retention_days"`
+	Language        string              `yaml:"language" json:"language"`
+	Local           SubtitleLocalConfig `yaml:"local" json:"local"`
+	Cloud           SubtitleCloudConfig `yaml:"cloud" json:"cloud"`
+	BurnStyle       SubtitleBurnStyle   `yaml:"burn_style" json:"burn_style"`
+	UpdatedAt       time.Time           `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+}
+
+func (s SubtitleConfig) GetEffectiveSourceRoot(outPutPath string) string {
+	if strings.TrimSpace(s.SourceRoot) != "" {
+		return s.SourceRoot
+	}
+	return outPutPath
+}
+
+func (s SubtitleConfig) GetEffectiveLibraryRoot(outPutPath string) string {
+	if strings.TrimSpace(s.LibraryRoot) != "" {
+		return s.LibraryRoot
+	}
+	return outPutPath
+}
+
+func (s SubtitleConfig) GetWorkerURL() string {
+	if workerURL := strings.TrimSpace(os.Getenv("SUBTITLE_WORKER_URL")); workerURL != "" {
+		return workerURL
+	}
+	return DefaultSubtitleWorkerURL
+}
+
+func (s SubtitleConfig) Verify(outPutPath string) error {
+	if !s.Enabled {
+		return nil
+	}
+	if s.RetentionDays < 0 {
+		return fmt.Errorf("字幕源文件保留天数不能为负数")
+	}
+	sourceRoot := s.GetEffectiveSourceRoot(outPutPath)
+	if _, err := os.Stat(sourceRoot); err != nil {
+		return fmt.Errorf("字幕源目录 \"%s\" 不存在", sourceRoot)
+	}
+	libraryRoot := s.GetEffectiveLibraryRoot(outPutPath)
+	if _, err := os.Stat(libraryRoot); err != nil {
+		return fmt.Errorf("字幕库路径 \"%s\" 不存在", libraryRoot)
+	}
+	return nil
+}
+
 // Config content all config info.
 type Config struct {
 	// 核心配置
@@ -312,6 +398,9 @@ type Config struct {
 
 	// 自动更新配置
 	Update UpdateConfig `yaml:"update" json:"update"`
+
+	// 字幕增强配置
+	Subtitle SubtitleConfig `yaml:"subtitle" json:"subtitle"`
 
 	// 平台特定配置（层级覆盖，使用 OverridableConfig 中的指针模式）
 	PlatformConfigs map[string]PlatformConfig `yaml:"platform_configs,omitempty" json:"platform_configs,omitempty"`
@@ -665,9 +754,32 @@ var defaultConfig = Config{
 	ToolRootFolder:     "",
 	TaskQueue:          defaultTaskQueue,
 
-	Proxy:           defaultProxy,
-	OpenList:        defaultOpenListConfig,
-	Update:          defaultUpdateConfig,
+	Proxy:    defaultProxy,
+	OpenList: defaultOpenListConfig,
+	Update:   defaultUpdateConfig,
+	Subtitle: SubtitleConfig{
+		Enabled:         false,
+		AutoGenerate:    true,
+		DefaultProvider: "dashscope",
+		RetentionDays:   7,
+		Language:        "zh",
+		Local: SubtitleLocalConfig{
+			Model:       "small",
+			ComputeType: "int8",
+		},
+		Cloud: SubtitleCloudConfig{
+			Vendor: "aliyun",
+			Model:  "qwen3-asr-flash-filetrans",
+		},
+		BurnStyle: SubtitleBurnStyle{
+			Preset:   DefaultSubtitleRenderPreset,
+			FontName: "Noto Sans CJK SC",
+			FontSize: 24,
+			MarginV:  24,
+			Outline:  2,
+			Shadow:   0,
+		},
+	},
 	PlatformConfigs: map[string]PlatformConfig{},
 }
 
@@ -739,6 +851,9 @@ func (c *Config) Verify() error {
 	}
 	if !c.RPC.Enable && len(c.LiveRooms) == 0 {
 		return fmt.Errorf("RPC 服务已禁用且未配置直播间，程序无任务可执行")
+	}
+	if err := c.Subtitle.Verify(c.OutPutPath); err != nil {
+		return err
 	}
 
 	// 验证平台配置
@@ -834,16 +949,29 @@ func (c *Config) Marshal() error {
 		return errors.New("config path not set")
 	}
 
+	bytes, err := c.ToYAMLBytes()
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(c.File, bytes, 0644)
+}
+
+func (c *Config) ToYAMLBytes() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("config is nil")
+	}
+
 	// 1. 将当前配置结构体序列化为新 Node
 	var newNode yaml.Node
 	// 我们先序列化为字节，然后反序列化为 Node，因为 yaml.Marshal 返回字节。
 	// 另外也可以使用 Encoder，但 Unmarshal 更容易获得干净的 Node 树。
 	tempBytes, err := yaml.Marshal(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := yaml.Unmarshal(tempBytes, &newNode); err != nil {
-		return err
+		return nil, err
 	}
 
 	// 2. 注入硬编码的注释
@@ -855,10 +983,10 @@ func (c *Config) Marshal() error {
 	encoder := yaml.NewEncoder(&buf)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(&newNode); err != nil {
-		return err
+		return nil, err
 	}
 
-	return os.WriteFile(c.File, buf.Bytes(), 0644)
+	return buf.Bytes(), nil
 }
 
 func (c Config) GetFilePath() (string, error) {
