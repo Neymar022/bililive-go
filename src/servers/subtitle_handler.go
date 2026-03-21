@@ -124,22 +124,33 @@ func rerunSubtitleRecord(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	metadataPath := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".subtitle.json"
-	metadata := subtitle.Metadata{
-		Status:         subtitle.StatusQueued,
-		Provider:       provider,
-		SourcePath:     sourcePath,
-		OutputPath:     videoPath,
-		SRTPath:        strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt",
-		SourceExists:   fileExistsOnDisk(sourcePath),
-		RenderPreset:   preset,
-		RendererStatus: subtitle.StatusQueued,
-		RecordMeta: map[string]any{
-			"platform":   record.Platform,
-			"host_name":  record.HostName,
-			"room_name":  record.RoomName,
-			"start_time": formatOptionalTime(record.RecordedAt),
-		},
+	metadata := subtitle.Metadata{}
+	if existing, loadErr := subtitle.LoadMetadata(metadataPath); loadErr == nil {
+		metadata = existing
+	} else if !os.IsNotExist(loadErr) {
+		writeJSON(writer, commonResp{ErrMsg: loadErr.Error()})
+		return
 	}
+	if metadata.RecordMeta == nil {
+		metadata.RecordMeta = map[string]any{}
+	}
+	metadata.Status = subtitle.StatusQueued
+	metadata.Provider = provider
+	metadata.SourcePath = sourcePath
+	metadata.OutputPath = videoPath
+	metadata.SRTPath = strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+	metadata.SourceExists = fileExistsOnDisk(sourcePath)
+	metadata.LastError = ""
+	metadata.RenderPreset = preset
+	metadata.RendererStatus = subtitle.StatusQueued
+	metadata.RendererError = ""
+	metadata.Segments = nil
+	metadata.CompletedAt = nil
+	metadata.SourceDeletedAt = nil
+	metadata.RecordMeta["platform"] = record.Platform
+	metadata.RecordMeta["host_name"] = record.HostName
+	metadata.RecordMeta["room_name"] = record.RoomName
+	metadata.RecordMeta["start_time"] = formatOptionalTime(record.RecordedAt)
 	if err := subtitle.SaveMetadata(metadataPath, metadata); err != nil {
 		writeJSON(writer, commonResp{ErrMsg: err.Error()})
 		return
