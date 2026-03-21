@@ -124,6 +124,24 @@ class WorkerCoreTest(unittest.TestCase):
         self.assertNotIn("subtitles=", ffmpeg_command)
         self.assertNotIn("force_style", ffmpeg_command)
 
+    def test_transcribe_and_burn_creates_hidden_cue_assets_and_overlay_filter(self):
+        _, commands, output_srt_path = self._run_transcribe_and_burn()
+
+        cue_dir = output_srt_path.parent / ".subtitle-tmp"
+        self.assertTrue(cue_dir.exists())
+        self.assertEqual(
+            ["cue-0001.png", "cue-0002.png"],
+            sorted(path.name for path in cue_dir.glob("cue-*.png")),
+        )
+
+        ffmpeg_command = commands[-1]
+        self.assertIn("-filter_complex", ffmpeg_command)
+        self.assertNotIn("-vf", ffmpeg_command)
+        self.assertEqual(
+            "[0:v][1:v]overlay=0:0:enable='between(t,0.000,1.800)'[v1];[v1][2:v]overlay=0:0:enable='between(t,1.800,3.200)'[outv]",
+            ffmpeg_command[ffmpeg_command.index("-filter_complex") + 1],
+        )
+
     def test_build_public_file_url(self):
         file_url = build_public_file_url(
             file_path="/srv/bililive-source/主播/audio/test.wav",
