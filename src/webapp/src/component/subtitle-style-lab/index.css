@@ -54,3 +54,15 @@
   border: 1px solid #f0f0f0;
   display: block;
 }
+
+.subtitle-style-lab-sample-result {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.subtitle-style-lab-error {
+  color: #cf1322;
+  margin-bottom: 12px;
+}

@@ -254,7 +254,7 @@ func TestPreviewSubtitleStyleLabHandler(t *testing.T) {
 		require.NoError(t, json.NewDecoder(req.Body).Decode(&workerRequest))
 		writer.Header().Set("Content-Type", "application/json")
 		require.NoError(t, json.NewEncoder(writer).Encode(subtitle.StyleLabPreviewResponse{
-			PreviewImagePath: "/tmp/preview.png",
+			PreviewImagePath: workerRequest.OutputPreviewPath,
 			RenderPreset:     "vizard_classic_cn",
 		}))
 	}))
@@ -262,6 +262,9 @@ func TestPreviewSubtitleStyleLabHandler(t *testing.T) {
 	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
 
 	cfg := configs.NewConfig()
+	libraryRoot := t.TempDir()
+	cfg.OutPutPath = libraryRoot
+	cfg.Subtitle.LibraryRoot = libraryRoot
 	cfg.Subtitle.BurnStyle.Preset = "bottom_center"
 	configs.SetCurrentConfig(cfg)
 
@@ -289,9 +292,15 @@ func TestPreviewSubtitleStyleLabHandler(t *testing.T) {
 	payload, err := json.Marshal(resp.Data)
 	require.NoError(t, err)
 
-	var data subtitle.StyleLabPreviewResponse
+	var data struct {
+		PreviewImagePath string `json:"preview_image_path"`
+		PreviewImageURL  string `json:"preview_image_url"`
+		RenderPreset     string `json:"render_preset"`
+	}
 	require.NoError(t, json.Unmarshal(payload, &data))
-	assert.Equal(t, "/tmp/preview.png", data.PreviewImagePath)
+	assert.Equal(t, filepath.Join(libraryRoot, ".style-lab-previews", "preview.png"), data.PreviewImagePath)
+	assert.Equal(t, "/api/subtitles/assets/.style-lab-previews/preview.png", data.PreviewImageURL)
+	assert.Equal(t, filepath.Join(libraryRoot, ".style-lab-previews", "preview.png"), workerRequest.OutputPreviewPath)
 	assert.Equal(t, "vizard_classic_cn", workerRequest.BurnStyle.Preset)
 	assert.Equal(t, "测试预览", workerRequest.PreviewText)
 }
@@ -303,8 +312,8 @@ func TestSampleSubtitleStyleLabHandler(t *testing.T) {
 		require.NoError(t, json.NewDecoder(req.Body).Decode(&workerRequest))
 		writer.Header().Set("Content-Type", "application/json")
 		require.NoError(t, json.NewEncoder(writer).Encode(subtitle.StyleLabSampleResponse{
-			SampleVideoPath: "/tmp/sample.burned.mp4",
-			SampleSRTPath:   "/tmp/sample.srt",
+			SampleVideoPath: filepath.Join(workerRequest.OutputDir, "sample.burned.mp4"),
+			SampleSRTPath:   filepath.Join(workerRequest.OutputDir, "sample.srt"),
 			RenderPreset:    "vizard_classic_cn",
 		}))
 	}))
@@ -312,6 +321,9 @@ func TestSampleSubtitleStyleLabHandler(t *testing.T) {
 	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
 
 	cfg := configs.NewConfig()
+	libraryRoot := t.TempDir()
+	cfg.OutPutPath = libraryRoot
+	cfg.Subtitle.LibraryRoot = libraryRoot
 	cfg.Subtitle.BurnStyle.Preset = "bottom_center"
 	configs.SetCurrentConfig(cfg)
 
@@ -320,7 +332,6 @@ func TestSampleSubtitleStyleLabHandler(t *testing.T) {
 		"sample_text":          "测试样片",
 		"duration_seconds":     30,
 		"start_time_seconds":   5,
-		"output_dir":           "/tmp/.style-lab-samples",
 		"burn_style": map[string]any{
 			"preset":    "bottom_center",
 			"font_name": "Noto Sans CJK SC",
@@ -342,10 +353,19 @@ func TestSampleSubtitleStyleLabHandler(t *testing.T) {
 	payload, err := json.Marshal(resp.Data)
 	require.NoError(t, err)
 
-	var data subtitle.StyleLabSampleResponse
+	var data struct {
+		SampleVideoPath string `json:"sample_video_path"`
+		SampleSRTPath   string `json:"sample_srt_path"`
+		SampleVideoURL  string `json:"sample_video_url"`
+		SampleSRTURL    string `json:"sample_srt_url"`
+		RenderPreset    string `json:"render_preset"`
+	}
 	require.NoError(t, json.Unmarshal(payload, &data))
-	assert.Equal(t, "/tmp/sample.burned.mp4", data.SampleVideoPath)
-	assert.Equal(t, "/tmp/sample.srt", data.SampleSRTPath)
+	assert.Equal(t, filepath.Join(libraryRoot, ".style-lab-samples", "sample.burned.mp4"), data.SampleVideoPath)
+	assert.Equal(t, filepath.Join(libraryRoot, ".style-lab-samples", "sample.srt"), data.SampleSRTPath)
+	assert.Equal(t, "/api/subtitles/assets/.style-lab-samples/sample.burned.mp4", data.SampleVideoURL)
+	assert.Equal(t, "/api/subtitles/assets/.style-lab-samples/sample.srt", data.SampleSRTURL)
+	assert.Equal(t, filepath.Join(libraryRoot, ".style-lab-samples"), workerRequest.OutputDir)
 	assert.Equal(t, "vizard_classic_cn", workerRequest.BurnStyle.Preset)
 	assert.Equal(t, "测试样片", workerRequest.SampleText)
 }

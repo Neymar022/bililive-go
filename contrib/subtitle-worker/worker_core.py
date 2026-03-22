@@ -103,6 +103,8 @@ def render_style_lab_preview(
     ffmpeg_bin: str = "ffmpeg",
 ) -> dict[str, Any]:
     preview_root = Path(output_preview_path).parent if output_preview_path else None
+    if preview_root is not None:
+        preview_root.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="style-lab-preview-", dir=str(preview_root) if preview_root else None) as temp_dir:
         temp_root = Path(temp_dir)
         frame_path = temp_root / "frame.png"

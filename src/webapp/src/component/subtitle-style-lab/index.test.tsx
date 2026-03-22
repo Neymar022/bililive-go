@@ -60,7 +60,22 @@ beforeEach(() => {
           err_no: 0,
           data: {
             preview_image_path: '/tmp/style-lab-preview.png',
+            preview_image_url: '/api/subtitles/assets/.style-lab-previews/preview.png',
             render_preset: 'vizard_classic_cn',
+          },
+        }),
+      } as Response;
+    }
+    if (url.endsWith('/api/subtitles/style-lab/sample')) {
+      return {
+        ok: true,
+        json: async () => ({
+          err_no: 0,
+          data: {
+            sample_video_path: '/tmp/sample.burned.mp4',
+            sample_srt_path: '/tmp/sample.srt',
+            sample_video_url: '/api/subtitles/assets/.style-lab-samples/sample.burned.mp4',
+            sample_srt_url: '/api/subtitles/assets/.style-lab-samples/sample.srt',
           },
         }),
       } as Response;
@@ -80,7 +95,7 @@ afterEach(() => {
   jest.resetAllMocks();
 });
 
-test('loads settings, edits numeric controls, debounces preview, renders preview image, and exposes actions', async () => {
+test('loads settings, edits numeric controls, debounces preview, renders preview image, and exposes save/reset/sample actions', async () => {
   const view = render(<SubtitleStyleLab />);
 
   expect(await view.findByText('字幕样式实验室')).toBeInTheDocument();
@@ -106,7 +121,7 @@ test('loads settings, edits numeric controls, debounces preview, renders preview
       body: expect.stringContaining('"font_size":56'),
     }),
   );
-  expect(await view.findByAltText('字幕样式预览')).toHaveAttribute('src', '/tmp/style-lab-preview.png');
+  expect(await view.findByAltText('字幕样式预览')).toHaveAttribute('src', '/api/subtitles/assets/.style-lab-previews/preview.png');
 
   await act(async () => {
     fireEvent.click(view.getByText('保存'));
@@ -118,4 +133,17 @@ test('loads settings, edits numeric controls, debounces preview, renders preview
       body: expect.stringContaining('"font_size":56'),
     }),
   );
+
+  await act(async () => {
+    fireEvent.click(view.getByTestId('sample-button'));
+  });
+  expect(global.fetch).toHaveBeenCalledWith(
+    '/api/subtitles/style-lab/sample',
+    expect.objectContaining({
+      method: 'POST',
+      body: expect.stringContaining('"font_size":56'),
+    }),
+  );
+  expect(await view.findByText('/tmp/sample.burned.mp4')).toBeInTheDocument();
+  expect(view.getByText('打开样片')).toHaveAttribute('href', '/api/subtitles/assets/.style-lab-samples/sample.burned.mp4');
 });

@@ -2,6 +2,7 @@ package servers
 
 import (
 	"encoding/json"
+	"net/url"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -263,10 +264,14 @@ func putSubtitleStyleLabSettings(writer http.ResponseWriter, r *http.Request) {
 
 func previewSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
 	cfg := configs.GetCurrentConfig()
+	_, libraryRoot, _ := getSubtitleRoots()
 	var body subtitle.StyleLabPreviewRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(writer, commonResp{ErrMsg: "无效请求"})
 		return
+	}
+	if body.OutputPreviewPath == "" {
+		body.OutputPreviewPath = filepath.Join(libraryRoot, ".style-lab-previews", "preview.png")
 	}
 	body.BurnStyle = mergeBurnStyle(cfg.Subtitle.BurnStyle, body.BurnStyle)
 
@@ -276,15 +281,23 @@ func previewSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(writer, commonResp{Data: response})
+	writeJSON(writer, commonResp{Data: map[string]any{
+		"preview_image_path": response.PreviewImagePath,
+		"preview_image_url":  buildSubtitleAssetURL(libraryRoot, response.PreviewImagePath),
+		"render_preset":      response.RenderPreset,
+	}})
 }
 
 func sampleSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
 	cfg := configs.GetCurrentConfig()
+	_, libraryRoot, _ := getSubtitleRoots()
 	var body subtitle.StyleLabSampleRequest
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		writeJSON(writer, commonResp{ErrMsg: "无效请求"})
 		return
+	}
+	if body.OutputDir == "" {
+		body.OutputDir = filepath.Join(libraryRoot, ".style-lab-samples")
 	}
 	body.BurnStyle = mergeBurnStyle(cfg.Subtitle.BurnStyle, body.BurnStyle)
 
@@ -294,7 +307,13 @@ func sampleSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(writer, commonResp{Data: response})
+	writeJSON(writer, commonResp{Data: map[string]any{
+		"sample_video_path": response.SampleVideoPath,
+		"sample_srt_path":   response.SampleSRTPath,
+		"sample_video_url":  buildSubtitleAssetURL(libraryRoot, response.SampleVideoPath),
+		"sample_srt_url":    buildSubtitleAssetURL(libraryRoot, response.SampleSRTPath),
+		"render_preset":     response.RenderPreset,
+	}})
 }
 
 func getSubtitleAsset(writer http.ResponseWriter, r *http.Request) {
@@ -330,6 +349,24 @@ func formatOptionalTime(t *time.Time) string {
 func fileExistsOnDisk(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func buildSubtitleAssetURL(libraryRoot string, absolutePath string) string {
+	if strings.TrimSpace(libraryRoot) == "" || strings.TrimSpace(absolutePath) == "" {
+		return ""
+	}
+	relativePath, err := filepath.Rel(libraryRoot, absolutePath)
+	if err != nil {
+		return ""
+	}
+	if relativePath == "." || strings.HasPrefix(relativePath, "..") {
+		return ""
+	}
+	parts := strings.Split(filepath.ToSlash(relativePath), "/")
+	for index, part := range parts {
+		parts[index] = url.PathEscape(part)
+	}
+	return "/api/subtitles/assets/" + strings.Join(parts, "/")
 }
 
 func mergeBurnStyle(base configs.SubtitleBurnStyle, override configs.SubtitleBurnStyle) configs.SubtitleBurnStyle {

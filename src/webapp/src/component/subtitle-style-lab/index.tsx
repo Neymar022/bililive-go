@@ -20,6 +20,20 @@ interface BurnStyle {
   shadow: number;
 }
 
+interface PreviewResponse {
+  preview_image_path: string;
+  preview_image_url?: string;
+  render_preset?: string;
+}
+
+interface SampleResponse {
+  sample_video_path: string;
+  sample_srt_path: string;
+  sample_video_url?: string;
+  sample_srt_url?: string;
+  render_preset?: string;
+}
+
 const defaultBurnStyle: BurnStyle = {
   preset: 'vizard_classic_cn',
   font_name: 'Noto Sans CJK SC',
@@ -48,10 +62,13 @@ const SubtitleStyleLab: React.FC = () => {
   const [savedStyle, setSavedStyle] = useState<BurnStyle>(defaultBurnStyle);
   const [sourcePath, setSourcePath] = useState('/tmp/source.mp4');
   const [previewText, setPreviewText] = useState('字幕样式实验室预览');
-  const [previewImagePath, setPreviewImagePath] = useState('');
+  const [previewImageUrl, setPreviewImageUrl] = useState('');
   const [loadingSettings, setLoadingSettings] = useState(true);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [saveLoading, setSaveLoading] = useState(false);
+  const [sampleLoading, setSampleLoading] = useState(false);
+  const [sampleResult, setSampleResult] = useState<SampleResponse | null>(null);
+  const [sampleError, setSampleError] = useState('');
 
   const previewBody = useMemo(() => ({
     source_path: sourcePath,
@@ -115,7 +132,8 @@ const SubtitleStyleLab: React.FC = () => {
           throw new Error(payload.err_msg || '生成预览失败');
         }
         if (!cancelled) {
-          setPreviewImagePath(payload.data?.preview_image_path || '');
+          const data = (payload.data || {}) as PreviewResponse;
+          setPreviewImageUrl(data.preview_image_url || data.preview_image_path || '');
         }
       } catch (error: any) {
         if (!cancelled) {
@@ -166,6 +184,32 @@ const SubtitleStyleLab: React.FC = () => {
     setStyle(savedStyle);
   };
 
+  const handleGenerateSample = async () => {
+    setSampleLoading(true);
+    setSampleError('');
+    try {
+      const response = await fetch('/api/subtitles/style-lab/sample', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          source_path: sourcePath,
+          sample_text: previewText,
+          burn_style: style,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.err_no !== 0) {
+        throw new Error(payload.err_msg || '生成测试样片失败');
+      }
+      setSampleResult(payload.data as SampleResponse);
+    } catch (error: any) {
+      setSampleError(error.message || '生成测试样片失败');
+      message.error(error.message || '生成测试样片失败');
+    } finally {
+      setSampleLoading(false);
+    }
+  };
+
   return (
     <div className="subtitle-style-lab-page">
       <div className="subtitle-style-lab-toolbar">
@@ -175,7 +219,9 @@ const SubtitleStyleLab: React.FC = () => {
         </div>
         <Space>
           <Button onClick={handleReset}>重置默认</Button>
-          <Button data-testid="sample-button">生成 30 秒测试样片</Button>
+          <Button data-testid="sample-button" loading={sampleLoading} onClick={handleGenerateSample}>
+            {sampleLoading ? '生成中...' : '生成 30 秒测试样片'}
+          </Button>
           <Button type="primary" loading={saveLoading} onClick={handleSave}>保存</Button>
         </Space>
       </div>
@@ -211,8 +257,8 @@ const SubtitleStyleLab: React.FC = () => {
         <Card title="实时预览" className="subtitle-style-lab-preview">
           {loadingSettings || previewLoading ? (
             <div className="subtitle-style-lab-spinner"><Spin /></div>
-          ) : previewImagePath ? (
-            <img className="subtitle-style-lab-image" src={previewImagePath} alt="字幕样式预览" />
+          ) : previewImageUrl ? (
+            <img className="subtitle-style-lab-image" src={previewImageUrl} alt="字幕样式预览" />
           ) : (
             <div className="subtitle-style-lab-empty">暂无预览</div>
           )}
@@ -227,6 +273,21 @@ const SubtitleStyleLab: React.FC = () => {
             <label htmlFor="style-preview-text">预览文案</label>
             <textarea id="style-preview-text" rows={6} value={previewText} onChange={event => setPreviewText(event.target.value)} />
           </div>
+          {sampleResult && (
+            <div className="subtitle-style-lab-sample-result">
+              <div><strong>样片路径</strong></div>
+              <Paragraph copyable>{sampleResult.sample_video_path}</Paragraph>
+              {sampleResult.sample_video_url && (
+                <a href={sampleResult.sample_video_url} target="_blank" rel="noopener noreferrer">打开样片</a>
+              )}
+              <div><strong>SRT 路径</strong></div>
+              <Paragraph copyable>{sampleResult.sample_srt_path}</Paragraph>
+              {sampleResult.sample_srt_url && (
+                <a href={sampleResult.sample_srt_url} target="_blank" rel="noopener noreferrer">打开字幕</a>
+              )}
+            </div>
+          )}
+          {sampleError && <div className="subtitle-style-lab-error">{sampleError}</div>}
           <Text type="secondary">预览自动防抖，样片生成保持手动触发。</Text>
         </Card>
       </div>
