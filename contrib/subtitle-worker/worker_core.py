@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
+from PIL import Image
 
 from renderers.vizard_renderer import probe_video_size, render_cue_png, resolve_render_preset
 
@@ -75,6 +76,64 @@ def build_public_file_url(file_path: str, source_root: str, public_url_base: str
 
 def build_burn_temp_dir(output_path: str) -> str:
     return str(Path(output_path).resolve().parent / ".subtitle-tmp")
+
+
+def extract_preview_frame(input_path: str, frame_path: str, ffmpeg_bin: str = "ffmpeg", at_seconds: float = 1.0) -> None:
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-ss",
+        f"{max(at_seconds, 0):.3f}",
+        "-i",
+        input_path,
+        "-frames:v",
+        "1",
+        frame_path,
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+
+def render_style_lab_preview(
+    source_path: str,
+    preview_text: str,
+    burn_style: dict[str, Any],
+    *,
+    output_preview_path: str | None = None,
+    frame_time_seconds: float = 1.0,
+    ffmpeg_bin: str = "ffmpeg",
+) -> dict[str, Any]:
+    preview_root = Path(output_preview_path).parent if output_preview_path else None
+    with tempfile.TemporaryDirectory(prefix="style-lab-preview-", dir=str(preview_root) if preview_root else None) as temp_dir:
+        temp_root = Path(temp_dir)
+        frame_path = temp_root / "frame.png"
+        cue_path = temp_root / "cue.png"
+
+        extract_preview_frame(source_path, str(frame_path), ffmpeg_bin=ffmpeg_bin, at_seconds=frame_time_seconds)
+
+        with Image.open(frame_path).convert("RGBA") as frame_image:
+            video_width, video_height = frame_image.size
+            render_result = render_cue_png(
+                preview_text,
+                str(cue_path),
+                video_width=video_width,
+                video_height=video_height,
+                preset_name=str(burn_style.get("preset", "vizard_classic_cn")),
+                font_name=str(burn_style.get("font_name", "Noto Sans CJK SC")),
+                font_size=int(burn_style.get("font_size", 24)),
+            )
+            with Image.open(cue_path).convert("RGBA") as cue_image:
+                preview = Image.alpha_composite(frame_image, cue_image)
+                if output_preview_path:
+                    output_path = Path(output_preview_path)
+                    output_path.parent.mkdir(parents=True, exist_ok=True)
+                else:
+                    output_path = temp_root / "preview.png"
+                preview.save(output_path, format="PNG")
+
+        return {
+            "preview_image_path": str(output_path),
+            "render_preset": render_result["preset"],
+        }
 
 
 def build_overlay_filter(segments: list[dict[str, Any]]) -> str:
