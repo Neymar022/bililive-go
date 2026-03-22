@@ -12,7 +12,8 @@ import {
     MenuUnfoldOutlined,
     LineChartOutlined,
     CloudUploadOutlined,
-    FileTextOutlined
+    FileTextOutlined,
+    BgColorsOutlined
 } from '@ant-design/icons';
 import './layout.css';
 
@@ -125,6 +126,11 @@ class RootLayout extends React.Component<Props, State> {
                                         key: 'recordings',
                                         icon: <FileTextOutlined />,
                                         label: <Link to="/recordings">录屏字幕</Link>,
+                                    },
+                                    {
+                                        key: 'subtitle-style-lab',
+                                        icon: <BgColorsOutlined />,
+                                        label: <Link to="/subtitle-style-lab">字幕样式实验室</Link>,
                                     },
                                     {
                                         key: '5',

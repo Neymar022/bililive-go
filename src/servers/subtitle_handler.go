@@ -24,6 +24,10 @@ func RegisterSubtitleHandlers(r *mux.Router) {
 	r.HandleFunc("/subtitles/records/{path:.*}/source", deleteSubtitleSource).Methods("DELETE")
 	r.HandleFunc("/subtitles/settings", getSubtitleSettings).Methods("GET")
 	r.HandleFunc("/subtitles/settings", putSubtitleSettings).Methods("PUT")
+	r.HandleFunc("/subtitles/style-lab/settings", getSubtitleStyleLabSettings).Methods("GET")
+	r.HandleFunc("/subtitles/style-lab/settings", putSubtitleStyleLabSettings).Methods("PUT")
+	r.HandleFunc("/subtitles/style-lab/preview", previewSubtitleStyleLab).Methods("POST")
+	r.HandleFunc("/subtitles/style-lab/sample", sampleSubtitleStyleLab).Methods("POST")
 	r.HandleFunc("/subtitles/assets/{path:.*}", getSubtitleAsset).Methods("GET")
 }
 
@@ -227,6 +231,42 @@ func putSubtitleSettings(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(writer, commonResp{Data: "OK"})
+}
+
+func getSubtitleStyleLabSettings(writer http.ResponseWriter, r *http.Request) {
+	cfg := configs.GetCurrentConfig()
+	writeJSON(writer, commonResp{Data: map[string]any{
+		"burn_style": cfg.Subtitle.BurnStyle,
+	}})
+}
+
+func putSubtitleStyleLabSettings(writer http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BurnStyle configs.SubtitleBurnStyle `json:"burn_style"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(writer, commonResp{ErrMsg: "无效请求"})
+		return
+	}
+
+	if _, err := configs.Update(func(c *configs.Config) error {
+		c.Subtitle.BurnStyle = body.BurnStyle
+		c.Subtitle.UpdatedAt = time.Now().UTC()
+		return c.Verify()
+	}); err != nil {
+		writeJSON(writer, commonResp{ErrMsg: err.Error()})
+		return
+	}
+
+	writeJSON(writer, commonResp{Data: "OK"})
+}
+
+func previewSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
+	writeJSON(writer, commonResp{ErrMsg: "字幕样式实验室预览暂未实现"})
+}
+
+func sampleSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
+	writeJSON(writer, commonResp{ErrMsg: "字幕样式实验室样片生成暂未实现"})
 }
 
 func getSubtitleAsset(writer http.ResponseWriter, r *http.Request) {

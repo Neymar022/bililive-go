@@ -20,6 +20,32 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestRegisterSubtitleHandlersIncludesStyleLabRoutes(t *testing.T) {
+	router := mux.NewRouter()
+	RegisterSubtitleHandlers(router)
+
+	testCases := []struct {
+		name   string
+		method string
+		path   string
+	}{
+		{name: "get settings", method: http.MethodGet, path: "/subtitles/style-lab/settings"},
+		{name: "put settings", method: http.MethodPut, path: "/subtitles/style-lab/settings"},
+		{name: "post preview", method: http.MethodPost, path: "/subtitles/style-lab/preview"},
+		{name: "post sample", method: http.MethodPost, path: "/subtitles/style-lab/sample"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			match := &mux.RouteMatch{}
+
+			assert.True(t, router.Match(req, match))
+			assert.NotNil(t, match.Handler)
+		})
+	}
+}
+
 func TestListSubtitleRecordsHandler(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := filepath.Join(t.TempDir(), "video")
@@ -149,6 +175,76 @@ func TestPutSubtitleSettingsHandler(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(content), "subtitle:")
 	assert.Contains(t, string(content), "retention_days: 14")
+}
+
+func TestGetSubtitleStyleLabSettingsHandler(t *testing.T) {
+	cfg := configs.NewConfig()
+	cfg.Subtitle.BurnStyle.Preset = "vizard_classic_cn"
+	cfg.Subtitle.BurnStyle.FontSize = 50
+	configs.SetCurrentConfig(cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/subtitles/style-lab/settings", nil)
+	recorder := httptest.NewRecorder()
+
+	getSubtitleStyleLabSettings(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var resp commonResp
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.ErrNo)
+
+	payload, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+
+	var data struct {
+		BurnStyle configs.SubtitleBurnStyle `json:"burn_style"`
+	}
+	require.NoError(t, json.Unmarshal(payload, &data))
+	assert.Equal(t, "vizard_classic_cn", data.BurnStyle.Preset)
+	assert.Equal(t, 50, data.BurnStyle.FontSize)
+}
+
+func TestPutSubtitleStyleLabSettingsHandler(t *testing.T) {
+	configFile := filepath.Join(t.TempDir(), "config.yml")
+	require.NoError(t, os.WriteFile(configFile, []byte("rpc:\n  enable: true\nlive_rooms: []\n"), 0o644))
+
+	cfg, err := configs.NewConfigWithFile(configFile)
+	require.NoError(t, err)
+	cfg.File = configFile
+	cfg.Subtitle.BurnStyle.Preset = "vizard_classic_cn"
+	cfg.Subtitle.BurnStyle.FontSize = 35
+	configs.SetCurrentConfig(cfg)
+
+	bodyBytes, err := json.Marshal(map[string]any{
+		"burn_style": map[string]any{
+			"preset":    "vizard_classic_cn",
+			"font_name": "Noto Sans CJK SC",
+			"font_size": 50,
+			"margin_v":  24,
+			"outline":   2,
+			"shadow":    0,
+		},
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPut, "/api/subtitles/style-lab/settings", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	putSubtitleStyleLabSettings(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var resp commonResp
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.ErrNo)
+
+	updated := configs.GetCurrentConfig()
+	require.NotNil(t, updated)
+	assert.Equal(t, 50, updated.Subtitle.BurnStyle.FontSize)
+
+	content, err := os.ReadFile(configFile)
+	require.NoError(t, err)
+	assert.Contains(t, string(content), "font_size: 50")
 }
 
 func TestRerunSubtitleRecordPreservesKeepSourceInSidecar(t *testing.T) {
