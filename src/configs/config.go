@@ -279,12 +279,19 @@ type SubtitleCloudConfig struct {
 }
 
 type SubtitleBurnStyle struct {
-	Preset   string `yaml:"preset" json:"preset"`
-	FontName string `yaml:"font_name" json:"font_name"`
-	FontSize int    `yaml:"font_size" json:"font_size"`
-	MarginV  int    `yaml:"margin_v" json:"margin_v"`
-	Outline  int    `yaml:"outline" json:"outline"`
-	Shadow   int    `yaml:"shadow" json:"shadow"`
+	Preset            string  `yaml:"preset" json:"preset"`
+	FontName          string  `yaml:"font_name" json:"font_name"`
+	FontSize          int     `yaml:"font_size" json:"font_size"`
+	CardWidth         int     `yaml:"card_width" json:"card_width"`
+	CardHeight        int     `yaml:"card_height" json:"card_height"`
+	BottomOffset      int     `yaml:"bottom_offset" json:"bottom_offset"`
+	BackgroundOpacity float64 `yaml:"background_opacity" json:"background_opacity"`
+	BorderOpacity     float64 `yaml:"border_opacity" json:"border_opacity"`
+	SingleLine        bool    `yaml:"single_line" json:"single_line"`
+	OverflowMode      string  `yaml:"overflow_mode" json:"overflow_mode"`
+	MarginV           int     `yaml:"margin_v" json:"margin_v"`
+	Outline           int     `yaml:"outline" json:"outline"`
+	Shadow            int     `yaml:"shadow" json:"shadow"`
 }
 
 func (s SubtitleBurnStyle) GetEffectivePreset() string {
@@ -772,12 +779,19 @@ var defaultConfig = Config{
 			Model:  "qwen3-asr-flash-filetrans",
 		},
 		BurnStyle: SubtitleBurnStyle{
-			Preset:   DefaultSubtitleRenderPreset,
-			FontName: "Noto Sans CJK SC",
-			FontSize: 24,
-			MarginV:  24,
-			Outline:  2,
-			Shadow:   0,
+			Preset:            DefaultSubtitleRenderPreset,
+			FontName:          "Noto Sans CJK SC",
+			FontSize:          50,
+			CardWidth:         1018,
+			CardHeight:        196,
+			BottomOffset:      640,
+			BackgroundOpacity: 0.9,
+			BorderOpacity:     0.08,
+			SingleLine:        true,
+			OverflowMode:      "ellipsis",
+			MarginV:           24,
+			Outline:           2,
+			Shadow:            0,
 		},
 	},
 	PlatformConfigs: map[string]PlatformConfig{},

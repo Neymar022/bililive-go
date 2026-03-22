@@ -143,6 +143,17 @@ func DecorateConfigNode(node *yaml.Node) {
 				`# 字幕卡片渲染预设
 # vizard_classic_cn: 当前默认的 Vizard 风格中文卡片
 # bottom_center 会自动兼容映射到 vizard_classic_cn`, "")
+			setFieldComment(burnStyleNode, "font_size", "# 字幕字号，供样式实验室和烧录任务共享", "")
+			setFieldComment(burnStyleNode, "card_width", "# 字幕卡片宽度（像素）", "")
+			setFieldComment(burnStyleNode, "card_height", "# 字幕卡片高度（像素）", "")
+			setFieldComment(burnStyleNode, "bottom_offset", "# 字幕卡片距底部的偏移量（像素）", "")
+			setFieldComment(burnStyleNode, "background_opacity", "# 字幕卡片背景透明度，范围 0-1", "")
+			setFieldComment(burnStyleNode, "border_opacity", "# 字幕卡片边框透明度，范围 0-1", "")
+			setFieldComment(burnStyleNode, "single_line", "# true 时强制单排显示，超长文本按 overflow_mode 处理", "")
+			setFieldComment(burnStyleNode, "overflow_mode",
+				`# 单排溢出策略
+# ellipsis: 截断并追加省略号
+# wrap: 自动换成双排`, "")
 		}
 	}
 }

@@ -22,6 +22,14 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Equal(t, "qwen3-asr-flash-filetrans", cfg.Subtitle.Cloud.Model)
 	assert.Equal(t, "zh", cfg.Subtitle.Language)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
+	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
+	assert.Equal(t, 1018, cfg.Subtitle.BurnStyle.CardWidth)
+	assert.Equal(t, 196, cfg.Subtitle.BurnStyle.CardHeight)
+	assert.Equal(t, 640, cfg.Subtitle.BurnStyle.BottomOffset)
+	assert.InDelta(t, 0.9, cfg.Subtitle.BurnStyle.BackgroundOpacity, 0.0001)
+	assert.InDelta(t, 0.08, cfg.Subtitle.BurnStyle.BorderOpacity, 0.0001)
+	assert.True(t, cfg.Subtitle.BurnStyle.SingleLine)
+	assert.Equal(t, "ellipsis", cfg.Subtitle.BurnStyle.OverflowMode)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.GetEffectivePreset())
 	assert.Equal(t, cfg.OutPutPath, cfg.Subtitle.GetEffectiveSourceRoot(cfg.OutPutPath))
 	assert.Equal(t, cfg.OutPutPath, cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath))
@@ -70,6 +78,13 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.LibraryRoot = filepath.Join(cfg.OutPutPath, "video")
 	cfg.Subtitle.RetentionDays = 14
 	cfg.Subtitle.BurnStyle.FontSize = 28
+	cfg.Subtitle.BurnStyle.CardWidth = 960
+	cfg.Subtitle.BurnStyle.CardHeight = 180
+	cfg.Subtitle.BurnStyle.BottomOffset = 520
+	cfg.Subtitle.BurnStyle.BackgroundOpacity = 0.76
+	cfg.Subtitle.BurnStyle.BorderOpacity = 0.04
+	cfg.Subtitle.BurnStyle.SingleLine = false
+	cfg.Subtitle.BurnStyle.OverflowMode = "wrap"
 	cfg.Subtitle.BurnStyle.MarginV = 32
 	cfg.Subtitle.UpdatedAt = time.Unix(1_763_200_000, 0).UTC()
 
@@ -89,6 +104,13 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.True(t, roundTripped.Subtitle.Enabled)
 	assert.Equal(t, 14, roundTripped.Subtitle.RetentionDays)
 	assert.Equal(t, 28, roundTripped.Subtitle.BurnStyle.FontSize)
+	assert.Equal(t, 960, roundTripped.Subtitle.BurnStyle.CardWidth)
+	assert.Equal(t, 180, roundTripped.Subtitle.BurnStyle.CardHeight)
+	assert.Equal(t, 520, roundTripped.Subtitle.BurnStyle.BottomOffset)
+	assert.InDelta(t, 0.76, roundTripped.Subtitle.BurnStyle.BackgroundOpacity, 0.0001)
+	assert.InDelta(t, 0.04, roundTripped.Subtitle.BurnStyle.BorderOpacity, 0.0001)
+	assert.False(t, roundTripped.Subtitle.BurnStyle.SingleLine)
+	assert.Equal(t, "wrap", roundTripped.Subtitle.BurnStyle.OverflowMode)
 	assert.Equal(t, 32, roundTripped.Subtitle.BurnStyle.MarginV)
 	assert.Equal(t, cfg.Subtitle.PublicURLBase, roundTripped.Subtitle.PublicURLBase)
 }

@@ -64,7 +64,14 @@ subtitle:
   burn_style:
     preset: vizard_classic_cn
     font_name: Noto Sans CJK SC
-    font_size: 24
+    font_size: 50
+    card_width: 1018
+    card_height: 196
+    bottom_offset: 640
+    background_opacity: 0.9
+    border_opacity: 0.08
+    single_line: true
+    overflow_mode: ellipsis
     margin_v: 24
     outline: 2
     shadow: 0
