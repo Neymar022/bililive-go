@@ -1,0 +1,56 @@
+.subtitle-style-lab-page {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 24px;
+}
+
+.subtitle-style-lab-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.subtitle-style-lab-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 320px) minmax(420px, 1fr) minmax(260px, 320px);
+  gap: 16px;
+}
+
+.subtitle-style-lab-panel,
+.subtitle-style-lab-preview {
+  min-height: 520px;
+}
+
+.subtitle-style-lab-field {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.subtitle-style-lab-field input,
+.subtitle-style-lab-field textarea {
+  width: 100%;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+}
+
+.subtitle-style-lab-spinner,
+.subtitle-style-lab-empty {
+  min-height: 460px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8c8c8c;
+}
+
+.subtitle-style-lab-image {
+  width: 100%;
+  border-radius: 12px;
+  border: 1px solid #f0f0f0;
+  display: block;
+}

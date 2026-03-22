@@ -17,6 +17,7 @@ jest.mock('./component/io-stats/index', () => () => <div>IO 统计页面</div>);
 jest.mock('./component/update-banner/index', () => () => <div>更新横幅</div>);
 jest.mock('./component/update-page/index', () => () => <div>更新页面</div>);
 jest.mock('./component/recordings-page/index', () => () => <div>录屏字幕页面</div>);
+jest.mock('./component/subtitle-style-lab/index', () => () => <div>字幕样式实验室</div>);
 
 afterEach(() => {
   jest.resetAllMocks();

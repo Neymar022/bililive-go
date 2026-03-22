@@ -11,8 +11,7 @@ import IOStats from './component/io-stats/index';
 import UpdateBanner from './component/update-banner/index';
 import UpdatePage from './component/update-page/index';
 import RecordingsPage from './component/recordings-page/index';
-
-const SubtitleStyleLabPlaceholder: React.FC = () => <div>字幕样式实验室</div>;
+import SubtitleStyleLab from './component/subtitle-style-lab/index';
 
 const App: React.FC = () => {
   return (
@@ -24,7 +23,7 @@ const App: React.FC = () => {
           <Route path="/iostats/*" element={<IOStats />} />
           <Route path="/tasks/*" element={<TaskPage />} />
           <Route path="/recordings/*" element={<RecordingsPage />} />
-          <Route path="/subtitle-style-lab/*" element={<SubtitleStyleLabPlaceholder />} />
+          <Route path="/subtitle-style-lab/*" element={<SubtitleStyleLab />} />
           <Route path="/fileList/*" element={<FileList />} />
           <Route path="/configInfo/*" element={<ConfigInfo />} />
           <Route path="/liveInfo" element={<LiveInfo />} />
