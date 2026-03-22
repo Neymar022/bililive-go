@@ -27,6 +27,34 @@ type ProcessResponse struct {
 	RenderPreset string    `json:"render_preset,omitempty"`
 }
 
+type StyleLabPreviewRequest struct {
+	SourcePath        string                    `json:"source_path"`
+	PreviewText       string                    `json:"preview_text"`
+	FrameTimeSeconds  float64                   `json:"frame_time_seconds,omitempty"`
+	OutputPreviewPath string                    `json:"output_preview_path,omitempty"`
+	BurnStyle         configs.SubtitleBurnStyle `json:"burn_style"`
+}
+
+type StyleLabPreviewResponse struct {
+	PreviewImagePath string `json:"preview_image_path"`
+	RenderPreset     string `json:"render_preset,omitempty"`
+}
+
+type StyleLabSampleRequest struct {
+	SourcePath       string                    `json:"source_path"`
+	SampleText       string                    `json:"sample_text"`
+	StartTimeSeconds float64                   `json:"start_time_seconds,omitempty"`
+	DurationSeconds  float64                   `json:"duration_seconds,omitempty"`
+	OutputDir        string                    `json:"output_dir,omitempty"`
+	BurnStyle        configs.SubtitleBurnStyle `json:"burn_style"`
+}
+
+type StyleLabSampleResponse struct {
+	SampleVideoPath string `json:"sample_video_path"`
+	SampleSRTPath   string `json:"sample_srt_path"`
+	RenderPreset    string `json:"render_preset,omitempty"`
+}
+
 func ResolveRenderPreset(requestedPreset, storedPreset string, style configs.SubtitleBurnStyle) string {
 	if requestedPreset != "" {
 		return configs.SubtitleBurnStyle{Preset: requestedPreset}.GetEffectivePreset()
@@ -38,14 +66,28 @@ func ResolveRenderPreset(requestedPreset, storedPreset string, style configs.Sub
 }
 
 func ProcessFile(workerURL string, req ProcessRequest) (ProcessResponse, error) {
-	var response ProcessResponse
 	req.BurnStyle.Preset = req.BurnStyle.GetEffectivePreset()
+	return postToWorker[ProcessResponse](workerURL, "/api/v1/process", req)
+}
+
+func PreviewStyle(workerURL string, req StyleLabPreviewRequest) (StyleLabPreviewResponse, error) {
+	req.BurnStyle.Preset = req.BurnStyle.GetEffectivePreset()
+	return postToWorker[StyleLabPreviewResponse](workerURL, "/api/v1/style-lab/preview", req)
+}
+
+func GenerateStyleSample(workerURL string, req StyleLabSampleRequest) (StyleLabSampleResponse, error) {
+	req.BurnStyle.Preset = req.BurnStyle.GetEffectivePreset()
+	return postToWorker[StyleLabSampleResponse](workerURL, "/api/v1/style-lab/sample", req)
+}
+
+func postToWorker[T any](workerURL string, path string, req any) (T, error) {
+	var response T
 	body, err := json.Marshal(req)
 	if err != nil {
 		return response, err
 	}
 
-	httpReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(workerURL, "/")+"/api/v1/process", bytes.NewReader(body))
+	httpReq, err := http.NewRequest(http.MethodPost, strings.TrimRight(workerURL, "/")+path, bytes.NewReader(body))
 	if err != nil {
 		return response, err
 	}

@@ -262,11 +262,39 @@ func putSubtitleStyleLabSettings(writer http.ResponseWriter, r *http.Request) {
 }
 
 func previewSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
-	writeJSON(writer, commonResp{ErrMsg: "字幕样式实验室预览暂未实现"})
+	cfg := configs.GetCurrentConfig()
+	var body subtitle.StyleLabPreviewRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(writer, commonResp{ErrMsg: "无效请求"})
+		return
+	}
+	body.BurnStyle = mergeBurnStyle(cfg.Subtitle.BurnStyle, body.BurnStyle)
+
+	response, err := subtitle.PreviewStyle(cfg.Subtitle.GetWorkerURL(), body)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrMsg: err.Error()})
+		return
+	}
+
+	writeJSON(writer, commonResp{Data: response})
 }
 
 func sampleSubtitleStyleLab(writer http.ResponseWriter, r *http.Request) {
-	writeJSON(writer, commonResp{ErrMsg: "字幕样式实验室样片生成暂未实现"})
+	cfg := configs.GetCurrentConfig()
+	var body subtitle.StyleLabSampleRequest
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		writeJSON(writer, commonResp{ErrMsg: "无效请求"})
+		return
+	}
+	body.BurnStyle = mergeBurnStyle(cfg.Subtitle.BurnStyle, body.BurnStyle)
+
+	response, err := subtitle.GenerateStyleSample(cfg.Subtitle.GetWorkerURL(), body)
+	if err != nil {
+		writeJSON(writer, commonResp{ErrMsg: err.Error()})
+		return
+	}
+
+	writeJSON(writer, commonResp{Data: response})
 }
 
 func getSubtitleAsset(writer http.ResponseWriter, r *http.Request) {
@@ -302,4 +330,48 @@ func formatOptionalTime(t *time.Time) string {
 func fileExistsOnDisk(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func mergeBurnStyle(base configs.SubtitleBurnStyle, override configs.SubtitleBurnStyle) configs.SubtitleBurnStyle {
+	merged := base
+	if override.Preset != "" {
+		merged.Preset = override.Preset
+	}
+	if override.FontName != "" {
+		merged.FontName = override.FontName
+	}
+	if override.FontSize != 0 {
+		merged.FontSize = override.FontSize
+	}
+	if override.CardWidth != 0 {
+		merged.CardWidth = override.CardWidth
+	}
+	if override.CardHeight != 0 {
+		merged.CardHeight = override.CardHeight
+	}
+	if override.BottomOffset != 0 {
+		merged.BottomOffset = override.BottomOffset
+	}
+	if override.BackgroundOpacity != 0 {
+		merged.BackgroundOpacity = override.BackgroundOpacity
+	}
+	if override.BorderOpacity != 0 {
+		merged.BorderOpacity = override.BorderOpacity
+	}
+	if override.SingleLine != base.SingleLine {
+		merged.SingleLine = override.SingleLine
+	}
+	if override.OverflowMode != "" {
+		merged.OverflowMode = override.OverflowMode
+	}
+	if override.MarginV != 0 {
+		merged.MarginV = override.MarginV
+	}
+	if override.Outline != 0 {
+		merged.Outline = override.Outline
+	}
+	if override.Shadow != 0 {
+		merged.Shadow = override.Shadow
+	}
+	return merged
 }

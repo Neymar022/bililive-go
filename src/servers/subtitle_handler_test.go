@@ -247,6 +247,109 @@ func TestPutSubtitleStyleLabSettingsHandler(t *testing.T) {
 	assert.Contains(t, string(content), "font_size: 50")
 }
 
+func TestPreviewSubtitleStyleLabHandler(t *testing.T) {
+	var workerRequest subtitle.StyleLabPreviewRequest
+	worker := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		require.Equal(t, "/api/v1/style-lab/preview", req.URL.Path)
+		require.NoError(t, json.NewDecoder(req.Body).Decode(&workerRequest))
+		writer.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(writer).Encode(subtitle.StyleLabPreviewResponse{
+			PreviewImagePath: "/tmp/preview.png",
+			RenderPreset:     "vizard_classic_cn",
+		}))
+	}))
+	t.Cleanup(worker.Close)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	cfg := configs.NewConfig()
+	cfg.Subtitle.BurnStyle.Preset = "bottom_center"
+	configs.SetCurrentConfig(cfg)
+
+	bodyBytes, err := json.Marshal(map[string]any{
+		"source_path":  "/tmp/source.mp4",
+		"preview_text": "测试预览",
+		"burn_style": map[string]any{
+			"preset":    "bottom_center",
+			"font_name": "Noto Sans CJK SC",
+			"font_size": 50,
+		},
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subtitles/style-lab/preview", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	previewSubtitleStyleLab(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var resp commonResp
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.ErrNo)
+	payload, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+
+	var data subtitle.StyleLabPreviewResponse
+	require.NoError(t, json.Unmarshal(payload, &data))
+	assert.Equal(t, "/tmp/preview.png", data.PreviewImagePath)
+	assert.Equal(t, "vizard_classic_cn", workerRequest.BurnStyle.Preset)
+	assert.Equal(t, "测试预览", workerRequest.PreviewText)
+}
+
+func TestSampleSubtitleStyleLabHandler(t *testing.T) {
+	var workerRequest subtitle.StyleLabSampleRequest
+	worker := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
+		require.Equal(t, "/api/v1/style-lab/sample", req.URL.Path)
+		require.NoError(t, json.NewDecoder(req.Body).Decode(&workerRequest))
+		writer.Header().Set("Content-Type", "application/json")
+		require.NoError(t, json.NewEncoder(writer).Encode(subtitle.StyleLabSampleResponse{
+			SampleVideoPath: "/tmp/sample.burned.mp4",
+			SampleSRTPath:   "/tmp/sample.srt",
+			RenderPreset:    "vizard_classic_cn",
+		}))
+	}))
+	t.Cleanup(worker.Close)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	cfg := configs.NewConfig()
+	cfg.Subtitle.BurnStyle.Preset = "bottom_center"
+	configs.SetCurrentConfig(cfg)
+
+	bodyBytes, err := json.Marshal(map[string]any{
+		"source_path":          "/tmp/source.mp4",
+		"sample_text":          "测试样片",
+		"duration_seconds":     30,
+		"start_time_seconds":   5,
+		"output_dir":           "/tmp/.style-lab-samples",
+		"burn_style": map[string]any{
+			"preset":    "bottom_center",
+			"font_name": "Noto Sans CJK SC",
+			"font_size": 50,
+		},
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/subtitles/style-lab/sample", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	sampleSubtitleStyleLab(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var resp commonResp
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &resp))
+	require.Equal(t, 0, resp.ErrNo)
+	payload, err := json.Marshal(resp.Data)
+	require.NoError(t, err)
+
+	var data subtitle.StyleLabSampleResponse
+	require.NoError(t, json.Unmarshal(payload, &data))
+	assert.Equal(t, "/tmp/sample.burned.mp4", data.SampleVideoPath)
+	assert.Equal(t, "/tmp/sample.srt", data.SampleSRTPath)
+	assert.Equal(t, "vizard_classic_cn", workerRequest.BurnStyle.Preset)
+	assert.Equal(t, "测试样片", workerRequest.SampleText)
+}
+
 func TestRerunSubtitleRecordPreservesKeepSourceInSidecar(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := filepath.Join(t.TempDir(), "video")
