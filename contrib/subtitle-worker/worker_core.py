@@ -136,6 +136,69 @@ def render_style_lab_preview(
         }
 
 
+def build_style_lab_sample_dir(source_path: str, output_dir: str | None = None) -> Path:
+    if output_dir:
+        return Path(output_dir).resolve()
+    return Path(source_path).resolve().parent / ".style-lab-samples"
+
+
+def generate_style_lab_sample(
+    source_path: str,
+    sample_text: str,
+    burn_style: dict[str, Any],
+    *,
+    output_dir: str | None = None,
+    start_time_seconds: float = 0,
+    duration_seconds: float = 30,
+    ffmpeg_bin: str = "ffmpeg",
+) -> dict[str, Any]:
+    sample_dir = build_style_lab_sample_dir(source_path, output_dir=output_dir)
+    sample_dir.mkdir(parents=True, exist_ok=True)
+
+    clip_path = sample_dir / "sample.clip.mp4"
+    srt_path = sample_dir / "sample.srt"
+    video_path = sample_dir / "sample.burned.mp4"
+    duration_ms = max(int(duration_seconds * 1000), 1)
+    segments = [
+        {
+            "index": 1,
+            "start_ms": 0,
+            "end_ms": duration_ms,
+            "text": sample_text.strip() or "字幕样式实验室测试样片",
+        }
+    ]
+
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-ss",
+        f"{max(start_time_seconds, 0):.3f}",
+        "-i",
+        source_path,
+        "-t",
+        f"{max(duration_seconds, 0):.3f}",
+        "-c",
+        "copy",
+        str(clip_path),
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+
+    srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
+    render_preset = burn_subtitles(
+        str(clip_path),
+        str(srt_path),
+        str(video_path),
+        burn_style,
+        ffmpeg_bin=ffmpeg_bin,
+        segments=segments,
+    )
+    return {
+        "sample_video_path": str(video_path),
+        "sample_srt_path": str(srt_path),
+        "render_preset": render_preset,
+    }
+
+
 def build_overlay_filter(segments: list[dict[str, Any]]) -> str:
     if not segments:
         return "[0:v]copy[outv]"
