@@ -18,7 +18,7 @@ class DockerReleaseTargetsTest(unittest.TestCase):
         self.assertIn("type=raw,value=latest", text)
         self.assertIn("platforms: linux/amd64,linux/arm64", text)
         self.assertIn("workflow_dispatch:", text)
-        self.assertIn("ref:", text)
+        self.assertIn("github.event.inputs.ref", text)
         self.assertNotIn("chigusa/bililive-go", text)
 
     def test_default_branch_publish_workflow_uses_buildx_and_hub_login(self) -> None:
