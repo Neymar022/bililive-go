@@ -1,11 +1,10 @@
 import os
 from typing import Any
-from typing import Optional
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from worker_core import generate_style_lab_sample, render_style_lab_preview, transcribe_and_burn
+from worker_core import transcribe_and_burn
 
 
 class BurnStyle(BaseModel):
@@ -34,23 +33,6 @@ class ProcessRequest(BaseModel):
     record_meta: dict[str, Any] = Field(default_factory=dict)
 
 
-class StyleLabPreviewRequest(BaseModel):
-    source_path: str
-    preview_text: str = "字幕样式实验室预览"
-    frame_time_seconds: float = 1.0
-    output_preview_path: Optional[str] = None
-    burn_style: BurnStyle = Field(default_factory=BurnStyle)
-
-
-class StyleLabSampleRequest(BaseModel):
-    source_path: str
-    sample_text: str = "字幕样式实验室测试样片"
-    start_time_seconds: float = 0
-    duration_seconds: float = 30
-    output_dir: Optional[str] = None
-    burn_style: BurnStyle = Field(default_factory=BurnStyle)
-
-
 app = FastAPI(title="bililive-go subtitle worker")
 
 
@@ -77,37 +59,6 @@ def process(req: ProcessRequest) -> dict[str, Any]:
             dashscope_model=os.getenv("SUBTITLE_DASHSCOPE_MODEL", "qwen3-asr-flash-filetrans"),
             local_model=os.getenv("SUBTITLE_LOCAL_MODEL", "small"),
             local_compute_type=os.getenv("SUBTITLE_LOCAL_COMPUTE_TYPE", "int8"),
-        )
-    except Exception as exc:  # pragma: no cover - FastAPI handles serialization
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/style-lab/preview")
-def style_lab_preview(req: StyleLabPreviewRequest) -> dict[str, Any]:
-    try:
-        return render_style_lab_preview(
-            source_path=req.source_path,
-            preview_text=req.preview_text,
-            burn_style=req.burn_style.model_dump(),
-            output_preview_path=req.output_preview_path,
-            frame_time_seconds=req.frame_time_seconds,
-            ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
-        )
-    except Exception as exc:  # pragma: no cover - FastAPI handles serialization
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
-
-@app.post("/api/v1/style-lab/sample")
-def style_lab_sample(req: StyleLabSampleRequest) -> dict[str, Any]:
-    try:
-        return generate_style_lab_sample(
-            source_path=req.source_path,
-            sample_text=req.sample_text,
-            burn_style=req.burn_style.model_dump(),
-            output_dir=req.output_dir,
-            start_time_seconds=req.start_time_seconds,
-            duration_seconds=min(req.duration_seconds, 30),
-            ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
         )
     except Exception as exc:  # pragma: no cover - FastAPI handles serialization
         raise HTTPException(status_code=500, detail=str(exc)) from exc

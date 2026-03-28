@@ -1,13 +1,25 @@
 #docker build -t bililive-go:build . -f Dockerfile.build-and-run 
-FROM golang:1.25.0-bullseye AS builder
+FROM golang:1.25.0 AS builder
 
 WORKDIR /build
 
-#安装tar解压xz需要的xz-utils和构建web页面所需的yarn
-RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -  && \
-    echo "deb https://dl.yarnpkg.com/debian/ stable main" | tee /etc/apt/sources.list.d/yarn.list  && \
-    apt-get update  && \
-    apt-get install -y yarn  xz-utils
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
+ARG YARN_REGISTRY=https://registry.yarnpkg.com
+ARG YARN_NETWORK_TIMEOUT=600000
+
+ENV HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    no_proxy=${NO_PROXY}
+
+# 安装解压 node.tar.xz 所需工具
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates wget xz-utils && \
+    rm -rf /var/lib/apt/lists/*
 
 
 #根据架构安装构建web页面所需的node.js
@@ -19,35 +31,51 @@ RUN ARCH=$(uname -m) && \
     else \
     echo '不支持的架构: $ARCH'; \
     fi && \
-    wget https://nodejs.org/dist/v18.20.3/node-v18.20.3-linux-${NODE_ARCH}.tar.xz && \
-    tar Jxvf /build/node-v18.20.3-linux-${NODE_ARCH}.tar.xz && \
+    wget https://nodejs.org/dist/v20.20.1/node-v20.20.1-linux-${NODE_ARCH}.tar.xz && \
+    tar Jxvf /build/node-v20.20.1-linux-${NODE_ARCH}.tar.xz && \
     rm -rf /usr/bin/node /usr/bin/npm && \
-    ln -s /build/node-v18.20.3-linux-${NODE_ARCH}/bin/node /usr/bin/node && \
-    ln -s /build/node-v18.20.3-linux-${NODE_ARCH}/bin/npm /usr/bin/npm
+    ln -s /build/node-v20.20.1-linux-${NODE_ARCH}/bin/node /usr/bin/node && \
+    ln -s /build/node-v20.20.1-linux-${NODE_ARCH}/bin/npm /usr/bin/npm && \
+    ln -s /build/node-v20.20.1-linux-${NODE_ARCH}/bin/corepack /usr/bin/corepack && \
+    corepack enable && \
+    corepack prepare yarn@1.22.22 --activate
 
 COPY . .
 
+RUN yarn config set registry "$YARN_REGISTRY" && \
+    yarn config set network-timeout "$YARN_NETWORK_TIMEOUT"
+
 #配置golang编译环境并进行构建
-RUN go env -w GO111MODULE=on && \
+RUN go env -w GO111MODULE=on GOPROXY=https://goproxy.cn,direct GOSUMDB=sum.golang.google.cn && \
     make build-web && \
-    make
+    make build
 
-RUN sh -c "/build/bin/bililive* --version"
+RUN sh -c 'set -eu; BIN="$(find /build/bin -maxdepth 1 -type f -name "bililive-linux-*" | head -n 1)"; [ -n "$BIN" ]; "$BIN" --version'
 
 
-FROM ubuntu:22.04
+FROM python:3.12-slim
 
 ARG tag
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG NO_PROXY
 
 ENV WORKDIR="/srv/bililive"
 ENV OUTPUT_DIR="/srv/bililive" \
     CONF_DIR="/etc/bililive-go" \
     PORT=8080
 
-ENV PUID=0 PGID=0 UMASK=022
+ENV PUID=0 PGID=0 UMASK=022 \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    NO_PROXY=${NO_PROXY} \
+    http_proxy=${HTTP_PROXY} \
+    https_proxy=${HTTPS_PROXY} \
+    no_proxy=${NO_PROXY}
 
 RUN mkdir -p $OUTPUT_DIR && \
     mkdir -p $CONF_DIR && \
+    mkdir -p /opt/bililive/tools && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ffmpeg \
@@ -67,6 +95,9 @@ COPY --from=builder /build/bin/bililive* /usr/bin/bililive-go
 
 
 COPY config.docker.yml $CONF_DIR/config.yml
+COPY docker-context/tools/ /opt/bililive/tools/
+RUN find /opt/bililive/tools -name '.gitkeep' -delete 2>/dev/null || true && \
+    find /opt/bililive/tools -name '*.sh' -exec chmod +x {} +
 
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

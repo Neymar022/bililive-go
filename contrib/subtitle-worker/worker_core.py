@@ -10,9 +10,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 import requests
-from PIL import Image
 
-from renderers.vizard_renderer import probe_video_size, render_cue_png, resolve_render_preset
+from ass_generator import build_ass_document, normalize_render_preset, probe_video_size
 
 
 DEFAULT_DASHSCOPE_BASE_URL = "https://dashscope.aliyuncs.com"
@@ -57,15 +56,8 @@ def segments_to_api_payload(segments: list[dict[str, Any]]) -> list[dict[str, An
     return payload
 
 
-def build_force_style(style: dict[str, Any]) -> str:
-    entries = {
-        "FontName": style.get("font_name", "Noto Sans CJK SC"),
-        "FontSize": style.get("font_size", 24),
-        "MarginV": style.get("margin_v", 24),
-        "Outline": style.get("outline", 2),
-        "Shadow": style.get("shadow", 0),
-    }
-    return ",".join(f"{key}={value}" for key, value in entries.items())
+def derive_ass_path(output_srt_path: str) -> str:
+    return str(Path(output_srt_path).with_suffix(".ass"))
 
 
 def build_public_file_url(file_path: str, source_root: str, public_url_base: str) -> str:
@@ -76,146 +68,6 @@ def build_public_file_url(file_path: str, source_root: str, public_url_base: str
 
 def build_burn_temp_dir(output_path: str) -> str:
     return str(Path(output_path).resolve().parent / ".subtitle-tmp")
-
-
-def extract_preview_frame(input_path: str, frame_path: str, ffmpeg_bin: str = "ffmpeg", at_seconds: float = 1.0) -> None:
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-ss",
-        f"{max(at_seconds, 0):.3f}",
-        "-i",
-        input_path,
-        "-frames:v",
-        "1",
-        frame_path,
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-
-
-def render_style_lab_preview(
-    source_path: str,
-    preview_text: str,
-    burn_style: dict[str, Any],
-    *,
-    output_preview_path: str | None = None,
-    frame_time_seconds: float = 1.0,
-    ffmpeg_bin: str = "ffmpeg",
-) -> dict[str, Any]:
-    preview_root = Path(output_preview_path).parent if output_preview_path else None
-    if preview_root is not None:
-        preview_root.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="style-lab-preview-", dir=str(preview_root) if preview_root else None) as temp_dir:
-        temp_root = Path(temp_dir)
-        frame_path = temp_root / "frame.png"
-        cue_path = temp_root / "cue.png"
-
-        extract_preview_frame(source_path, str(frame_path), ffmpeg_bin=ffmpeg_bin, at_seconds=frame_time_seconds)
-
-        with Image.open(frame_path).convert("RGBA") as frame_image:
-            video_width, video_height = frame_image.size
-            render_result = render_cue_png(
-                preview_text,
-                str(cue_path),
-                video_width=video_width,
-                video_height=video_height,
-                preset_name=str(burn_style.get("preset", "vizard_classic_cn")),
-                font_name=str(burn_style.get("font_name", "Noto Sans CJK SC")),
-                font_size=int(burn_style.get("font_size", 24)),
-            )
-            with Image.open(cue_path).convert("RGBA") as cue_image:
-                preview = Image.alpha_composite(frame_image, cue_image)
-                if output_preview_path:
-                    output_path = Path(output_preview_path)
-                    output_path.parent.mkdir(parents=True, exist_ok=True)
-                else:
-                    output_path = temp_root / "preview.png"
-                preview.save(output_path, format="PNG")
-
-        return {
-            "preview_image_path": str(output_path),
-            "render_preset": render_result["preset"],
-        }
-
-
-def build_style_lab_sample_dir(source_path: str, output_dir: str | None = None) -> Path:
-    if output_dir:
-        return Path(output_dir).resolve()
-    return Path(source_path).resolve().parent / ".style-lab-samples"
-
-
-def generate_style_lab_sample(
-    source_path: str,
-    sample_text: str,
-    burn_style: dict[str, Any],
-    *,
-    output_dir: str | None = None,
-    start_time_seconds: float = 0,
-    duration_seconds: float = 30,
-    ffmpeg_bin: str = "ffmpeg",
-) -> dict[str, Any]:
-    sample_dir = build_style_lab_sample_dir(source_path, output_dir=output_dir)
-    sample_dir.mkdir(parents=True, exist_ok=True)
-
-    clip_path = sample_dir / "sample.clip.mp4"
-    srt_path = sample_dir / "sample.srt"
-    video_path = sample_dir / "sample.burned.mp4"
-    duration_ms = max(int(duration_seconds * 1000), 1)
-    segments = [
-        {
-            "index": 1,
-            "start_ms": 0,
-            "end_ms": duration_ms,
-            "text": sample_text.strip() or "字幕样式实验室测试样片",
-        }
-    ]
-
-    cmd = [
-        ffmpeg_bin,
-        "-y",
-        "-ss",
-        f"{max(start_time_seconds, 0):.3f}",
-        "-i",
-        source_path,
-        "-t",
-        f"{max(duration_seconds, 0):.3f}",
-        "-c",
-        "copy",
-        str(clip_path),
-    ]
-    subprocess.run(cmd, check=True, capture_output=True)
-
-    srt_path.write_text(segments_to_srt(segments), encoding="utf-8")
-    render_preset = burn_subtitles(
-        str(clip_path),
-        str(srt_path),
-        str(video_path),
-        burn_style,
-        ffmpeg_bin=ffmpeg_bin,
-        segments=segments,
-    )
-    return {
-        "sample_video_path": str(video_path),
-        "sample_srt_path": str(srt_path),
-        "render_preset": render_preset,
-    }
-
-
-def build_overlay_filter(segments: list[dict[str, Any]]) -> str:
-    if not segments:
-        return "[0:v]copy[outv]"
-
-    filter_parts: list[str] = []
-    current_label = "[0:v]"
-    for index, segment in enumerate(segments, start=1):
-        next_label = "[outv]" if index == len(segments) else f"[v{index}]"
-        start_seconds = max(float(segment["start_ms"]) / 1000, 0)
-        end_seconds = max(float(segment["end_ms"]) / 1000, start_seconds)
-        filter_parts.append(
-            f"{current_label}[{index}:v]overlay=0:0:enable='between(t,{start_seconds:.3f},{end_seconds:.3f})'{next_label}"
-        )
-        current_label = next_label
-    return ";".join(filter_parts)
 
 
 def normalize_dashscope_base_url(base_url: str) -> str:
@@ -299,12 +151,10 @@ def extract_audio(input_path: str, audio_path: str, ffmpeg_bin: str = "ffmpeg") 
 
 def burn_subtitles(
     input_path: str,
-    subtitle_path: str,
+    ass_path: str,
     output_path: str,
     style: dict[str, Any],
     ffmpeg_bin: str = "ffmpeg",
-    *,
-    segments: Optional[list[dict[str, Any]]] = None,
 ) -> str:
     output_dir = os.path.dirname(output_path) or "."
     os.makedirs(output_dir, exist_ok=True)
@@ -313,59 +163,20 @@ def burn_subtitles(
     with tempfile.NamedTemporaryFile(prefix="subtitle-burn-", suffix=Path(output_path).suffix, dir=temp_dir, delete=False) as tmp:
         temp_output = tmp.name
 
-    resolved_preset = resolve_render_preset(style.get("preset"))
-
-    cue_paths: list[str] = []
-    if resolved_preset == "vizard_classic_cn" and segments:
-        video_width, video_height = probe_video_size(input_path)
-        for segment in segments:
-            cue_path = Path(temp_dir) / f"cue-{int(segment.get('index', len(cue_paths) + 1)):04d}.png"
-            render_cue_png(
-                str(segment.get("text", "")),
-                str(cue_path),
-                video_width=video_width,
-                video_height=video_height,
-                preset_name=resolved_preset,
-                font_name=str(style.get("font_name", "Noto Sans CJK SC")),
-                font_size=int(style.get("font_size", 24)),
-            )
-            cue_paths.append(str(cue_path))
-
-        cmd = [ffmpeg_bin, "-y", "-i", input_path]
-        for cue_path in cue_paths:
-            cmd.extend(["-i", cue_path])
-        cmd.extend(
-            [
-                "-filter_complex",
-                build_overlay_filter(segments),
-                "-map",
-                "[outv]",
-                "-map",
-                "0:a?",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "copy",
-                temp_output,
-            ]
-        )
-    else:
-        escaped_subtitle = subtitle_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", r"\'")
-        force_style = build_force_style(style).replace("'", r"\'")
-        filter_arg = f"subtitles='{escaped_subtitle}':force_style='{force_style}'"
-        cmd = [
-            ffmpeg_bin,
-            "-y",
-            "-i",
-            input_path,
-            "-vf",
-            filter_arg,
-            "-c:a",
-            "copy",
-            temp_output,
-        ]
+    resolved_preset = normalize_render_preset(style.get("preset"))
+    escaped_subtitle = ass_path.replace("\\", "\\\\").replace(":", "\\:").replace("'", r"\'")
+    filter_arg = f"subtitles='{escaped_subtitle}'"
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-i",
+        input_path,
+        "-vf",
+        filter_arg,
+        "-c:a",
+        "copy",
+        temp_output,
+    ]
     try:
         subprocess.run(cmd, check=True, capture_output=True)
         os.replace(temp_output, output_path)
@@ -503,18 +314,27 @@ def transcribe_and_burn(
         else:
             raise RuntimeError(f"不支持的字幕 provider: {provider}")
 
+        video_width, video_height = probe_video_size(source_path)
+        ass_content, segments = build_ass_document(
+            segments,
+            video_width=video_width,
+            video_height=video_height,
+            burn_style=burn_style,
+        )
+        ass_path = derive_ass_path(output_srt_path)
+        Path(ass_path).write_text(ass_content, encoding="utf-8")
         srt_content = segments_to_srt(segments)
         Path(output_srt_path).write_text(srt_content, encoding="utf-8")
         render_preset = burn_subtitles(
             source_path,
-            output_srt_path,
+            ass_path,
             output_video_path,
             burn_style,
             ffmpeg_bin=ffmpeg_bin,
-            segments=segments,
         )
         return {
             "segments": segments_to_api_payload(segments),
+            "ass_path": ass_path,
             "render_preset": render_preset,
         }
     finally:
