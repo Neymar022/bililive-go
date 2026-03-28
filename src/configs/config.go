@@ -310,6 +310,7 @@ type SubtitleConfig struct {
 	DefaultProvider string              `yaml:"default_provider" json:"default_provider"`
 	SourceRoot      string              `yaml:"source_root,omitempty" json:"source_root,omitempty"`
 	LibraryRoot     string              `yaml:"library_root,omitempty" json:"library_root,omitempty"`
+	SyncCommand     string              `yaml:"sync_command,omitempty" json:"sync_command,omitempty"`
 	PublicURLBase   string              `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
 	RetentionDays   int                 `yaml:"retention_days" json:"retention_days"`
 	Language        string              `yaml:"language" json:"language"`
@@ -333,11 +334,39 @@ func (s SubtitleConfig) GetEffectiveLibraryRoot(outPutPath string) string {
 	return outPutPath
 }
 
+func (s SubtitleConfig) NeedsLibrarySync(outPutPath string) bool {
+	sourceRoot := filepath.Clean(s.GetEffectiveSourceRoot(outPutPath))
+	libraryRoot := filepath.Clean(s.GetEffectiveLibraryRoot(outPutPath))
+	return sourceRoot != libraryRoot
+}
+
 func (s SubtitleConfig) GetWorkerURL() string {
 	if workerURL := strings.TrimSpace(os.Getenv("SUBTITLE_WORKER_URL")); workerURL != "" {
 		return workerURL
 	}
 	return DefaultSubtitleWorkerURL
+}
+
+func (c *Config) GetEffectiveSubtitleSyncCommand() string {
+	if c == nil {
+		return ""
+	}
+	if command := strings.TrimSpace(c.Subtitle.SyncCommand); command != "" {
+		return command
+	}
+	candidates := []string{}
+	if toolFolder := strings.TrimSpace(c.ReadOnlyToolFolder); toolFolder != "" {
+		candidates = append(candidates, filepath.Join(toolFolder, "bililive_sync_library.sh"))
+	}
+	if toolFolder := strings.TrimSpace(c.ToolRootFolder); toolFolder != "" {
+		candidates = append(candidates, filepath.Join(toolFolder, "bililive_sync_library.sh"))
+	}
+	for _, candidate := range candidates {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+	}
+	return ""
 }
 
 func (s SubtitleConfig) Verify(outPutPath string) error {

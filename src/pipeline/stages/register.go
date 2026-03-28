@@ -11,6 +11,12 @@ func RegisterBuiltinStages(executor *pipeline.Executor) {
 	// MP4 转换
 	executor.RegisterStage(pipeline.StageNameConvertMp4, NewConvertMp4Stage)
 
+	// 展示库同步
+	executor.RegisterStage(pipeline.StageNameLibrarySync, NewLibrarySyncStage)
+
+	// 字幕生成
+	executor.RegisterStage(pipeline.StageNameSubtitleGenerate, NewSubtitleGenerateStage)
+
 	// 封面提取
 	executor.RegisterStage(pipeline.StageNameExtractCover, NewExtractCoverStage)
 
@@ -34,6 +40,12 @@ func RegisterBuiltinStagesToManager(manager *pipeline.Manager) {
 
 	// MP4 转换
 	manager.RegisterStage(pipeline.StageNameConvertMp4, NewConvertMp4Stage)
+
+	// 展示库同步
+	manager.RegisterStage(pipeline.StageNameLibrarySync, NewLibrarySyncStage)
+
+	// 字幕生成
+	manager.RegisterStage(pipeline.StageNameSubtitleGenerate, NewSubtitleGenerateStage)
 
 	// 封面提取
 	manager.RegisterStage(pipeline.StageNameExtractCover, NewExtractCoverStage)
