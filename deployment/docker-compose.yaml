@@ -1,0 +1,43 @@
+name: bililive-go
+services:
+  bililive:
+    image: local/bililive-go-app:retry-input-fix-20260402-amd64
+    container_name: bililive
+    restart: always
+    user: 0:0
+    ports:
+      - 18090:5009
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+      - 1.1.1.1
+    environment:
+      - TZ=Asia/Shanghai
+      - SUBTITLE_WORKER_URL=http://subtitle-worker:8091
+      - SUBTITLE_WORKER_TIMEOUT=4h
+    volumes:
+      - /volume2/docker/bililive-go/config.yml:/etc/bililive-go/config.yml
+      - /volume2/docker/bililive-go/video:/srv/bililive
+      - /volume2/docker/bililive-go/source:/srv/bililive-source
+      - /volume2/docker/bililive-go:/volume2/docker/bililive-go
+      - /volume2/docker/bililive-go/tools:/opt/bililive/tools:ro
+    depends_on:
+      - subtitle-worker
+
+  subtitle-worker:
+    image: local/bililive-go-subtitle-worker:subtitle-rerun-finalize-20260401
+    container_name: subtitle-worker
+    restart: always
+    env_file:
+      - /volume2/docker/bililive-go/.env
+    environment:
+      - TZ=Asia/Shanghai
+      - SUBTITLE_SOURCE_ROOT=/volume2/docker/bililive-go/srt_video
+      - SUBTITLE_DASHSCOPE_MODEL=qwen3-asr-flash-filetrans
+      - SUBTITLE_LOCAL_MODEL=small
+      - SUBTITLE_LOCAL_COMPUTE_TYPE=int8
+    volumes:
+      - /volume2/docker/bililive-go/video:/srv/bililive
+      - /volume2/docker/bililive-go/source:/srv/bililive-source
+      - /volume2/docker/bililive-go:/volume2/docker/bililive-go
+      - /volume2/docker/bililive-go/.cache/faster-whisper:/root/.cache

@@ -1,0 +1,83 @@
+name: bililive-go
+version: "3.7"
+
+volumes:
+    prometheus_data: {}
+    subtitle_worker_cache: {}
+services:
+  bililive-go:
+    build:
+      context: .
+      dockerfile: Dockerfile.build-and-run
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: bililive-go:latest
+    restart: unless-stopped
+    container_name: bililive-go
+    environment:
+      - SUBTITLE_WORKER_URL=http://subtitle-worker:8091
+    volumes:
+      - ./Videos/source:/srv/bililive-source
+      - ./Videos/library:/srv/bililive
+      - ./config.docker.yml:/etc/bililive-go/config.yml
+    ports:
+      - 8080:8080
+
+  subtitle-worker:
+    build:
+      context: ./contrib/subtitle-worker
+      dockerfile: Dockerfile
+      args:
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
+    image: bililive-go-subtitle-worker:latest
+    restart: unless-stopped
+    container_name: bililive-go-subtitle-worker
+    environment:
+      - DASHSCOPE_API_KEY=${DASHSCOPE_API_KEY:-}
+      - DASHSCOPE_BASE_URL=${DASHSCOPE_BASE_URL:-https://dashscope.aliyuncs.com}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - ALL_PROXY=${ALL_PROXY:-}
+      - HF_ENDPOINT=${HF_ENDPOINT:-}
+      - SUBTITLE_SOURCE_ROOT=/srv/bililive-source
+      - SUBTITLE_PUBLIC_URL_BASE=${SUBTITLE_PUBLIC_URL_BASE:-}
+    volumes:
+      - ./Videos/source:/srv/bililive-source
+      - ./Videos/library:/srv/bililive
+      - subtitle_worker_cache:/root/.cache
+
+#  prometheus:
+#    image: quay.io/prometheus/prometheus
+#    restart: unless-stopped
+#    container_name: bililive-prom
+#    volumes:
+#      - prometheus_data:/prometheus
+#      - ./contrib/prometheus:/etc/prometheus
+#    command:
+#      # retention 建议大于30天
+#      - '--storage.tsdb.retention.time=30d'
+#      - '--config.file=/etc/prometheus/prometheus.yml'
+#      - '--storage.tsdb.path=/prometheus'
+#      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+#      - '--web.console.templates=/usr/share/prometheus/consoles'
+#    ports:
+#      - 9090:9090
+#
+#  grafana:
+#    image: grafana/grafana-oss
+#    restart: unless-stopped
+#    container_name: bililive-graf
+#    volumes:
+#      - ./contrib/grafana/provisioning:/etc/grafana/provisioning
+#    environment:
+#      - GF_SECURITY_ADMIN_USER=${ADMIN_USER}
+#      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
+#      - GF_USERS_ALLOW_SIGN_UP=false
+#      - GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH=/etc/grafana/provisioning/dashboards/bilipanel.json
+#    ports:
+#      - 3000:3000

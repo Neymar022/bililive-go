@@ -1,0 +1,16 @@
+# 本地工作产物 - 不进 git
+graphify-out/
+.DS_Store
+.appdata/
+*.log
+build-*.log
+__pycache__/
+*.pyc
+.pytest_cache/
+node_modules/
+*.tar.gz
+
+# 实际部署凭据 - 永不提交
+.env
+.env.local
+config.subtitle.codex.yml

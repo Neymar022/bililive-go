@@ -1,0 +1,17 @@
+services:
+  subtitle-worker:
+    image: local/bililive-go-subtitle-worker:subtitle-vaapi-hotfix-20260402
+    environment:
+      - SUBTITLE_VIDEO_ENCODER=${SUBTITLE_VIDEO_ENCODER:-vaapi}
+      - SUBTITLE_VAAPI_DEVICE=${SUBTITLE_VAAPI_DEVICE:-/dev/dri/renderD128}
+      - SUBTITLE_VAAPI_QP=${SUBTITLE_VAAPI_QP:-23}
+      - LIBVA_DRIVER_NAME=${SUBTITLE_LIBVA_DRIVER_NAME:-iHD}
+      - LIBVA_DRIVERS_PATH=${SUBTITLE_LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri}
+    devices:
+      - /dev/dri:/dev/dri
+    volumes:
+      - ${SUBTITLE_LIBVA_DRIVERS_HOST_PATH:-/usr/lib/x86_64-linux-gnu/dri}:${SUBTITLE_LIBVA_DRIVERS_PATH:-/usr/lib/x86_64-linux-gnu/dri}:ro
+      - ${SUBTITLE_LIBVA_IGDGMM_HOST_PATH:-/usr/lib/x86_64-linux-gnu/libigdgmm.so.12.3.1094}:/lib/x86_64-linux-gnu/libigdgmm.so.12:ro
+    group_add:
+      - "${SUBTITLE_VIDEO_GID:-44}"
+      - "${SUBTITLE_RENDER_GID:-105}"
