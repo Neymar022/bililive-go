@@ -550,10 +550,16 @@ def run_remote_mac_mlx(
 # Mac /burn 单次任务上限：60 分钟视频 burn 在 VideoToolbox + Apple GPU 大约
 # 5-10 分钟；含上行 1.5GB 视频 + 下行 1.5GB burned 视频 + 网络抖动余量，
 # 1200 秒（20 分钟）是宽裕的总超时。短视频不会撞这个值。
-# P9 修：默认从 1200s 提到 3600s。1200s 对 60min/1.87GB 视频够，但 105min/3.7GB
-# 视频走 hevc_videotoolbox 编码 30+ 分钟、上传 ~30s + 编码 ~30min + 下载 ~30s 总
-# 时长接近 31 分钟。1200s 在大文件场景必超。3600s 给 120min 视频留足余量。
-DEFAULT_MAC_BURN_TIMEOUT_SECONDS = 3600
+# P10 修：默认从 3600s 提到 18000s = 5 小时业务上限。
+#
+# P9 把 connect timeout 从 30s（渗漏 bug）调到与 read 同值，已经修了 NAS→Mac
+# 上传超时；P10 进一步把这个 read/upload 上限拉到 5 小时——理由：
+# 1. 5 小时直播录像走 Mac VideoToolbox 编 ~1.5h，留 3.5h 余量
+# 2. 跟 BiliNote burn_handler.py 的 DEFAULT_FFMPEG_TIMEOUT_SECONDS 保持一致
+#    （两端 timeout 错位会让排查变难）
+# 3. 客户端实际能通过 SUBTITLE_MAC_BURN_TIMEOUT env 显式覆盖到更小值，没必要
+#    把默认压到刚好够用——业务上限给运维更大灵活性
+DEFAULT_MAC_BURN_TIMEOUT_SECONDS = 18000
 
 
 def burn_remote_mac(
@@ -621,7 +627,18 @@ def burn_remote_mac(
                     "source": (os.path.basename(source_video_path), src_f, "video/mp4"),
                     "ass": (os.path.basename(ass_path), ass_f, "text/plain"),
                 }
-                data = {"codec": codec, "bitrate": bitrate}
+                # P10 修：把 timeout 透传给 Mac 端，让 NAS 端 requests timeout 和
+                # Mac 端 ffmpeg subprocess timeout **保持一致**——两端错位会让
+                # ffmpeg 比 requests 先被砍（如默认 1100s vs 3600s 错位），导致
+                # /burn 返 500，chain 错误地 fallback 到 nas-software 软编。
+                #
+                # Mac /burn (P10 后) 接收 ffmpeg_timeout_seconds Form 参数；老版本
+                # （PR #27 前）直接忽略多余字段，向后兼容无害。
+                data = {
+                    "codec": codec,
+                    "bitrate": bitrate,
+                    "ffmpeg_timeout_seconds": str(timeout_seconds),
+                }
                 with session.post(
                     f"{mac_url.rstrip('/')}/burn",
                     headers=headers,

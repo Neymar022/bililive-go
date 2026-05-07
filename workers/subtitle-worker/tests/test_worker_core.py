@@ -1022,14 +1022,16 @@ class BurnRemoteMacTest(unittest.TestCase):
         finally:
             td.cleanup()
 
-    def test_burn_remote_mac_default_timeout_is_3600s(self):
-        """P9 修：DEFAULT_MAC_BURN_TIMEOUT_SECONDS 从 1200s 升到 3600s。
-
-        1200s 对 60min/1.87GB 视频够用；105min/3.7GB 视频走 hevc_videotoolbox
-        编码 ~30 分钟，加上传/下载 1200s 必超。3600s 给 120min 视频留足余量。
+    def test_burn_remote_mac_default_timeout_is_18000s(self):
+        """P10 修：DEFAULT_MAC_BURN_TIMEOUT_SECONDS 从 3600s 升到 18000s = 5h
+        业务上限。理由：
+        - 5 小时直播录像走 Mac VideoToolbox 编 ~1.5h，留 3.5h 余量
+        - 跟 BiliNote burn_handler.py 的 DEFAULT_FFMPEG_TIMEOUT_SECONDS=18000
+          保持一致，两端 timeout 不错位
+        - 客户端能通过 SUBTITLE_MAC_BURN_TIMEOUT env 显式覆盖到更小值
         """
         from worker_core import DEFAULT_MAC_BURN_TIMEOUT_SECONDS
-        self.assertEqual(DEFAULT_MAC_BURN_TIMEOUT_SECONDS, 3600)
+        self.assertEqual(DEFAULT_MAC_BURN_TIMEOUT_SECONDS, 18000)
 
         # 校验 burn_remote_mac 不传 timeout_seconds 时使用新默认值
         td, src, ass, out = self._make_test_files()
@@ -1046,7 +1048,40 @@ class BurnRemoteMacTest(unittest.TestCase):
                 burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
 
             _, kwargs = mock_session.post.call_args
-            self.assertEqual(kwargs["timeout"], (3600, 3600))
+            self.assertEqual(kwargs["timeout"], (18000, 18000))
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_passes_timeout_to_mac_via_form(self):
+        """P10 修：把 timeout_seconds 透传给 Mac /burn 让 ffmpeg subprocess
+        timeout 跟 NAS requests timeout **保持一致**。
+
+        两端错位会让 Mac ffmpeg（默认 1100s）比 NAS requests（3600s+）先被砍，
+        导致 /burn 返 500，chain 错误 fallback 到 nas-software 软编。
+        """
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock(status_code=200)
+            mock_response.iter_content.return_value = [b"x"]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                burn_remote_mac(
+                    src, ass, out,
+                    mac_url="http://mac:8484", mac_token=None,
+                    timeout_seconds=7200,
+                )
+
+            _, kwargs = mock_session.post.call_args
+            # data 里必须含 ffmpeg_timeout_seconds 字段（值 = NAS requests timeout）
+            self.assertIn("ffmpeg_timeout_seconds", kwargs["data"])
+            self.assertEqual(kwargs["data"]["ffmpeg_timeout_seconds"], "7200")
+            # 同时 NAS requests 自己的 timeout 也是 7200 双方一致
+            self.assertEqual(kwargs["timeout"], (7200, 7200))
         finally:
             td.cleanup()
 
