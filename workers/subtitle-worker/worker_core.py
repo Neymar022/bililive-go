@@ -547,6 +547,137 @@ def run_remote_mac_mlx(
     return output
 
 
+# Mac /burn 单次任务上限：60 分钟视频 burn 在 VideoToolbox + Apple GPU 大约
+# 5-10 分钟；含上行 1.5GB 视频 + 下行 1.5GB burned 视频 + 网络抖动余量，
+# 1200 秒（20 分钟）是宽裕的总超时。短视频不会撞这个值。
+DEFAULT_MAC_BURN_TIMEOUT_SECONDS = 1200
+
+
+def burn_remote_mac(
+    source_video_path: str,
+    ass_path: str,
+    output_video_path: str,
+    mac_url: str,
+    mac_token: Optional[str],
+    codec: str = "h264_videotoolbox",
+    bitrate: str = "5M",
+    timeout_seconds: float = DEFAULT_MAC_BURN_TIMEOUT_SECONDS,
+) -> str:
+    """通过 HTTP multipart 把 source 视频 + ASS 字幕上传到 Mac BiliNote /burn 端点
+    （VideoToolbox 硬件编码加速），流式接收 burned mp4 写到 output_video_path。
+
+    返回实际使用的 codec 字符串（让上游可显示 actual_burn_codec）。
+
+    上游服务（mac_transcriber_service /burn）已用 threading.Semaphore(1) 串行
+    ffmpeg；NAS 端 processSemaphore 容量 1 也确保同一时刻只发一个请求，不需
+    在此处再加锁。
+
+    流式上传：requests 的 files= 对 file handle **本身就是流式**（urllib3 边读
+    边发 chunk），所以不需要 requests-toolbelt 也能 hold 1GB+ 视频不爆内存。
+    流式下载：stream=True + iter_content(chunk_size=1MB) 边收 burned 视频边写盘。
+    """
+    headers = {}
+    if mac_token:
+        headers["Authorization"] = f"Bearer {mac_token}"
+
+    output_dir = os.path.dirname(output_video_path) or "."
+    os.makedirs(output_dir, exist_ok=True)
+
+    # I3 修：tuple timeout——首字节 30s（catch hung connection），单 chunk
+    # 间隔 timeout_seconds（catch stalled stream，1200s 给 60min 视频烧录留余量）。
+    # 单 float timeout 在 stream=True 模式下只检 socket idle，stalled 会永远不触发。
+    request_timeout = (30, timeout_seconds)
+
+    # C3 修：写到临时文件再 os.replace 原子发布，跟 burn_subtitles 一致。
+    # 这样 burn_remote_mac 失败时不会损坏已存在的 output_video_path（chain
+    # fallback 到 nas-software 时旧产物保留）。
+    tmp_output = output_video_path + f".burning-{os.getpid()}-{int(time.time()*1000)}.tmp"
+
+    try:
+        # with-block 包 Session：长跑进程不泄漏连接池（同 P6.2 教训）
+        with requests.Session() as session:
+            session.trust_env = False
+            with open(source_video_path, "rb") as src_f, open(ass_path, "rb") as ass_f:
+                files = {
+                    "source": (os.path.basename(source_video_path), src_f, "video/mp4"),
+                    "ass": (os.path.basename(ass_path), ass_f, "text/plain"),
+                }
+                data = {"codec": codec, "bitrate": bitrate}
+                with session.post(
+                    f"{mac_url.rstrip('/')}/burn",
+                    headers=headers,
+                    files=files,
+                    data=data,
+                    timeout=request_timeout,
+                    stream=True,
+                ) as response:
+                    response.raise_for_status()
+                    with open(tmp_output, "wb") as out_f:
+                        for chunk in response.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                out_f.write(chunk)
+
+        # Sanity：HTTP 200 但写出空文件 = 路径错或磁盘满
+        # I1 修：错误信息不泄露 NAS 内部路径
+        if not os.path.exists(tmp_output) or os.path.getsize(tmp_output) == 0:
+            raise WorkerSafeError("Mac /burn 响应 200 但 output 文件为空")
+
+        # 原子发布：os.replace 在同 fs 上是原子的，避免半成品被读到
+        os.replace(tmp_output, output_video_path)
+    except Exception:
+        # 失败路径：清理临时文件，原 output_video_path 不动
+        try:
+            os.unlink(tmp_output)
+        except FileNotFoundError:
+            pass
+        raise
+
+    return codec
+
+
+def check_mac_burn_supported(
+    mac_url: str,
+    mac_token: Optional[str],
+    timeout_seconds: float = DEFAULT_MAC_HEALTH_TIMEOUT_SECONDS,
+) -> bool:
+    """探测 Mac transcriber service 是否支持 /burn（P7+ 才有）。
+
+    通过 GET /healthz 看 `burn_supported` 字段——P7 之前的 BiliNote 服务没这字段，
+    返 False；P7+ 服务返 True。这区分新旧版本，让 NAS 端 chain 不去白调失败的端点。
+
+    跟 check_mac_transcriber_health 一样有 401 显式 WARNING 逻辑（token 错配
+    时不要静默走 fallback 让账单飙升）。
+    """
+    headers = {}
+    if mac_token:
+        headers["Authorization"] = f"Bearer {mac_token}"
+    try:
+        with requests.Session() as session:
+            session.trust_env = False
+            response = session.get(
+                f"{mac_url.rstrip('/')}/healthz",
+                headers=headers,
+                timeout=timeout_seconds,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _logger.info("mac burn-support probe failed (%s): %s", mac_url, exc)
+        return False
+
+    if response.status_code == 401:
+        _logger.warning(
+            "mac transcriber rejected burn-support probe with 401: token 错配？"
+            "检查 NAS SUBTITLE_MAC_BURN_TOKEN 与 Mac MAC_TRANSCRIBER_TOKEN 是否一致 (%s)",
+            mac_url,
+        )
+        return False
+    if response.status_code != 200:
+        return False
+    try:
+        return bool(response.json().get("burn_supported", False))
+    except Exception:  # noqa: BLE001 - 旧版返回 plaintext 而非 JSON 也算"不支持"
+        return False
+
+
 def check_mac_transcriber_health(
     mac_url: str,
     mac_token: Optional[str],
@@ -697,6 +828,116 @@ def _transcribe_with_chain(
     raise WorkerSafeError(f"provider chain 全部不可用: {provider_chain}")
 
 
+def _burn_with_provider(
+    provider: str,
+    source_video_path: str,
+    ass_path: str,
+    output_video_path: str,
+    burn_style: dict[str, Any],
+    *,
+    ffmpeg_bin: str,
+    video_encoder: str,
+    vaapi_device: str,
+    vaapi_qp: int,
+    mac_burn_url: Optional[str] = None,
+    mac_burn_token: Optional[str] = None,
+    mac_burn_codec: str = "h264_videotoolbox",
+    mac_burn_bitrate: str = "5M",
+    mac_burn_timeout_seconds: float = DEFAULT_MAC_BURN_TIMEOUT_SECONDS,
+) -> str:
+    """单 burn provider 调度。返回标识字符串（codec for mac, render_preset for nas）。
+
+    抽出来是为了让 burn 也走 chain fallback：mac 不支持/失败时切到 NAS 软编码，
+    跟 transcribe chain 同一个 _transcribe_with_provider 设计模式。
+    """
+    if provider == "remote-mac":
+        if not mac_burn_url:
+            raise WorkerSafeError("缺少 SUBTITLE_MAC_BURN_URL")
+        return burn_remote_mac(
+            source_video_path,
+            ass_path,
+            output_video_path,
+            mac_burn_url,
+            mac_burn_token,
+            codec=mac_burn_codec,
+            bitrate=mac_burn_bitrate,
+            timeout_seconds=mac_burn_timeout_seconds,
+        )
+    if provider == "nas-software":
+        return burn_subtitles(
+            source_video_path,
+            ass_path,
+            output_video_path,
+            burn_style,
+            ffmpeg_bin=ffmpeg_bin,
+            video_encoder=video_encoder,
+            vaapi_device=vaapi_device,
+            vaapi_qp=vaapi_qp,
+        )
+    raise WorkerSafeError(f"不支持的 burn provider: {provider}")
+
+
+def _burn_with_chain(
+    burn_chain: list[str],
+    source_video_path: str,
+    ass_path: str,
+    output_video_path: str,
+    burn_style: dict[str, Any],
+    **kwargs: Any,
+) -> tuple[str, str]:
+    """按 burn_chain 顺序尝试，返回 (实际成功的 provider, render_preset_or_codec)。
+
+    fallback 触发：
+    - remote-mac：先 GET /healthz 看 burn_supported，旧版 BiliNote 没这字段返 False → 跳过
+    - 任何异常切下一档（同 transcribe chain）
+
+    全失败抛最后一次的真实异常；空链或全跳过抛 WorkerSafeError 提示运维。
+    """
+    if not burn_chain:
+        raise WorkerSafeError(
+            "burn chain 为空：请配置 SUBTITLE_BURN_CHAIN，"
+            "例 SUBTITLE_BURN_CHAIN=remote-mac,nas-software"
+        )
+
+    last_error: Optional[Exception] = None
+    attempt_log: list[tuple[str, str]] = []
+
+    for provider in burn_chain:
+        # remote-mac 先做廉价健康+能力探测，没装 P7 的 BiliNote 直接跳
+        if provider == "remote-mac":
+            mac_url = kwargs.get("mac_burn_url")
+            mac_token = kwargs.get("mac_burn_token")
+            if not mac_url or not check_mac_burn_supported(mac_url, mac_token):
+                attempt_log.append((provider, "skipped:not-supported"))
+                continue
+
+        try:
+            preset_or_codec = _burn_with_provider(
+                provider,
+                source_video_path,
+                ass_path,
+                output_video_path,
+                burn_style,
+                **kwargs,
+            )
+            attempt_log.append((provider, "ok"))
+            _logger.info(
+                "burn chain chose provider=%s after attempts=%s",
+                provider, attempt_log,
+            )
+            return provider, preset_or_codec
+        except Exception as exc:  # noqa: BLE001 - chain 故意拦截一切让降级生效
+            last_error = exc
+            attempt_log.append((provider, f"failed:{type(exc).__name__}"))
+            _logger.warning("burn chain provider=%s failed: %s", provider, exc)
+            continue
+
+    _logger.error("burn chain exhausted, attempts=%s", attempt_log)
+    if last_error is not None:
+        raise last_error
+    raise WorkerSafeError(f"burn chain 全部不可用: {burn_chain}")
+
+
 def transcribe_and_burn(
     source_path: str,
     output_video_path: str,
@@ -720,6 +961,13 @@ def transcribe_and_burn(
     video_encoder: str = DEFAULT_VIDEO_ENCODER,
     vaapi_device: str = DEFAULT_VAAPI_DEVICE,
     vaapi_qp: int = DEFAULT_VAAPI_QP,
+    # P7 burn chain 配置（向后兼容：burn_chain=None 时走老逻辑用 nas-software）
+    burn_chain: Optional[list[str]] = None,
+    mac_burn_url: Optional[str] = None,
+    mac_burn_token: Optional[str] = None,
+    mac_burn_codec: str = "h264_videotoolbox",
+    mac_burn_bitrate: str = "5M",
+    mac_burn_timeout_seconds: float = DEFAULT_MAC_BURN_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     output_dir = os.path.dirname(output_video_path) or "."
     os.makedirs(output_dir, exist_ok=True)
@@ -770,21 +1018,45 @@ def transcribe_and_burn(
         Path(ass_path).write_text(ass_content, encoding="utf-8")
         srt_content = segments_to_srt(segments)
         Path(output_srt_path).write_text(srt_content, encoding="utf-8")
-        render_preset = burn_subtitles(
-            source_path,
-            ass_path,
-            output_video_path,
-            burn_style,
-            ffmpeg_bin=ffmpeg_bin,
-            video_encoder=video_encoder,
-            vaapi_device=vaapi_device,
-            vaapi_qp=vaapi_qp,
-        )
+
+        # P7: burn 也走 chain（向后兼容——burn_chain=None 时走 nas-software 单 provider）
+        if burn_chain:
+            actual_burn_provider, render_preset = _burn_with_chain(
+                burn_chain,
+                source_path,
+                ass_path,
+                output_video_path,
+                burn_style,
+                ffmpeg_bin=ffmpeg_bin,
+                video_encoder=video_encoder,
+                vaapi_device=vaapi_device,
+                vaapi_qp=vaapi_qp,
+                mac_burn_url=mac_burn_url,
+                mac_burn_token=mac_burn_token,
+                mac_burn_codec=mac_burn_codec,
+                mac_burn_bitrate=mac_burn_bitrate,
+                mac_burn_timeout_seconds=mac_burn_timeout_seconds,
+            )
+        else:
+            # 旧路径：直接 NAS 软编码（不走 chain，零侵入老调用方）
+            actual_burn_provider = "nas-software"
+            render_preset = burn_subtitles(
+                source_path,
+                ass_path,
+                output_video_path,
+                burn_style,
+                ffmpeg_bin=ffmpeg_bin,
+                video_encoder=video_encoder,
+                vaapi_device=vaapi_device,
+                vaapi_qp=vaapi_qp,
+            )
+
         return {
             "segments": segments_to_api_payload(segments),
             "ass_path": ass_path,
             "render_preset": render_preset,
             "actual_provider": actual_provider,
+            "actual_burn_provider": actual_burn_provider,
         }
     finally:
         if os.path.exists(audio_path):

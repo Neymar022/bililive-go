@@ -54,6 +54,16 @@ def _parse_provider_chain() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _parse_burn_chain() -> list[str]:
+    """SUBTITLE_BURN_CHAIN 同 SUBTITLE_PROVIDER_CHAIN 的设计但用于 burn 阶段。
+    例：'remote-mac,nas-software' = 主用 Mac VideoToolbox，挂了切 NAS 软编码。
+    None/空 = 不走 chain，直接 NAS 软编码（向后兼容）。"""
+    raw = os.getenv("SUBTITLE_BURN_CHAIN", "").strip()
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 @app.post("/api/v1/process")
 def process(req: ProcessRequest) -> dict[str, Any]:
     try:
@@ -79,6 +89,13 @@ def process(req: ProcessRequest) -> dict[str, Any]:
             video_encoder=os.getenv("SUBTITLE_VIDEO_ENCODER", "software"),
             vaapi_device=os.getenv("SUBTITLE_VAAPI_DEVICE", "/dev/dri/renderD128"),
             vaapi_qp=int(os.getenv("SUBTITLE_VAAPI_QP", "23")),
+            # P7: burn 链式 fallback 配置
+            burn_chain=_parse_burn_chain() or None,
+            mac_burn_url=os.getenv("SUBTITLE_MAC_BURN_URL"),
+            mac_burn_token=os.getenv("SUBTITLE_MAC_BURN_TOKEN"),
+            mac_burn_codec=os.getenv("SUBTITLE_MAC_BURN_CODEC", "h264_videotoolbox"),
+            mac_burn_bitrate=os.getenv("SUBTITLE_MAC_BURN_BITRATE", "5M"),
+            mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "1200")),
         )
     except WorkerSafeError as exc:
         # message 已被 worker_core 标记为安全暴露：参数缺失/不支持的 provider 等。
