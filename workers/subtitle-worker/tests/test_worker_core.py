@@ -991,9 +991,17 @@ class BurnRemoteMacTest(unittest.TestCase):
         finally:
             td.cleanup()
 
-    def test_burn_remote_mac_uses_tuple_timeout(self):
-        """I3 修：tuple timeout (connect=30, read=timeout_seconds) 防 stalled stream
-        永远不触发超时。"""
+    def test_burn_remote_mac_uses_unified_timeout(self):
+        """P9 修：connect 和 read 都用 timeout_seconds，不再分开。
+
+        历史 I3 修曾用 tuple (30, timeout_seconds)，但 urllib3 内部 _make_request()
+        只在响应接收阶段才把 socket 切到 read_timeout，**整个 body 上传期间 socket
+        timeout 仍是 connect_timeout=30s**。结果大文件（3.7GB+）上传时，Mac 端
+        fsync 卡 30s 必触发 socket.timeout，被错误包装成"Connection aborted,
+        TimeoutError"——看起来像网络超时，实则是 connect_timeout 渗漏到 upload。
+
+        本测试锁住统一 timeout 的契约，防回归。
+        """
         td, src, ass, out = self._make_test_files()
         try:
             mock_response = mock.MagicMock(status_code=200)
@@ -1008,7 +1016,37 @@ class BurnRemoteMacTest(unittest.TestCase):
                 burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None, timeout_seconds=600)
 
             _, kwargs = mock_session.post.call_args
-            self.assertEqual(kwargs["timeout"], (30, 600))
+            # P9: connect 和 read 都用 timeout_seconds（同值），让 upload 阶段不被
+            # 30s connect_timeout 砍掉。
+            self.assertEqual(kwargs["timeout"], (600, 600))
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_default_timeout_is_3600s(self):
+        """P9 修：DEFAULT_MAC_BURN_TIMEOUT_SECONDS 从 1200s 升到 3600s。
+
+        1200s 对 60min/1.87GB 视频够用；105min/3.7GB 视频走 hevc_videotoolbox
+        编码 ~30 分钟，加上传/下载 1200s 必超。3600s 给 120min 视频留足余量。
+        """
+        from worker_core import DEFAULT_MAC_BURN_TIMEOUT_SECONDS
+        self.assertEqual(DEFAULT_MAC_BURN_TIMEOUT_SECONDS, 3600)
+
+        # 校验 burn_remote_mac 不传 timeout_seconds 时使用新默认值
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock(status_code=200)
+            mock_response.iter_content.return_value = [b"x"]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
+
+            _, kwargs = mock_session.post.call_args
+            self.assertEqual(kwargs["timeout"], (3600, 3600))
         finally:
             td.cleanup()
 

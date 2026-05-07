@@ -550,7 +550,10 @@ def run_remote_mac_mlx(
 # Mac /burn 单次任务上限：60 分钟视频 burn 在 VideoToolbox + Apple GPU 大约
 # 5-10 分钟；含上行 1.5GB 视频 + 下行 1.5GB burned 视频 + 网络抖动余量，
 # 1200 秒（20 分钟）是宽裕的总超时。短视频不会撞这个值。
-DEFAULT_MAC_BURN_TIMEOUT_SECONDS = 1200
+# P9 修：默认从 1200s 提到 3600s。1200s 对 60min/1.87GB 视频够，但 105min/3.7GB
+# 视频走 hevc_videotoolbox 编码 30+ 分钟、上传 ~30s + 编码 ~30min + 下载 ~30s 总
+# 时长接近 31 分钟。1200s 在大文件场景必超。3600s 给 120min 视频留足余量。
+DEFAULT_MAC_BURN_TIMEOUT_SECONDS = 3600
 
 
 def burn_remote_mac(
@@ -583,10 +586,26 @@ def burn_remote_mac(
     output_dir = os.path.dirname(output_video_path) or "."
     os.makedirs(output_dir, exist_ok=True)
 
-    # I3 修：tuple timeout——首字节 30s（catch hung connection），单 chunk
-    # 间隔 timeout_seconds（catch stalled stream，1200s 给 60min 视频烧录留余量）。
-    # 单 float timeout 在 stream=True 模式下只检 socket idle，stalled 会永远不触发。
-    request_timeout = (30, timeout_seconds)
+    # P9 修：之前用 (30, timeout_seconds) tuple 在大文件（3.7GB+）上传时有 bug。
+    #
+    # **根因 — urllib3 connect_timeout 渗漏到 upload 阶段**：
+    # urllib3 _make_request() 内部，整个请求 body 上传期间 socket 用的是
+    # `connect_timeout=30s`，**只有响应接收阶段才切到 `read_timeout`**。
+    #
+    # 当上传 3.7GB 视频时：
+    #   - Mac 端 shutil.copyfileobj 写 /tmp 偶发 fsync 卡 30s+（大文件触发频率高）
+    #   - TCP send buffer 满，NAS socket.send() 阻塞 > 30s
+    #   - socket.timeout 触发 → urllib3 ProtocolError → requests 包成
+    #     ('Connection aborted.', TimeoutError('timed out'))
+    #
+    # 1.87GB 能跑通是因为整体上传快，任何 send() 都不会卡 30s+；3.7GB 触发
+    # fsync 频率高，必中。
+    #
+    # **修复**：用 (timeout_seconds, timeout_seconds) tuple——connect 和 upload
+    # 阶段都用大 timeout，避免大文件 send() 偶发阻塞被 30s 砍。代价：unreachable
+    # host 的连接探测最长 timeout_seconds 才失败，但 check_mac_burn_supported 在
+    # 此前已经做了 3s 超时的健康探测，unreachable 早被它筛掉，不会走到这里。
+    request_timeout = (timeout_seconds, timeout_seconds)
 
     # C3 修：写到临时文件再 os.replace 原子发布，跟 burn_subtitles 一致。
     # 这样 burn_remote_mac 失败时不会损坏已存在的 output_video_path（chain
