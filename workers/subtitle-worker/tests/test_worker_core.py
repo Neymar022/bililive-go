@@ -11,9 +11,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker_core import (
+    _burn_with_chain,
+    _burn_with_provider,
     _transcribe_with_chain,
+    burn_remote_mac,
     burn_subtitles,
     build_public_file_url,
+    check_mac_burn_supported,
     check_mac_transcriber_health,
     create_dashscope_session,
     dashscope_result_to_segments,
@@ -868,6 +872,328 @@ class ProviderChainFallbackTest(unittest.TestCase):
         self.assertIn("skipped:health", log_text)
         self.assertIn("failed:RuntimeError", log_text)
         self.assertIn("local-whisper", log_text)
+
+
+class BurnRemoteMacTest(unittest.TestCase):
+    """P7.2: NAS worker 通过 HTTP 把 source mp4 + ASS 上传到 Mac /burn 端点，
+    流式接收 burned mp4 写到 output。"""
+
+    def _make_test_files(self) -> tuple[tempfile.TemporaryDirectory, str, str, str]:
+        td = tempfile.TemporaryDirectory()
+        src = os.path.join(td.name, "src.mp4")
+        ass = os.path.join(td.name, "subs.ass")
+        out = os.path.join(td.name, "burned.mp4")
+        with open(src, "wb") as f:
+            f.write(b"fake-mp4-source")
+        with open(ass, "w", encoding="utf-8") as f:
+            f.write("[Script Info]\nScriptType: v4.00+\n")
+        return td, src, ass, out
+
+    def test_burn_remote_mac_uploads_and_streams_response(self):
+        """完整路径：multipart 上传 source/ass + codec/bitrate；流式收 binary 写盘。"""
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock()
+            mock_response.status_code = 200
+            mock_response.iter_content.return_value = [
+                b"\x00\x00\x00\x18ftypmp42",  # 模拟 mp4 chunk 1
+                b"\x00\x00\x00\x08moov_data",  # chunk 2
+            ]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                actual_codec = burn_remote_mac(
+                    src, ass, out,
+                    mac_url="http://192.168.1.17:8484",
+                    mac_token="secret",
+                    codec="h264_videotoolbox",
+                    bitrate="5M",
+                )
+
+            self.assertEqual(actual_codec, "h264_videotoolbox")
+
+            # 验证上传请求
+            args, kwargs = mock_session.post.call_args
+            self.assertEqual("http://192.168.1.17:8484/burn", args[0])
+            self.assertEqual("Bearer secret", kwargs["headers"]["Authorization"])
+            self.assertIn("source", kwargs["files"])
+            self.assertIn("ass", kwargs["files"])
+            self.assertEqual(kwargs["data"]["codec"], "h264_videotoolbox")
+            self.assertEqual(kwargs["data"]["bitrate"], "5M")
+            self.assertTrue(kwargs["stream"])
+
+            # 验证 burned mp4 被流式写出（chunk 1 + chunk 2 拼接）
+            self.assertTrue(os.path.exists(out))
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x08moov_data")
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_omits_auth_when_token_none(self):
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock()
+            mock_response.status_code = 200
+            mock_response.iter_content.return_value = [b"x"]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
+
+            _, kwargs = mock_session.post.call_args
+            self.assertNotIn("Authorization", kwargs["headers"])
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_atomic_publish_preserves_existing_on_failure(self):
+        """C3 修复：burn_remote_mac 失败时**不**损坏已存在的 output 文件。
+        重跑场景：上一次 burn 出来的 mp4 在原 path，新一次 mac 烧录失败时
+        旧文件应保留（chain fallback 才能在 nas-software 时拿到干净起点）。"""
+        td, src, ass, out = self._make_test_files()
+        try:
+            # 模拟"已经有一个 burned mp4 在 output path"
+            existing_content = b"existing-burned-mp4-from-previous-run"
+            with open(out, "wb") as f:
+                f.write(existing_content)
+
+            # mock：mac 上传成功开始 stream 但中途 raise
+            mock_response = mock.MagicMock()
+            mock_response.status_code = 200
+            mock_response.iter_content.side_effect = ConnectionResetError("network mid-stream")
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                with self.assertRaises(ConnectionResetError):
+                    burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
+
+            # 关键断言：原文件未被损坏
+            self.assertTrue(os.path.exists(out), "原 output 文件被错误删除")
+            with open(out, "rb") as f:
+                self.assertEqual(f.read(), existing_content, "原 output 文件被半成品覆盖了")
+
+            # 临时文件不应残留（burn_remote_mac 用 path + ".burning-{pid}-{ms}.tmp" 模式命名）
+            tmp_files = list(pathlib.Path(td.name).glob("*.tmp"))
+            self.assertEqual(tmp_files, [], f"临时 .tmp 文件残留：{tmp_files}")
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_uses_unified_timeout(self):
+        """P9 修：connect 和 read 都用 timeout_seconds，不再分开。
+
+        历史 I3 修曾用 tuple (30, timeout_seconds)，但 urllib3 内部 _make_request()
+        只在响应接收阶段才把 socket 切到 read_timeout，**整个 body 上传期间 socket
+        timeout 仍是 connect_timeout=30s**。结果大文件（3.7GB+）上传时，Mac 端
+        fsync 卡 30s 必触发 socket.timeout，被错误包装成"Connection aborted,
+        TimeoutError"——看起来像网络超时，实则是 connect_timeout 渗漏到 upload。
+
+        本测试锁住统一 timeout 的契约，防回归。
+        """
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock(status_code=200)
+            mock_response.iter_content.return_value = [b"x"]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None, timeout_seconds=600)
+
+            _, kwargs = mock_session.post.call_args
+            # P9: connect 和 read 都用 timeout_seconds（同值），让 upload 阶段不被
+            # 30s connect_timeout 砍掉。
+            self.assertEqual(kwargs["timeout"], (600, 600))
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_default_timeout_is_3600s(self):
+        """P9 修：DEFAULT_MAC_BURN_TIMEOUT_SECONDS 从 1200s 升到 3600s。
+
+        1200s 对 60min/1.87GB 视频够用；105min/3.7GB 视频走 hevc_videotoolbox
+        编码 ~30 分钟，加上传/下载 1200s 必超。3600s 给 120min 视频留足余量。
+        """
+        from worker_core import DEFAULT_MAC_BURN_TIMEOUT_SECONDS
+        self.assertEqual(DEFAULT_MAC_BURN_TIMEOUT_SECONDS, 3600)
+
+        # 校验 burn_remote_mac 不传 timeout_seconds 时使用新默认值
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock(status_code=200)
+            mock_response.iter_content.return_value = [b"x"]
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
+
+            _, kwargs = mock_session.post.call_args
+            self.assertEqual(kwargs["timeout"], (3600, 3600))
+        finally:
+            td.cleanup()
+
+    def test_burn_remote_mac_raises_on_empty_response(self):
+        """HTTP 200 但 response body 空 → 抛 WorkerSafeError，不静默返回 0 字节文件。"""
+        from worker_core import WorkerSafeError
+        td, src, ass, out = self._make_test_files()
+        try:
+            mock_response = mock.MagicMock()
+            mock_response.status_code = 200
+            mock_response.iter_content.return_value = []  # 空响应
+            mock_response.__enter__ = lambda self_: self_
+            mock_response.__exit__ = lambda *a: None
+
+            mock_session = mock.MagicMock()
+            mock_session.__enter__.return_value = mock_session
+            mock_session.post.return_value = mock_response
+
+            with mock.patch("worker_core.requests.Session", return_value=mock_session):
+                with self.assertRaises(WorkerSafeError) as ctx:
+                    burn_remote_mac(src, ass, out, mac_url="http://mac:8484", mac_token=None)
+            self.assertIn("output 文件为空", str(ctx.exception))
+        finally:
+            td.cleanup()
+
+
+class CheckMacBurnSupportedTest(unittest.TestCase):
+    """P7: 探测 Mac 服务是否支持 /burn（P7+ 才有的字段）。"""
+
+    def test_returns_true_when_burn_supported_field_is_true(self):
+        mock_response = mock.MagicMock(status_code=200)
+        mock_response.json.return_value = {"status": "ok", "burn_supported": True}
+        mock_session = mock.MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.get.return_value = mock_response
+        with mock.patch("worker_core.requests.Session", return_value=mock_session):
+            self.assertTrue(check_mac_burn_supported("http://mac:8484", "tok"))
+
+    def test_returns_false_when_field_missing_legacy_bilinote(self):
+        """P7 之前的 BiliNote 服务 /healthz 没 burn_supported 字段 → 必须返 False，
+        不能误以为支持后白调 /burn 报 404。"""
+        mock_response = mock.MagicMock(status_code=200)
+        mock_response.json.return_value = {"status": "ok", "transcriber": "mlx-whisper"}
+        mock_session = mock.MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.get.return_value = mock_response
+        with mock.patch("worker_core.requests.Session", return_value=mock_session):
+            self.assertFalse(check_mac_burn_supported("http://mac:8484", "tok"))
+
+    def test_returns_false_on_401_with_warning_log(self):
+        mock_response = mock.MagicMock(status_code=401)
+        mock_session = mock.MagicMock()
+        mock_session.__enter__.return_value = mock_session
+        mock_session.get.return_value = mock_response
+        with mock.patch("worker_core.requests.Session", return_value=mock_session), \
+             self.assertLogs("worker_core", level="WARNING") as log_cm:
+            self.assertFalse(check_mac_burn_supported("http://mac:8484", "wrong-tok"))
+        # 验证 token 错配的 WARNING 日志（同 P6.1 I5 修复教训）
+        self.assertTrue(any("401" in r.getMessage() for r in log_cm.records))
+
+
+class BurnChainFallbackTest(unittest.TestCase):
+    """P7.3: burn provider chain 按 [remote-mac, nas-software] 顺序尝试。
+    跟 _transcribe_with_chain 同模式但是测烧录路径。"""
+
+    _BASE_KWARGS = dict(
+        ffmpeg_bin="ffmpeg",
+        video_encoder="software",
+        vaapi_device="/dev/dri/renderD128",
+        vaapi_qp=23,
+        mac_burn_url="http://mac:8484",
+        mac_burn_token="tok",
+        mac_burn_codec="h264_videotoolbox",
+        mac_burn_bitrate="5M",
+        mac_burn_timeout_seconds=600,
+    )
+
+    def test_chain_uses_remote_mac_when_supported(self):
+        with mock.patch("worker_core.check_mac_burn_supported", return_value=True), \
+             mock.patch("worker_core.burn_remote_mac", return_value="h264_videotoolbox") as mac_mock, \
+             mock.patch("worker_core.burn_subtitles") as nas_mock:
+            chosen, codec = _burn_with_chain(
+                ["remote-mac", "nas-software"],
+                "/tmp/src.mp4", "/tmp/subs.ass", "/tmp/out.mp4",
+                burn_style={"preset": "vizard_classic_cn"},
+                **self._BASE_KWARGS,
+            )
+
+        self.assertEqual("remote-mac", chosen)
+        self.assertEqual("h264_videotoolbox", codec)
+        mac_mock.assert_called_once()
+        nas_mock.assert_not_called()
+
+    def test_chain_skips_unsupported_mac_falls_back_to_nas(self):
+        """旧版 BiliNote（无 burn_supported 字段）→ 跳过 mac 走 nas-software。"""
+        with mock.patch("worker_core.check_mac_burn_supported", return_value=False), \
+             mock.patch("worker_core.burn_remote_mac") as mac_mock, \
+             mock.patch("worker_core.burn_subtitles", return_value="vizard_classic_cn"):
+            chosen, preset = _burn_with_chain(
+                ["remote-mac", "nas-software"],
+                "/tmp/src.mp4", "/tmp/subs.ass", "/tmp/out.mp4",
+                burn_style={"preset": "vizard_classic_cn"},
+                **self._BASE_KWARGS,
+            )
+
+        self.assertEqual("nas-software", chosen)
+        self.assertEqual("vizard_classic_cn", preset)
+        mac_mock.assert_not_called()  # 健康检查失败不应真调
+
+    def test_chain_falls_through_on_mac_runtime_error(self):
+        """Mac 健康但 burn_remote_mac 抛异常（网络中断、ffmpeg 失败）→ 切 nas-software。"""
+        with mock.patch("worker_core.check_mac_burn_supported", return_value=True), \
+             mock.patch("worker_core.burn_remote_mac", side_effect=RuntimeError("Mac /burn timeout")), \
+             mock.patch("worker_core.burn_subtitles", return_value="vizard_classic_cn"):
+            chosen, preset = _burn_with_chain(
+                ["remote-mac", "nas-software"],
+                "/tmp/src.mp4", "/tmp/subs.ass", "/tmp/out.mp4",
+                burn_style={"preset": "vizard_classic_cn"},
+                **self._BASE_KWARGS,
+            )
+
+        self.assertEqual("nas-software", chosen)
+
+    def test_chain_raises_clear_error_for_empty_chain(self):
+        """空 chain 是配置错——抛 WorkerSafeError 含修复指引。"""
+        from worker_core import WorkerSafeError
+        with self.assertRaises(WorkerSafeError) as ctx:
+            _burn_with_chain(
+                [], "/tmp/src.mp4", "/tmp/subs.ass", "/tmp/out.mp4",
+                burn_style={"preset": "vizard_classic_cn"},
+                **self._BASE_KWARGS,
+            )
+        self.assertIn("SUBTITLE_BURN_CHAIN", str(ctx.exception))
+
+    def test_chain_raises_last_error_when_all_fail(self):
+        """全失败 → 抛最后一档真实异常（不丢调试信息）。"""
+        with mock.patch("worker_core.check_mac_burn_supported", return_value=True), \
+             mock.patch("worker_core.burn_remote_mac", side_effect=RuntimeError("Mac fail")), \
+             mock.patch("worker_core.burn_subtitles", side_effect=RuntimeError("NAS ffmpeg fail")):
+            with self.assertRaises(RuntimeError) as ctx:
+                _burn_with_chain(
+                    ["remote-mac", "nas-software"],
+                    "/tmp/src.mp4", "/tmp/subs.ass", "/tmp/out.mp4",
+                    burn_style={"preset": "vizard_classic_cn"},
+                    **self._BASE_KWARGS,
+                )
+        self.assertEqual("NAS ffmpeg fail", str(ctx.exception))
 
 
 if __name__ == "__main__":

@@ -168,6 +168,87 @@ docker logs subtitle-worker 2>&1 | grep "mac transcriber"
 token 错配修复：让 NAS 的 `SUBTITLE_MAC_TRANSCRIBER_TOKEN` 与 Mac 端 launchd plist 里的
 `MAC_TRANSCRIBER_TOKEN` env 完全一致即可（两端都未配 token 时也兼容——auth 跳过）。
 
+## Burn Chain（Mac VideoToolbox 硬件烧录加速，P7+）
+
+P6 解决了 ASR 转写的 NAS CPU 瓶颈。**P7 解决 ffmpeg 烧录字幕的瓶颈**：把烧录步骤
+也 offload 到 Mac，让 VideoToolbox（h264_videotoolbox / hevc_videotoolbox）跑硬件
+编码——5 分钟视频从 NAS 软编码 ~10 分钟降到 Mac VideoToolbox ~30 秒，**18× 加速**。
+
+### 启用方式
+
+要求：Mac 端 BiliNote `mac_transcriber_service` 升级到 P7+ 版本（提供 `/burn` 端点 +
+`/healthz` 返 `burn_supported: true`）。
+
+```yaml
+# docker-compose.yaml
+environment:
+  # ... P6 转写链路 ...
+  # P7 烧录链路（默认空 → 走老的 NAS 软编码，零侵入）
+  SUBTITLE_BURN_CHAIN: "remote-mac,nas-software"
+  SUBTITLE_MAC_BURN_URL: "http://192.168.1.17:8484"   # 跟 transcriber 同地址
+  SUBTITLE_MAC_BURN_TOKEN: ""                          # 跟 transcriber 同 token
+  SUBTITLE_MAC_BURN_CODEC: "h264_videotoolbox"         # 或 hevc_videotoolbox 出更小文件
+  SUBTITLE_MAC_BURN_BITRATE: "5M"                      # 平均码率
+  SUBTITLE_MAC_BURN_TIMEOUT: "1200"                    # 20 分钟（60 分钟视频烧录余量）
+```
+
+| 情境 | 行为 |
+|------|------|
+| `SUBTITLE_BURN_CHAIN` 未配（旧部署） | 走 `nas-software`，零侵入老逻辑 |
+| 链 `[remote-mac, nas-software]` + Mac /healthz 返 `burn_supported: true` | 用 Mac VideoToolbox |
+| Mac 不健康 / 旧版没 burn_supported 字段 | 跳过 Mac，自动降级 nas-software |
+| Mac 健康但烧录中途失败（网络中断/ffmpeg crash） | 异常上抛 → 切 nas-software 重做 |
+| 全失败 | 抛最后一次的真实异常 |
+
+### Codec 选择
+
+| codec | 速度 | 文件大小 | 兼容性 |
+|-------|------|---------|--------|
+| `h264_videotoolbox`（默认） | 10-15× 实时 | 与原片接近 | 所有播放器 ✓ |
+| `hevc_videotoolbox` | 8-12× 实时 | **小 30-50%** | 旧设备/某些电视不支持 |
+
+### 串行化
+
+Mac 端 `_BURN_LOCK = threading.Semaphore(1)` 串行 ffmpeg 调用——VideoToolbox 走专用
+ANE/Media Engine，跟 mlx-whisper（GPU shader）理论可并行，但 unified memory 带宽
+共享，保险起见单一锁。NAS `processSemaphore` 容量 1 也确保同时只发一个请求。
+
+### 故障排查
+
+`actual_burn_provider` 字段写到返回 dict 中：
+- `actual_burn_provider=remote-mac` → P7 链路工作 ✓
+- `actual_burn_provider=nas-software` → 降级到了软编码，看 worker 日志 grep `burn chain`
+
+```bash
+docker logs subtitle-worker 2>&1 | grep "burn chain"
+# 看到例如：burn chain chose provider=nas-software after attempts=[('remote-mac', 'skipped:not-supported'), ('nas-software', 'ok')]
+```
+
+### 设计 caveats（部署前必读）
+
+**1. 原子发布保证**：
+- `burn_remote_mac` 写到 `<output>.burning-<pid>-<ts>.tmp` 再 `os.replace`——失败时
+  原 output 文件保留（chain fallback 到 nas-software 时旧产物不被损坏）。
+- `burn_subtitles`（NAS 软编码）也是原子发布。
+- **但 ASS 和 SRT 是先于 burn 写入**：burn 失败时 ASS/SRT 已落盘，调用方
+  （SubtitleManager）需要按 `actual_burn_provider` 字段判断是否生成完整。
+
+**2. FastAPI 线程池约束**：
+- Mac 端 `_BURN_LOCK` 是 `threading.Lock()` 串行 ffmpeg 进程——burn 期间持锁占
+  一个 anyio threadpool worker（默认 40）。
+- 单个 BiliNote/NAS 配 `processSemaphore=1` 不会触发上限。
+- **BiliNote 自身 NoteResults 不能 5+ 并发 burn**——会让 transcribe / healthz 排队。
+  实际场景（顺序处理 note）不会撞这个限制。
+
+**3. ffmpeg subprocess 超时**：
+- Mac 端 `subprocess.run(timeout=1100)` 兜底——VideoToolbox 偶发 GPU stall 会
+  被 SIGKILL，`_BURN_LOCK` 自然释放，避免后续永久卡死。
+- NAS 端 `SUBTITLE_MAC_BURN_TIMEOUT=1200` 留 100s 给 mac 先处理 hung。
+
+**4. ClientDisconnect 行为**：
+- Mac 端用 `FileResponse + BackgroundTask` 清理临时文件——即使 NAS 端中途断开，
+  Starlette 会捕获 `ClientDisconnect` 并仍执行 BackgroundTask，`/tmp` 不会泄漏。
+
 ## 输出文件
 
 对于 `video/<主播>/Season 01/<episode>.mp4`，字幕链会维护：
