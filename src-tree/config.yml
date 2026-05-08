@@ -139,6 +139,7 @@ subtitle:
   # 可选值：dashscope、local-whisper
   default_provider: dashscope
   retention_days: 7
+  delete_source_on_completion: false
   language: zh
   local:
     model: small

@@ -1,4 +1,8 @@
-#docker build -t bililive-go:build . -f Dockerfile.build-and-run 
+#docker build -t bililive-go:build . -f Dockerfile.build-and-run
+# Optional apt mirror override for region-specific speedup. 默认走 deb.debian.org（不破坏行为），
+# 中国区构建建议: --build-arg APT_MIRROR_URL=https://mirrors.tuna.tsinghua.edu.cn
+ARG APT_MIRROR_URL=http://deb.debian.org
+
 FROM golang:1.25.0 AS builder
 
 WORKDIR /build
@@ -15,6 +19,11 @@ ENV HTTP_PROXY=${HTTP_PROXY} \
     http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
     no_proxy=${NO_PROXY}
+
+# apt 默认无 HTTP timeout / retries，单一连接卡死会导致 build 永久挂起。
+# 实测 NAS 上 deb.debian.org 偶发 silent stall（TCP 不断不报错），加上下面三行后
+# 任何挂死连接 30s 就会 abort + 自动 retry 3 次，避免整个 build 永久睡眠。
+RUN echo 'Acquire::http::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::Retries "3";' > /etc/apt/apt.conf.d/99retries
 
 # 安装解压 node.tar.xz 所需工具
 RUN apt-get update && \
@@ -59,6 +68,7 @@ ARG tag
 ARG HTTP_PROXY
 ARG HTTPS_PROXY
 ARG NO_PROXY
+ARG APT_MIRROR_URL
 
 ENV WORKDIR="/srv/bililive"
 ENV OUTPUT_DIR="/srv/bililive" \
@@ -72,6 +82,17 @@ ENV PUID=0 PGID=0 UMASK=022 \
     http_proxy=${HTTP_PROXY} \
     https_proxy=${HTTPS_PROXY} \
     no_proxy=${NO_PROXY}
+
+# Stage 2 apt 加固（双管齐下）：
+# 1) timeout/retry 让单连接 silent stall 在 30s 内 abort（apt 默认无 timeout）
+# 2) 可选切到 China mirror（默认仍是 deb.debian.org），实测从中国到 deb.debian.org
+#    在 trixie ffmpeg 215 包下载里高频 silent stall。
+RUN echo 'Acquire::http::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::Retries "3";' > /etc/apt/apt.conf.d/99retries && \
+    if [ "$APT_MIRROR_URL" != "http://deb.debian.org" ]; then \
+        echo "Switching apt mirror to $APT_MIRROR_URL"; \
+        sed -i "s|http://deb.debian.org|$APT_MIRROR_URL|g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+        sed -i "s|http://deb.debian.org|$APT_MIRROR_URL|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 RUN mkdir -p $OUTPUT_DIR && \
     mkdir -p $CONF_DIR && \
