@@ -312,6 +312,13 @@ type SubtitleConfig struct {
 	LibraryRoot     string              `yaml:"library_root,omitempty" json:"library_root,omitempty"`
 	PublicURLBase   string              `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
 	RetentionDays   int                 `yaml:"retention_days" json:"retention_days"`
+	// P11: 字幕生成成功后立即删除源文件（绕过 retention_days 等待 + 12h cleanup ticker）。
+	// 跟 retention_days 互补不冲突：
+	// - DeleteSourceOnCompletion=true 走 pipeline 同步删除（completed 触发瞬间）
+	// - retention_days=N 走后台定期清理（covers KeepSource=false 但 immediate 失败时的兜底）
+	// 默认 false 保守——升级镜像不会破坏现有部署存量数据。运维显式启用后才删。
+	// per-record KeepSource=true 仍优先生效（"这条特别保留"）。
+	DeleteSourceOnCompletion bool                `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
 	Language        string              `yaml:"language" json:"language"`
 	Local           SubtitleLocalConfig `yaml:"local" json:"local"`
 	Cloud           SubtitleCloudConfig `yaml:"cloud" json:"cloud"`

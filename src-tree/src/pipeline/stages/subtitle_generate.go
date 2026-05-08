@@ -10,6 +10,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/subtitle"
+	"github.com/sirupsen/logrus"
 )
 
 type SubtitleGenerateStage struct {
@@ -43,6 +44,7 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 	defer subtitle.InvalidateRecordCache()
 
 	libraryRoot := cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath)
+	sourceRoot := cfg.Subtitle.GetEffectiveSourceRoot(cfg.OutPutPath)
 	provider := s.config.GetStringOption("provider", cfg.Subtitle.DefaultProvider)
 	language := s.config.GetStringOption("language", cfg.Subtitle.Language)
 	preset := subtitle.ResolveRenderPreset(
@@ -127,6 +129,20 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		metadata.SourceExists = fileExists(file.Path)
 		if err := subtitle.SaveMetadata(metadataPath, metadata); err != nil {
 			return nil, err
+		}
+
+		// P11: 完成后立即删除源文件（节省存储空间）
+		// 触发条件：cfg.Subtitle.DeleteSourceOnCompletion=true + KeepSource=false +
+		// 源文件还存在。失败不让 pipeline 失败——只 log warning，retention_days 后台
+		// cleanup ticker 会兜底重试。
+		if cfg.Subtitle.DeleteSourceOnCompletion && !metadata.KeepSource && metadata.SourceExists {
+			if err := subtitle.DeleteSourceFile(libraryPath, sourceRoot); err != nil {
+				logrus.WithError(err).WithField("source", file.Path).
+					Warn("字幕完成后删除源文件失败（不阻塞 pipeline，retention 后台兜底）")
+				s.logs += fmt.Sprintf("源文件删除失败（已记入日志）: %s\n", filepath.Base(file.Path))
+			} else {
+				s.logs += fmt.Sprintf("源文件已删除（节省存储）: %s\n", filepath.Base(file.Path))
+			}
 		}
 
 		s.logs += fmt.Sprintf("字幕生成完成: %s\n", filepath.Base(libraryPath))
