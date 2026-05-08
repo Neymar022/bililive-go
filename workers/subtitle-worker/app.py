@@ -22,7 +22,7 @@ class BurnStyle(BaseModel):
     single_line: bool = True
     overflow_mode: str = "ellipsis"
     margin_v: int = 24
-    outline: int = 2
+    outline: int = 0
     shadow: int = 0
 
 

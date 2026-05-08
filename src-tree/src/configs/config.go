@@ -797,7 +797,7 @@ var defaultConfig = Config{
 			SingleLine:        true,
 			OverflowMode:      "ellipsis",
 			MarginV:           24,
-			Outline:           2,
+			Outline:           0,
 			Shadow:            0,
 		},
 	},

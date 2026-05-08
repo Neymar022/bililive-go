@@ -121,7 +121,9 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
     burn_style = burn_style or {}
     font_name = str(burn_style.get("font_name", "Noto Sans CJK SC"))
     base_font_size = int(burn_style.get("font_size", 50))
-    base_outline = float(burn_style.get("outline", 2))
+    # 默认 0 = 纯白文字无黑描边。气泡背景 0.85 不透明度已经提供足够对比度。
+    # 历史 yaml 显式写 outline:N 仍然生效。
+    base_outline = float(burn_style.get("outline", 0))
     base_shadow = float(burn_style.get("shadow", 0))
 
     if video_height > video_width:
@@ -146,7 +148,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
             orientation="portrait",
             font_name=font_name,
             font_size=font_size,
-            outline=max(round(base_outline * scale), 1),
+            outline=max(round(base_outline * scale), 0),
             shadow=max(round(base_shadow * scale), 0),
             margin_v=margin_v,
             margin_l=margin_l,
@@ -178,7 +180,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
         orientation="landscape",
         font_name=font_name,
         font_size=font_size,
-        outline=max(round(base_outline * scale), 1),
+        outline=max(round(base_outline * scale), 0),
         shadow=max(round(base_shadow * scale), 0),
         margin_v=margin_v,
         margin_l=margin_l,

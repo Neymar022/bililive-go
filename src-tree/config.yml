@@ -172,5 +172,7 @@ subtitle:
     # wrap: 自动换成双排
     overflow_mode: ellipsis
     margin_v: 24
-    outline: 2
+    # 默认 0 = 纯白文字无黑描边；气泡 0.85 不透明度已提供高对比度。
+    # 如果在浅色场景需要描边保护，可以显式设 1 或 2。
+    outline: 0
     shadow: 0
