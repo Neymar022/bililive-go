@@ -196,5 +196,14 @@ package-lock.json
 # CI Docker 构建临时目录（保留 .gitkeep 确保目录结构存在）
 docker-context/bin/*
 !docker-context/bin/.gitkeep
+# NAS host 上跑 cron 的 organizer 脚本必须版本控制（参考 docker-context/tools/README.md）。
+# 防止类似 P14 "cron-organizer-source-root-mismatch" 这种 wrapper 跟 bililive-go pipeline
+# 路径漂移引入的沉默故障：bililive-go 把录像写到 srt_video/ 但 cron wrapper 还在扫 source/。
 docker-context/tools/*
 !docker-context/tools/.gitkeep
+!docker-context/tools/README.md
+!docker-context/tools/bililive_sync_library.sh
+!docker-context/tools/bililive_media_organizer.py
+!docker-context/tools/bililive_tv_library_builder.py
+!docker-context/tools/tests/
+!docker-context/tools/tests/*.sh
