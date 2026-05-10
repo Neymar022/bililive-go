@@ -95,7 +95,11 @@ def process(req: ProcessRequest) -> dict[str, Any]:
             mac_burn_token=os.getenv("SUBTITLE_MAC_BURN_TOKEN"),
             mac_burn_codec=os.getenv("SUBTITLE_MAC_BURN_CODEC", "h264_videotoolbox"),
             mac_burn_bitrate=os.getenv("SUBTITLE_MAC_BURN_BITRATE", "5M"),
-            mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "1200")),
+            # P15 修：默认从 1200s（旧 P9 era 值，会让 long video burn timeout 触发
+            # NAS-software 兜底失败链）提到 18000s（5h），跟 worker_core.py 的
+            # DEFAULT_MAC_BURN_TIMEOUT_SECONDS + Mac burn_handler.py 的
+            # DEFAULT_FFMPEG_TIMEOUT_SECONDS 三层对齐。
+            mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "18000")),
         )
     except WorkerSafeError as exc:
         # message 已被 worker_core 标记为安全暴露：参数缺失/不支持的 provider 等。
