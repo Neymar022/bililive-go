@@ -1,0 +1,102 @@
+name: Publish Docker Images
+
+# 触发条件：merge 到 codex/p1-p6-subtitle-mac-mlx（这个 fork 的事实主线）
+# 或者人工 workflow_dispatch 触发。
+#
+# 参考 BiliNote 项目同款 CI 模式（neymar022/bilinote-backend），但适配
+# bililive-go fork 的两层命名空间（src-tree/ + workers/）。
+on:
+  push:
+    branches:
+      - codex/p1-p6-subtitle-mac-mlx
+    paths:
+      - 'src-tree/**'
+      - 'workers/subtitle-worker/**'
+      - '.github/workflows/publish-images.yaml'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Git ref to build and publish
+        required: false
+        default: codex/p1-p6-subtitle-mac-mlx
+
+# 同分支并发时取消上一个 run（避免连续 merge 造成 build 排队）
+concurrency:
+  group: publish-images-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  APP_IMAGE: neymar022/bililive-go-app
+  WORKER_IMAGE: neymar022/bililive-go-subtitle-worker
+
+jobs:
+  publish-images:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.ref_name }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      # ---------- bililive-go-app (主进程) ----------
+      - name: Docker metadata for app image
+        id: app-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.APP_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push app image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./src-tree
+          file: ./src-tree/Dockerfile.build-and-run
+          # 暂时只构 amd64：arm64 通过 QEMU 在 runner 上跑 yarn+go 很慢（30+ min）
+          # 后续如有 arm64 NAS 用户需求再加 linux/arm64
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.app-meta.outputs.tags }}
+          labels: ${{ steps.app-meta.outputs.labels }}
+          # GitHub Actions runner 在 US，deb.debian.org 默认即可，无需 China mirror
+          # （build-arg 不传则用 Dockerfile 默认 deb.debian.org，对 CI 性能最优）
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,mode=max,scope=app
+
+      # ---------- bililive-go-subtitle-worker ----------
+      - name: Docker metadata for subtitle worker image
+        id: worker-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.WORKER_IMAGE }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push subtitle worker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./workers/subtitle-worker
+          file: ./workers/subtitle-worker/Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.worker-meta.outputs.tags }}
+          labels: ${{ steps.worker-meta.outputs.labels }}
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
