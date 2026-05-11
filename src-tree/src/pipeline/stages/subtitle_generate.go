@@ -62,7 +62,20 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 
 		libraryPath, err := subtitle.ResolveLibraryVideoPath(file.Path, libraryRoot)
 		if err != nil {
-			return nil, err
+			// Self-sufficient mode: cron organizer hasn't run yet (race window).
+			// Create the Plex-style hardlink in-process so the pipeline never fails
+			// due to a missing library entry.  P17: eliminate race condition.
+			libraryPath, err = subtitle.EnsureLibraryHardlink(
+				file.Path, libraryRoot,
+				ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("subtitle_generate: failed to ensure library hardlink: %w", err)
+			}
+			logrus.WithFields(logrus.Fields{
+				"source":  file.Path,
+				"library": libraryPath,
+			}).Info("subtitle_generate: 已自建字幕库硬链接（cron 尚未运行）")
 		}
 		srtPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".srt"
 		assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
