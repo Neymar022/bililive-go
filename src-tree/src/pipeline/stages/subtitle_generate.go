@@ -59,6 +59,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			output = append(output, file)
 			continue
 		}
+		if !strings.EqualFold(filepath.Ext(file.Path), ".mp4") {
+			return nil, fmt.Errorf("subtitle_generate: requires mp4 input after fix_flv/convert_mp4, got %s", file.Path)
+		}
 
 		libraryPath, err := subtitle.ResolveLibraryVideoPath(file.Path, libraryRoot)
 		if err != nil {
