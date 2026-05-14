@@ -134,6 +134,33 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	assert.Equal(t, expectedPath, targetPath)
 }
 
+// TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars verifies that
+// completed subtitle sidecars reserve an episode slot even if the rendered mp4
+// was removed by cleanup. Reusing that slot would attach old subtitles to a new
+// source recording.
+func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	stem := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 同名直播")
+	require.NoError(t, os.WriteFile(stem+".srt", []byte("old subtitles"), 0o644))
+	require.NoError(t, os.WriteFile(stem+".ass", []byte("old ass"), 0o644))
+	require.NoError(t, os.WriteFile(stem+".subtitle.json", []byte(`{"status":"completed"}`), 0o644))
+
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 11-00-00 - 同名直播.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("new source"), 0o644))
+
+	targetPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	require.NoError(t, err)
+
+	expectedPath := filepath.Join(seasonDir, "主播.S01E0002.2026-03-20 - 同名直播.mp4")
+	assert.Equal(t, expectedPath, targetPath)
+	_, err = os.Stat(stem + ".mp4")
+	assert.True(t, os.IsNotExist(err), "old sidecar slot must not receive the new video")
+}
+
 // TestBuildEpisodeFilename_Basic checks the filename builder directly.
 func TestBuildEpisodeFilename_Basic(t *testing.T) {
 	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local)

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -20,6 +21,8 @@ import (
 var normalizedFilenamePattern = regexp.MustCompile(
 	`^(?P<alias_name>.+?) - (?P<recorded_at>\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}) - (?P<title>.+)$`,
 )
+
+var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})\.`)
 
 // invalidFilenameChars mirrors INVALID_FILENAME_CHARS in bililive_media_organizer.py.
 var invalidFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
@@ -91,6 +94,36 @@ func countMp4FilesInDir(dir string) int {
 		}
 	}
 	return count
+}
+
+// nextAvailableEpisodeNumber returns the first S01E slot not already used by
+// any file in the season directory. Sidecars reserve slots too, because a stale
+// .srt/.ass/.subtitle.json without an mp4 must not be matched to a new source.
+func nextAvailableEpisodeNumber(dir string) int {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 1
+	}
+	used := make(map[int]struct{}, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		match := libraryEpisodeSlotPattern.FindStringSubmatch(e.Name())
+		if match == nil {
+			continue
+		}
+		episodeNumber, err := strconv.Atoi(match[1])
+		if err != nil {
+			continue
+		}
+		used[episodeNumber] = struct{}{}
+	}
+	for episodeNumber := 1; ; episodeNumber++ {
+		if _, ok := used[episodeNumber]; !ok {
+			return episodeNumber
+		}
+	}
 }
 
 // parseSourceFileMeta extracts aliasName, recordedAt, and title from a source
@@ -172,14 +205,13 @@ func findExistingHardlinkInDir(sourcePath, dir string) (string, error) {
 // Idempotent: if any file inside Season 01 already shares the same inode as
 // sourcePath, that path is returned as-is — no new file is created.
 //
-// Episode numbering: count existing mp4 files in Season 01 + 1.  This may
-// diverge from the cron-assigned number if the cron runs concurrently and adds
-// episodes while we are building, but is safe because duplicate-inode detection
-// above catches the important case of the same source being linked twice.
+// Episode numbering: first free S01E slot in Season 01, considering sidecars
+// as slot reservations. This avoids attaching stale subtitles to a newer
+// recording after the rendered video was removed.
 //
 // Race-safe: a concurrent call will either find the same-inode entry in the
-// scan above, or will race on os.Link which returns EEXIST — we treat that as
-// a successful idempotent operation.
+// scan above, or will race on os.Link which returns EEXIST and then retry the
+// next free slot after checking whether our source already appeared.
 func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbackTime time.Time) (string, error) {
 	ext := filepath.Ext(sourcePath)
 	meta := parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
@@ -193,37 +225,37 @@ func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbac
 		return existingLink, nil
 	}
 
-	// Step 2: compute episode number as count of existing mp4s + 1.
-	existingCount := countMp4FilesInDir(seasonDir)
-	episodeNumber := existingCount + 1
-
-	targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
-	targetPath := filepath.Join(seasonDir, targetName)
-
-	// Step 3: create parent dirs and hard-link.
 	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return "", fmt.Errorf("EnsureLibraryHardlink: mkdirAll %s: %w", seasonDir, err)
 	}
 
-	if err := os.Link(sourcePath, targetPath); err != nil {
+	// Step 2: compute the first episode slot not reserved by videos or sidecars.
+	episodeNumber := nextAvailableEpisodeNumber(seasonDir)
+
+	for {
+		targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
+		targetPath := filepath.Join(seasonDir, targetName)
+
+		// Step 3: create hard-link without overwriting any occupied slot.
+		err := os.Link(sourcePath, targetPath)
+		if err == nil {
+			logrus.WithFields(logrus.Fields{
+				"source":  sourcePath,
+				"target":  targetPath,
+				"episode": episodeNumber,
+			}).Info("EnsureLibraryHardlink: 已为源文件创建字幕库硬链接（未等待 cron）")
+
+			return targetPath, nil
+		}
 		if os.IsExist(err) {
 			// Concurrent call already created this exact slot — verify it's our link.
 			existingLink, scanErr := findExistingHardlinkInDir(sourcePath, seasonDir)
 			if scanErr == nil && existingLink != "" {
 				return existingLink, nil
 			}
-			// Something else at that path; return targetPath as best-effort.
-			return targetPath, nil
+			episodeNumber++
+			continue
 		}
 		return "", fmt.Errorf("EnsureLibraryHardlink: os.Link %s → %s: %w", sourcePath, targetPath, err)
 	}
-
-	logrus.WithFields(logrus.Fields{
-		"source":  sourcePath,
-		"target":  targetPath,
-		"episode": episodeNumber,
-	}).Info("EnsureLibraryHardlink: 已为源文件创建字幕库硬链接（未等待 cron）")
-
-	return targetPath, nil
 }
-

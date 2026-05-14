@@ -28,6 +28,8 @@ PREFERRED_EXTENSIONS = [".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts", 
 PREFERRED_EXTENSION_RANK = {extension: index for index, extension in enumerate(PREFERRED_EXTENSIONS)}
 SHOW_MARKER_FILENAME = ".bililive-show"
 EPISODE_SIDECAR_SUFFIXES = (".nfo", ".srt", ".ass", ".subtitle.json")
+PROTECTED_SUBTITLE_STATUSES = {"queued", "running", "completed"}
+RAW_VIDEO_EXTENSIONS = {".flv"}
 
 
 @dataclass(frozen=True)
@@ -226,7 +228,7 @@ def should_preserve_rendered_video(source_path: Path, target_path: Path) -> bool
     except (OSError, json.JSONDecodeError):
         return False
 
-    if str(metadata.get("status", "")).lower() != "completed":
+    if not is_protected_subtitle_metadata(metadata):
         return False
 
     if not target_path.with_suffix(".ass").exists() and not target_path.with_suffix(".srt").exists():
@@ -235,7 +237,122 @@ def should_preserve_rendered_video(source_path: Path, target_path: Path) -> bool
     try:
         return source_path.stat().st_ino != target_path.stat().st_ino
     except FileNotFoundError:
+        return True
+
+
+def is_protected_subtitle_metadata(metadata: Dict[str, object]) -> bool:
+    status = str(metadata.get("status", "")).lower()
+    renderer_status = str(metadata.get("renderer_status", "")).lower()
+    return status in PROTECTED_SUBTITLE_STATUSES or renderer_status in PROTECTED_SUBTITLE_STATUSES
+
+
+def is_relative_to_path(path: Path, parent: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(parent.resolve(strict=False))
+        return True
+    except ValueError:
         return False
+
+
+def subtitle_metadata_stem(metadata_path: Path) -> Path:
+    name = metadata_path.name
+    if name.endswith(".subtitle.json"):
+        return metadata_path.with_name(name[: -len(".subtitle.json")])
+    return metadata_path.with_suffix("")
+
+
+def add_episode_family(expected_paths: Set[Path], episode_path: Path) -> None:
+    expected_paths.add(episode_path)
+    for suffix in EPISODE_SIDECAR_SUFFIXES:
+        expected_paths.add(episode_path.with_suffix(suffix))
+
+
+def episode_slot_has_sidecars(target_path: Path) -> bool:
+    return any(target_path.with_suffix(suffix).exists() for suffix in EPISODE_SIDECAR_SUFFIXES)
+
+
+def choose_episode_target_path(
+    source_path: Path,
+    season_dir: Path,
+    alias_name: str,
+    episode_number: int,
+    recorded_at: str,
+    title: str,
+    extension: str,
+    allocated_episode_numbers: Set[int],
+) -> Tuple[int, Path]:
+    while True:
+        target_name = build_episode_filename(
+            alias_name=alias_name,
+            episode_number=episode_number,
+            recorded_at=recorded_at,
+            title=title,
+            extension=extension,
+        )
+        target_path = season_dir / target_name
+        if episode_number in allocated_episode_numbers:
+            episode_number += 1
+            continue
+        if target_path.exists():
+            try:
+                if source_path.stat().st_ino == target_path.stat().st_ino:
+                    return episode_number, target_path
+            except FileNotFoundError:
+                pass
+            if should_preserve_rendered_video(source_path, target_path):
+                episode_number += 1
+                continue
+        elif episode_slot_has_sidecars(target_path):
+            episode_number += 1
+            continue
+        return episode_number, target_path
+
+
+def collect_protected_subtitle_outputs(output_root: Path) -> Dict[str, Set[Path]]:
+    protected: Dict[str, Set[Path]] = {}
+    if not output_root.exists():
+        return protected
+
+    for metadata_path in output_root.rglob("*.subtitle.json"):
+        if not metadata_path.name.endswith(".subtitle.json"):
+            continue
+        try:
+            relative = metadata_path.relative_to(output_root)
+        except ValueError:
+            continue
+        if len(relative.parts) < 3:
+            continue
+
+        show_dir = output_root / relative.parts[0]
+        if not (show_dir / SHOW_MARKER_FILENAME).exists():
+            continue
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not is_protected_subtitle_metadata(metadata):
+            continue
+
+        expected_paths = protected.setdefault(
+            show_dir.name,
+            {
+                show_dir,
+                show_dir / SHOW_MARKER_FILENAME,
+                show_dir / "tvshow.nfo",
+                metadata_path.parent,
+            },
+        )
+        expected_paths.add(metadata_path)
+        stem = subtitle_metadata_stem(metadata_path)
+        for existing_path in metadata_path.parent.glob(stem.name + ".*"):
+            expected_paths.add(existing_path)
+
+        output_path = metadata.get("output_path")
+        if isinstance(output_path, str) and output_path:
+            candidate = Path(output_path)
+            if is_relative_to_path(candidate, output_root):
+                add_episode_family(expected_paths, candidate)
+    return protected
 
 
 def remove_path(path: Path, dry_run: bool) -> bool:
@@ -296,6 +413,8 @@ def build_tv_library(
 ) -> Dict[str, int]:
     grouped: Dict[str, List[SourceEpisode]] = defaultdict(list)
     for episode in iter_source_episodes(source_roots, alias_resolver=alias_resolver, alias_filters=set(alias_filters or [])):
+        if episode.source_path.suffix.lower() in RAW_VIDEO_EXTENSIONS:
+            continue
         grouped[episode.alias_name].append(episode)
 
     summary = {
@@ -306,7 +425,7 @@ def build_tv_library(
         "removed_files": 0,
         "removed_dirs": 0,
     }
-    expected_show_files: Dict[str, Set[Path]] = {}
+    expected_show_files: Dict[str, Set[Path]] = collect_protected_subtitle_outputs(output_root)
     for alias_name, items in sorted(grouped.items()):
         items.sort(key=lambda item: (item.recorded_dt, item.platform_name, item.title, str(item.source_path)))
         summary["shows"] += 1
@@ -314,12 +433,14 @@ def build_tv_library(
         show_dir = output_root / alias_name
         season_dir = show_dir / "Season 01"
         show_marker = show_dir / SHOW_MARKER_FILENAME
-        expected_show_files[alias_name] = {
-            show_dir,
-            show_marker,
-            show_dir / "tvshow.nfo",
-            season_dir,
-        }
+        expected_show_files.setdefault(alias_name, set()).update(
+            {
+                show_dir,
+                show_marker,
+                show_dir / "tvshow.nfo",
+                season_dir,
+            }
+        )
         premiered = items[0].recorded_dt.strftime("%Y-%m-%d")
         platforms = [item.platform_name for item in items]
         tvshow_nfo = build_tvshow_nfo(alias_name=alias_name, premiered=premiered, platforms=platforms)
@@ -328,15 +449,19 @@ def build_tv_library(
         if ensure_text_file(show_dir / "tvshow.nfo", tvshow_nfo, dry_run=dry_run):
             summary["updated_nfos"] += 1
 
+        allocated_episode_numbers: Set[int] = set()
         for index, item in enumerate(items, start=1):
-            target_name = build_episode_filename(
+            episode_number, target_path = choose_episode_target_path(
+                source_path=item.source_path,
+                season_dir=season_dir,
                 alias_name=alias_name,
                 episode_number=index,
                 recorded_at=item.recorded_at,
                 title=item.title,
                 extension=item.source_path.suffix,
+                allocated_episode_numbers=allocated_episode_numbers,
             )
-            target_path = season_dir / target_name
+            allocated_episode_numbers.add(episode_number)
             expected_show_files[alias_name].add(target_path)
             for suffix in EPISODE_SIDECAR_SUFFIXES:
                 expected_show_files[alias_name].add(target_path.with_suffix(suffix))

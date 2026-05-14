@@ -209,6 +209,42 @@ func TestSubtitleGenerateSelfSufficientCreatesHardlink(t *testing.T) {
 	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
 }
 
+// TestSubtitleGenerateRejectsRawFlvInput ensures raw FLV files never enter
+// subtitle/burn processing directly. They must pass fix_flv + convert_mp4 first;
+// otherwise bad FLV streams can leave visible library videos without subtitles.
+func TestSubtitleGenerateRejectsRawFlvInput(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 原始FLV.flv")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("raw flv"), 0o644))
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.DeleteSourceOnCompletion = true
+	configs.SetCurrentConfig(cfg)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	_, err = stage.Execute(&pipeline.PipelineContext{
+		Logger:     livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{HostName: "主播"},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires mp4 input")
+	_, statErr := os.Stat(sourcePath)
+	assert.NoError(t, statErr, "raw FLV must be preserved for repair/retry")
+
+	matches, globErr := filepath.Glob(filepath.Join(libraryRoot, "主播", "Season 01", "*.flv"))
+	require.NoError(t, globErr)
+	assert.Empty(t, matches, "raw FLV must not be published to subtitle library")
+}
+
 // TestSubtitleGenerateSelfSufficientUsesExistingLink P17 幂等性测试：如果
 // cron 已先创建了硬链接，pipeline 应直接使用它（不创建重复文件），正常完成。
 func TestSubtitleGenerateSelfSufficientUsesExistingLink(t *testing.T) {
