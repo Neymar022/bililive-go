@@ -21,7 +21,6 @@ class ASSGeneratorTest(unittest.TestCase):
         self.assertNotEqual(landscape.font_size, portrait.font_size)
         self.assertNotEqual(landscape.margin_v, portrait.margin_v)
         self.assertNotEqual(landscape.max_chars, portrait.max_chars)
-        self.assertNotEqual(landscape.outline, portrait.outline)
         self.assertNotEqual(landscape.min_box_width, portrait.min_box_width)
         self.assertNotEqual(landscape.max_box_width, portrait.max_box_width)
         self.assertNotEqual(landscape.safe_text_width, portrait.safe_text_width)

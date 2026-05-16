@@ -14,7 +14,7 @@ class BurnStyle(BaseModel):
     preset: str = "bottom_center"
     font_name: str = "Noto Sans CJK SC"
     font_size: int = 50
-    card_width: int = 1018
+    card_width: int = 920
     card_height: int = 196
     bottom_offset: int = 640
     background_opacity: float = 0.9

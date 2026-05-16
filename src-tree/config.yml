@@ -156,7 +156,7 @@ subtitle:
     # 字幕字号，供样式实验室和烧录任务共享
     font_size: 50
     # 字幕卡片宽度（像素）
-    card_width: 1018
+    card_width: 920
     # 字幕卡片高度（像素）
     card_height: 196
     # 字幕卡片距底部的偏移量（像素）
@@ -172,7 +172,5 @@ subtitle:
     # wrap: 自动换成双排
     overflow_mode: ellipsis
     margin_v: 24
-    # 默认 0 = 纯白文字无黑描边；气泡 0.85 不透明度已提供高对比度。
-    # 如果在浅色场景需要描边保护，可以显式设 1 或 2。
     outline: 0
     shadow: 0

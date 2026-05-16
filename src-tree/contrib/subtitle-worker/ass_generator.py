@@ -12,7 +12,12 @@ LANDSCAPE_REFERENCE = (1920, 1080)
 PORTRAIT_MIN_BOX_WIDTH = 240
 LANDSCAPE_MIN_BOX_WIDTH = 300
 PORTRAIT_VISUAL_ANCHOR_RATIO = 0.75
-PORTRAIT_FONT_BOOST = 1.08
+LANDSCAPE_FONT_BOOST = 1.18
+PORTRAIT_FONT_BOOST = 1.22
+LANDSCAPE_BOX_HEIGHT_RATIO = 1.90
+PORTRAIT_BOX_HEIGHT_RATIO = 1.70
+LANDSCAPE_SIDE_PADDING_EM = 0.60
+PORTRAIT_SIDE_PADDING_EM = 0.65
 
 
 @dataclass(frozen=True)
@@ -94,13 +99,9 @@ def scaled_style_value(raw_value: Any, scale: float, minimum: int = 0) -> int:
 
 def resolve_single_line_box_height(font_size: int, orientation: str) -> int:
     if orientation == "portrait":
-        # Portrait talking-head clips look better when the pill tracks the text more closely
-        # instead of inheriting the older, taller card rhythm.
-        return max(int(round(font_size * 2.08)), 44)
+        return max(int(round(font_size * PORTRAIT_BOX_HEIGHT_RATIO)), 44)
 
-    # Landscape still benefits from a slightly roomier pill so longer Latin/CJK mixes do not
-    # feel cramped after ASS rasterization.
-    return max(int(round(font_size * 2.36)), 48)
+    return max(int(round(font_size * LANDSCAPE_BOX_HEIGHT_RATIO)), 52)
 
 
 def resolve_min_box_width(reference_width: int, font_size: int, scale: float, minimum_chars: int) -> int:
@@ -119,13 +120,13 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
     burn_style = burn_style or {}
     font_name = str(burn_style.get("font_name", "Noto Sans CJK SC"))
     base_font_size = int(burn_style.get("font_size", 50))
-    base_outline = float(burn_style.get("outline", 2))
+    base_outline = float(burn_style.get("outline", 0))
     base_shadow = float(burn_style.get("shadow", 0))
 
     if video_height > video_width:
         ref_width, ref_height = PORTRAIT_REFERENCE
         scale = min(video_width / ref_width, video_height / ref_height)
-        font_size = scaled_style_value(base_font_size, scale * PORTRAIT_FONT_BOOST, minimum=16)
+        font_size = scaled_style_value(base_font_size, scale * PORTRAIT_FONT_BOOST, minimum=20)
         box_height = resolve_single_line_box_height(font_size, "portrait")
         # ASS/libass uses a bottom-safe margin model; legacy bottom_offset belongs to the older card renderer.
         margin_v = scaled_style_value(burn_style.get("margin_v") or 220, scale)
@@ -135,7 +136,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
         available_width = max(video_width - margin_l - margin_r, 1)
         max_box_width = min(available_width, configured_width or int(video_width * 0.9))
         min_box_width = min(max_box_width, resolve_min_box_width(PORTRAIT_MIN_BOX_WIDTH, font_size, scale, minimum_chars=4))
-        side_padding = max(scaled_style_value(44, scale, minimum=16), int(round(font_size * 0.9)))
+        side_padding = max(scaled_style_value(32, scale, minimum=16), int(round(font_size * PORTRAIT_SIDE_PADDING_EM)))
         safe_text_width = max(max_box_width - side_padding * 2, 1)
         text_half_height = box_height // 2
         visual_anchor_y = max(text_half_height, int(round(video_height * PORTRAIT_VISUAL_ANCHOR_RATIO)))
@@ -144,7 +145,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
             orientation="portrait",
             font_name=font_name,
             font_size=font_size,
-            outline=max(round(base_outline * scale), 1),
+            outline=max(round(base_outline * scale), 0),
             shadow=max(round(base_shadow * scale), 0),
             margin_v=margin_v,
             margin_l=margin_l,
@@ -161,7 +162,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
 
     ref_width, ref_height = LANDSCAPE_REFERENCE
     scale = min(video_width / ref_width, video_height / ref_height)
-    font_size = scaled_style_value(base_font_size, scale, minimum=18)
+    font_size = scaled_style_value(base_font_size, scale * LANDSCAPE_FONT_BOOST, minimum=22)
     box_height = resolve_single_line_box_height(font_size, "landscape")
     margin_v = scaled_style_value(burn_style.get("margin_v") or 96, scale)
     margin_l = scaled_style_value(72, scale, minimum=20)
@@ -170,13 +171,13 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
     available_width = max(video_width - margin_l - margin_r, 1)
     max_box_width = min(available_width, configured_width or int(video_width * 0.78))
     min_box_width = min(max_box_width, resolve_min_box_width(LANDSCAPE_MIN_BOX_WIDTH, font_size, scale, minimum_chars=5))
-    side_padding = max(scaled_style_value(40, scale, minimum=18), int(round(font_size * 0.75)))
+    side_padding = max(scaled_style_value(32, scale, minimum=18), int(round(font_size * LANDSCAPE_SIDE_PADDING_EM)))
     safe_text_width = max(max_box_width - side_padding * 2, 1)
     return ASSStyleProfile(
         orientation="landscape",
         font_name=font_name,
         font_size=font_size,
-        outline=max(round(base_outline * scale), 1),
+        outline=max(round(base_outline * scale), 0),
         shadow=max(round(base_shadow * scale), 0),
         margin_v=margin_v,
         margin_l=margin_l,

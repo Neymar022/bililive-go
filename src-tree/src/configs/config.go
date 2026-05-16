@@ -789,7 +789,7 @@ var defaultConfig = Config{
 			Preset:            DefaultSubtitleRenderPreset,
 			FontName:          "Noto Sans CJK SC",
 			FontSize:          50,
-			CardWidth:         1018,
+			CardWidth:         920,
 			CardHeight:        196,
 			BottomOffset:      640,
 			BackgroundOpacity: 0.9,

@@ -17,6 +17,10 @@ PORTRAIT_VISUAL_ANCHOR_RATIO = 0.75
 # 比例不协调，把基础 boost 调高（横向新增 1.18，竖向 1.08→1.22）。
 LANDSCAPE_FONT_BOOST = 1.18
 PORTRAIT_FONT_BOOST = 1.22
+LANDSCAPE_BOX_HEIGHT_RATIO = 1.90
+PORTRAIT_BOX_HEIGHT_RATIO = 1.70
+LANDSCAPE_SIDE_PADDING_EM = 0.60
+PORTRAIT_SIDE_PADDING_EM = 0.65
 
 
 @dataclass(frozen=True)
@@ -97,12 +101,10 @@ def scaled_style_value(raw_value: Any, scale: float, minimum: int = 0) -> int:
 
 
 def resolve_single_line_box_height(font_size: int, orientation: str) -> int:
-    # 倍率 = box_height / font_size，越大字越"飘"在盒子里，越小字越"塞满"。
-    # 用户反馈"字相对背景偏小"——同时 +字号 + 收紧倍率，让字主导视觉重心。
     if orientation == "portrait":
-        return max(int(round(font_size * 1.95)), 48)
+        return max(int(round(font_size * PORTRAIT_BOX_HEIGHT_RATIO)), 44)
 
-    return max(int(round(font_size * 2.18)), 52)
+    return max(int(round(font_size * LANDSCAPE_BOX_HEIGHT_RATIO)), 52)
 
 
 def resolve_min_box_width(reference_width: int, font_size: int, scale: float, minimum_chars: int) -> int:
@@ -139,7 +141,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
         available_width = max(video_width - margin_l - margin_r, 1)
         max_box_width = min(available_width, configured_width or int(video_width * 0.9))
         min_box_width = min(max_box_width, resolve_min_box_width(PORTRAIT_MIN_BOX_WIDTH, font_size, scale, minimum_chars=4))
-        side_padding = max(scaled_style_value(44, scale, minimum=16), int(round(font_size * 0.9)))
+        side_padding = max(scaled_style_value(32, scale, minimum=16), int(round(font_size * PORTRAIT_SIDE_PADDING_EM)))
         safe_text_width = max(max_box_width - side_padding * 2, 1)
         text_half_height = box_height // 2
         visual_anchor_y = max(text_half_height, int(round(video_height * PORTRAIT_VISUAL_ANCHOR_RATIO)))
@@ -174,7 +176,7 @@ def build_ass_style_profile(video_width: int, video_height: int, burn_style: dic
     available_width = max(video_width - margin_l - margin_r, 1)
     max_box_width = min(available_width, configured_width or int(video_width * 0.78))
     min_box_width = min(max_box_width, resolve_min_box_width(LANDSCAPE_MIN_BOX_WIDTH, font_size, scale, minimum_chars=5))
-    side_padding = max(scaled_style_value(40, scale, minimum=18), int(round(font_size * 0.75)))
+    side_padding = max(scaled_style_value(32, scale, minimum=18), int(round(font_size * LANDSCAPE_SIDE_PADDING_EM)))
     safe_text_width = max(max_box_width - side_padding * 2, 1)
     return ASSStyleProfile(
         orientation="landscape",
