@@ -84,7 +84,7 @@ class ASSGeneratorTest(unittest.TestCase):
             burn_style={
                 "font_name": "Noto Sans CJK SC",
                 "font_size": 50,
-                "card_width": 1018,
+                "card_width": 920,
                 "card_height": 196,
                 "bottom_offset": 640,
                 "margin_v": 24,
@@ -104,7 +104,7 @@ class ASSGeneratorTest(unittest.TestCase):
             burn_style={
                 "font_name": "Noto Sans CJK SC",
                 "font_size": 50,
-                "card_width": 1018,
+                "card_width": 920,
                 "card_height": 196,
                 "bottom_offset": 640,
                 "margin_v": 500,
@@ -113,13 +113,13 @@ class ASSGeneratorTest(unittest.TestCase):
             },
         )
 
-        self.assertIn(r"{\an5\pos(240,616)\q2}", ass_text)
+        self.assertIn(r"{\an5\pos(240,619)\q2}", ass_text)
 
     def test_build_ass_style_profile_uses_font_driven_single_line_box_heights(self):
         style = {
             "font_name": "Noto Sans CJK SC",
             "font_size": 50,
-            "card_width": 1018,
+            "card_width": 920,
             "card_height": 196,
             "bottom_offset": 640,
             "margin_v": 24,
@@ -130,17 +130,23 @@ class ASSGeneratorTest(unittest.TestCase):
         portrait = build_ass_style_profile(480, 864, style)
         landscape = build_ass_style_profile(1920, 1080, style)
 
-        self.assertEqual(53, portrait.box_height)
+        self.assertEqual(46, portrait.box_height)
         self.assertEqual(108, portrait.min_box_width)
-        self.assertEqual(129, landscape.box_height)
+        self.assertEqual(112, landscape.box_height)
         self.assertEqual(300, landscape.min_box_width)
         self.assertEqual(648, portrait.text_pos_y)
+
+        recent_portrait = build_ass_style_profile(720, 1280, style)
+        self.assertEqual(41, recent_portrait.font_size)
+        self.assertEqual(70, recent_portrait.box_height)
+        self.assertEqual(613, recent_portrait.max_box_width)
+        self.assertEqual(27, recent_portrait.side_padding)
 
     def test_build_ass_document_uses_compact_single_line_boxes_for_short_cues(self):
         style = {
             "font_name": "Noto Sans CJK SC",
             "font_size": 50,
-            "card_width": 1018,
+            "card_width": 920,
             "card_height": 196,
             "bottom_offset": 640,
             "margin_v": 24,
@@ -163,8 +169,8 @@ class ASSGeneratorTest(unittest.TestCase):
         portrait_box = next(line for line in portrait_ass.splitlines() if line.startswith("Dialogue: 0,"))
         landscape_box = next(line for line in landscape_ass.splitlines() if line.startswith("Dialogue: 0,"))
 
-        self.assertEqual((143, 53), self._box_dimensions(portrait_box))
-        self.assertEqual((400, 129), self._box_dimensions(landscape_box))
+        self.assertEqual((131, 46), self._box_dimensions(portrait_box))
+        self.assertEqual((382, 112), self._box_dimensions(landscape_box))
 
     def test_build_ass_document_uses_vector_box_background_with_rounded_corners(self):
         ass_text, _ = build_ass_document(

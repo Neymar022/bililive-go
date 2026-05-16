@@ -23,7 +23,7 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Equal(t, "zh", cfg.Subtitle.Language)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
 	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
-	assert.Equal(t, 1018, cfg.Subtitle.BurnStyle.CardWidth)
+	assert.Equal(t, 920, cfg.Subtitle.BurnStyle.CardWidth)
 	assert.Equal(t, 196, cfg.Subtitle.BurnStyle.CardHeight)
 	assert.Equal(t, 640, cfg.Subtitle.BurnStyle.BottomOffset)
 	assert.InDelta(t, 0.9, cfg.Subtitle.BurnStyle.BackgroundOpacity, 0.0001)

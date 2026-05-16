@@ -65,7 +65,7 @@ subtitle:
     preset: vizard_classic_cn
     font_name: Noto Sans CJK SC
     font_size: 50
-    card_width: 1018
+    card_width: 920
     card_height: 196
     bottom_offset: 640
     background_opacity: 0.9
