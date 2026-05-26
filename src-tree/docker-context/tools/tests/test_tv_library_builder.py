@@ -97,6 +97,49 @@ class TvLibraryBuilderTest(unittest.TestCase):
             self.assertFalse(sidecar(old_stem, ".mp4").exists())
             self.assertTrue(new_target.exists())
             self.assertEqual(new_source.stat().st_ino, new_target.stat().st_ino)
+            episode_nfo = sidecar(new_target.with_suffix(""), ".nfo").read_text(encoding="utf-8")
+            self.assertIn("<episode>2</episode>", episode_nfo)
+
+    def test_completed_output_without_source_gets_missing_episode_nfo(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            source_root = root / "source"
+            output_root = root / "video"
+            source_root.mkdir()
+
+            show_dir = output_root / "主播"
+            season_dir = show_dir / "Season 01"
+            season_dir.mkdir(parents=True)
+            (show_dir / ".bililive-show").write_text("", encoding="utf-8")
+            (show_dir / "tvshow.nfo").write_text("<tvshow />\n", encoding="utf-8")
+
+            stem = season_dir / "主播.S01E0007.2026-03-20 - 历史直播"
+            video_path = sidecar(stem, ".mp4")
+            video_path.write_bytes(b"rendered")
+            sidecar(stem, ".srt").write_text("old subtitles\n", encoding="utf-8")
+            sidecar(stem, ".ass").write_text("old ass\n", encoding="utf-8")
+            sidecar(stem, ".subtitle.json").write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "renderer_status": "completed",
+                        "source_path": str(source_root / "missing.mp4"),
+                        "output_path": str(video_path),
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            summary = build_tv_library(source_roots=[source_root], output_root=output_root, dry_run=False)
+
+            episode_nfo = sidecar(stem, ".nfo")
+            self.assertEqual(1, summary["updated_nfos"])
+            self.assertTrue(episode_nfo.exists())
+            episode_nfo_text = episode_nfo.read_text(encoding="utf-8")
+            self.assertIn("<showtitle>主播</showtitle>", episode_nfo_text)
+            self.assertIn("<episode>7</episode>", episode_nfo_text)
 
     def test_raw_flv_source_is_not_published_to_subtitle_library(self):
         with tempfile.TemporaryDirectory() as temp_dir:
