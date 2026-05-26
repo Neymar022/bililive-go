@@ -3,12 +3,14 @@ import argparse
 import errno
 import json
 import os
+import re
 import shutil
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape
 
 from bililive_media_organizer import (
@@ -30,6 +32,9 @@ SHOW_MARKER_FILENAME = ".bililive-show"
 EPISODE_SIDECAR_SUFFIXES = (".nfo", ".srt", ".ass", ".subtitle.json")
 PROTECTED_SUBTITLE_STATUSES = {"queued", "running", "completed"}
 RAW_VIDEO_EXTENSIONS = {".flv"}
+EPISODE_TARGET_PATTERN = re.compile(
+    r"^(?P<alias>.+)\.S(?P<season>\d{2})E(?P<episode>\d{4})\.(?P<aired>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$"
+)
 
 
 @dataclass(frozen=True)
@@ -40,6 +45,15 @@ class SourceEpisode:
     recorded_at: str
     recorded_dt: datetime
     source_path: Path
+
+
+@dataclass(frozen=True)
+class EpisodeTargetMetadata:
+    alias_name: str
+    title: str
+    platform_name: str
+    recorded_at: str
+    episode_number: int
 
 
 def iter_source_episodes(
@@ -261,6 +275,93 @@ def subtitle_metadata_stem(metadata_path: Path) -> Path:
     return metadata_path.with_suffix("")
 
 
+def infer_recorded_at_from_subtitle_metadata(target_path: Path, fallback_date: str) -> str:
+    metadata_path = target_path.with_suffix(".subtitle.json")
+    if metadata_path.exists():
+        try:
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            metadata = {}
+        source_path = metadata.get("source_path")
+        if isinstance(source_path, str) and source_path:
+            parsed = parse_video_filename(Path(source_path).name)
+            if parsed.source_format != "fallback":
+                return parsed.recorded_at
+    return f"{fallback_date} 00-00-00"
+
+
+def parse_episode_target_metadata(target_path: Path, output_root: Path) -> Optional[EpisodeTargetMetadata]:
+    if target_path.suffix.lower() not in set(PREFERRED_EXTENSIONS) - RAW_VIDEO_EXTENSIONS:
+        return None
+    try:
+        relative = target_path.relative_to(output_root)
+    except ValueError:
+        return None
+    if len(relative.parts) < 3 or relative.parts[1] != "Season 01":
+        return None
+
+    match = EPISODE_TARGET_PATTERN.match(target_path.stem)
+    if not match:
+        return None
+    if int(match.group("season")) != 1:
+        return None
+
+    alias_name = sanitize_component(relative.parts[0]) or sanitize_component(match.group("alias")) or "未分类主播"
+    title = sanitize_component(match.group("title")) or "未命名直播"
+    recorded_at = infer_recorded_at_from_subtitle_metadata(target_path, fallback_date=match.group("aired"))
+    return EpisodeTargetMetadata(
+        alias_name=alias_name,
+        title=title,
+        platform_name="未知平台",
+        recorded_at=recorded_at,
+        episode_number=int(match.group("episode")),
+    )
+
+
+def episode_nfo_matches_identity(nfo_path: Path, alias_name: str, episode_number: int) -> bool:
+    if not nfo_path.exists():
+        return False
+    try:
+        root = ET.parse(nfo_path).getroot()
+    except (OSError, ET.ParseError):
+        return False
+    return (
+        root.tag == "episodedetails"
+        and (root.findtext("showtitle") or "") == alias_name
+        and (root.findtext("episode") or "") == str(episode_number)
+    )
+
+
+def repair_expected_episode_nfos(
+    output_root: Path,
+    expected_show_files: Dict[str, Set[Path]],
+    dry_run: bool,
+) -> int:
+    updated_nfos = 0
+    for expected_paths in expected_show_files.values():
+        for target_path in sorted(expected_paths):
+            if not target_path.exists() or not target_path.is_file():
+                continue
+            metadata = parse_episode_target_metadata(target_path, output_root=output_root)
+            if metadata is None:
+                continue
+
+            nfo_path = target_path.with_suffix(".nfo")
+            if episode_nfo_matches_identity(nfo_path, metadata.alias_name, metadata.episode_number):
+                continue
+
+            episode_nfo = build_episode_nfo(
+                alias_name=metadata.alias_name,
+                title=metadata.title,
+                platform_name=metadata.platform_name,
+                recorded_at=metadata.recorded_at,
+                episode_number=metadata.episode_number,
+            )
+            if ensure_text_file(nfo_path, episode_nfo, dry_run=dry_run):
+                updated_nfos += 1
+    return updated_nfos
+
+
 def add_episode_family(expected_paths: Set[Path], episode_path: Path) -> None:
     expected_paths.add(episode_path)
     for suffix in EPISODE_SIDECAR_SUFFIXES:
@@ -470,7 +571,7 @@ def build_tv_library(
                 title=item.title,
                 platform_name=item.platform_name,
                 recorded_at=item.recorded_at,
-                episode_number=index,
+                episode_number=episode_number,
             )
             if ensure_hardlink(item.source_path, target_path, dry_run=dry_run):
                 summary["updated_links"] += 1
@@ -478,6 +579,11 @@ def build_tv_library(
                 summary["updated_nfos"] += 1
             ensure_subtitle_metadata(item.source_path, target_path, dry_run=dry_run)
 
+    summary["updated_nfos"] += repair_expected_episode_nfos(
+        output_root=output_root,
+        expected_show_files=expected_show_files,
+        dry_run=dry_run,
+    )
     cleanup_summary = cleanup_managed_show_dirs(output_root=output_root, expected_show_files=expected_show_files, dry_run=dry_run)
     summary["removed_files"] += cleanup_summary["removed_files"]
     summary["removed_dirs"] += cleanup_summary["removed_dirs"]
