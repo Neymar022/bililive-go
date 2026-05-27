@@ -267,6 +267,7 @@ type Bark struct {
 
 const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
 const DefaultSubtitleRenderPreset = "vizard_classic_cn"
+const DefaultSubtitleScheduleRunAt = "02:00"
 
 type SubtitleLocalConfig struct {
 	Model       string `yaml:"model" json:"model"`
@@ -276,6 +277,35 @@ type SubtitleLocalConfig struct {
 type SubtitleCloudConfig struct {
 	Vendor string `yaml:"vendor" json:"vendor"`
 	Model  string `yaml:"model" json:"model"`
+}
+
+type SubtitleScheduleConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	RunAt   string `yaml:"run_at" json:"run_at"`
+}
+
+func (s SubtitleScheduleConfig) GetRunAt() string {
+	runAt := strings.TrimSpace(s.RunAt)
+	if runAt == "" {
+		return DefaultSubtitleScheduleRunAt
+	}
+	return runAt
+}
+
+func (s SubtitleScheduleConfig) NextRunAfter(base time.Time) (time.Time, error) {
+	parsed, err := time.Parse("15:04", s.GetRunAt())
+	if err != nil {
+		return time.Time{}, fmt.Errorf("字幕定时队列时间格式无效，应为 HH:MM: %w", err)
+	}
+	loc := base.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	target := time.Date(base.Year(), base.Month(), base.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
+	if base.Before(target) {
+		return target, nil
+	}
+	return target.Add(24 * time.Hour), nil
 }
 
 type SubtitleBurnStyle struct {
@@ -305,25 +335,26 @@ func (s SubtitleBurnStyle) GetEffectivePreset() string {
 }
 
 type SubtitleConfig struct {
-	Enabled         bool                `yaml:"enabled" json:"enabled"`
-	AutoGenerate    bool                `yaml:"auto_generate" json:"auto_generate"`
-	DefaultProvider string              `yaml:"default_provider" json:"default_provider"`
-	SourceRoot      string              `yaml:"source_root,omitempty" json:"source_root,omitempty"`
-	LibraryRoot     string              `yaml:"library_root,omitempty" json:"library_root,omitempty"`
-	PublicURLBase   string              `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
-	RetentionDays   int                 `yaml:"retention_days" json:"retention_days"`
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	AutoGenerate    bool   `yaml:"auto_generate" json:"auto_generate"`
+	DefaultProvider string `yaml:"default_provider" json:"default_provider"`
+	SourceRoot      string `yaml:"source_root,omitempty" json:"source_root,omitempty"`
+	LibraryRoot     string `yaml:"library_root,omitempty" json:"library_root,omitempty"`
+	PublicURLBase   string `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
+	RetentionDays   int    `yaml:"retention_days" json:"retention_days"`
 	// P11: 字幕生成成功后立即删除源文件（绕过 retention_days 等待 + 12h cleanup ticker）。
 	// 跟 retention_days 互补不冲突：
 	// - DeleteSourceOnCompletion=true 走 pipeline 同步删除（completed 触发瞬间）
 	// - retention_days=N 走后台定期清理（covers KeepSource=false 但 immediate 失败时的兜底）
 	// 默认 false 保守——升级镜像不会破坏现有部署存量数据。运维显式启用后才删。
 	// per-record KeepSource=true 仍优先生效（"这条特别保留"）。
-	DeleteSourceOnCompletion bool                `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
-	Language        string              `yaml:"language" json:"language"`
-	Local           SubtitleLocalConfig `yaml:"local" json:"local"`
-	Cloud           SubtitleCloudConfig `yaml:"cloud" json:"cloud"`
-	BurnStyle       SubtitleBurnStyle   `yaml:"burn_style" json:"burn_style"`
-	UpdatedAt       time.Time           `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+	DeleteSourceOnCompletion bool                   `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
+	Language                 string                 `yaml:"language" json:"language"`
+	Local                    SubtitleLocalConfig    `yaml:"local" json:"local"`
+	Cloud                    SubtitleCloudConfig    `yaml:"cloud" json:"cloud"`
+	Schedule                 SubtitleScheduleConfig `yaml:"schedule" json:"schedule"`
+	BurnStyle                SubtitleBurnStyle      `yaml:"burn_style" json:"burn_style"`
+	UpdatedAt                time.Time              `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 func (s SubtitleConfig) GetEffectiveSourceRoot(outPutPath string) string {
@@ -353,6 +384,11 @@ func (s SubtitleConfig) Verify(outPutPath string) error {
 	}
 	if s.RetentionDays < 0 {
 		return fmt.Errorf("字幕源文件保留天数不能为负数")
+	}
+	if s.Schedule.Enabled {
+		if _, err := s.Schedule.NextRunAfter(time.Now()); err != nil {
+			return err
+		}
 	}
 	sourceRoot := s.GetEffectiveSourceRoot(outPutPath)
 	if _, err := os.Stat(sourceRoot); err != nil {
@@ -784,6 +820,10 @@ var defaultConfig = Config{
 		Cloud: SubtitleCloudConfig{
 			Vendor: "aliyun",
 			Model:  "qwen3-asr-flash-filetrans",
+		},
+		Schedule: SubtitleScheduleConfig{
+			Enabled: false,
+			RunAt:   DefaultSubtitleScheduleRunAt,
 		},
 		BurnStyle: SubtitleBurnStyle{
 			Preset:            DefaultSubtitleRenderPreset,

@@ -147,6 +147,12 @@ subtitle:
   cloud:
     vendor: aliyun
     model: qwen3-asr-flash-filetrans
+  schedule:
+    # true 时自动录播字幕链路延后到 run_at 统一处理
+    # 手动重跑字幕不受此开关影响
+    enabled: false
+    # 自动字幕队列每日开始处理时间，格式 HH:MM
+    run_at: "02:00"
   burn_style:
     # 字幕卡片渲染预设
     # vizard_classic_cn: 当前默认的 Vizard 风格中文卡片

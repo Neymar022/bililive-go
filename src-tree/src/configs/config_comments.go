@@ -137,6 +137,13 @@ func DecorateConfigNode(node *yaml.Node) {
 		setFieldComment(subtitleNode, "public_url_base",
 			`# DashScope 文件转写所需的外部可访问 /files 根地址
 # 仅使用 local-whisper 时可以留空`, "")
+		scheduleNode := findNode(subtitleNode, "schedule")
+		if scheduleNode != nil {
+			setFieldComment(scheduleNode, "enabled",
+				`# true 时自动录播字幕链路延后到 run_at 统一处理
+# 手动重跑字幕不受此开关影响`, "")
+			setFieldComment(scheduleNode, "run_at", "# 自动字幕队列每日开始处理时间，格式 HH:MM", "")
+		}
 		burnStyleNode := findNode(subtitleNode, "burn_style")
 		if burnStyleNode != nil {
 			setFieldComment(burnStyleNode, "preset",

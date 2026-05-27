@@ -17,6 +17,18 @@ type Executor struct {
 	logger    logrus.FieldLogger
 }
 
+// DeferredExecution 表示管道在某个阶段前暂停，等待 NotBefore 后恢复。
+type DeferredExecution struct {
+	NotBefore    time.Time
+	StageIndex   int
+	StageName    string
+	CurrentFiles []FileInfo
+}
+
+func (e *DeferredExecution) Error() string {
+	return fmt.Sprintf("pipeline deferred until %s before stage %s", e.NotBefore.Format(time.RFC3339), e.StageName)
+}
+
 // NewExecutor 创建管道执行器
 func NewExecutor(logger logrus.FieldLogger) *Executor {
 	if logger == nil {
@@ -72,6 +84,22 @@ func (e *Executor) Execute(
 			continue
 		}
 
+		if stageIndex < ctx.StartStage {
+			stageIndex++
+			continue
+		}
+
+		if ctx.ShouldDeferStage != nil {
+			if notBefore, shouldDefer := ctx.ShouldDeferStage(stageIndex, stageCfg); shouldDefer && notBefore != nil {
+				return results, &DeferredExecution{
+					NotBefore:    *notBefore,
+					StageIndex:   stageIndex,
+					StageName:    stageCfg.Name,
+					CurrentFiles: append([]FileInfo(nil), files...),
+				}
+			}
+		}
+
 		// 记录开始
 		if onProgress != nil {
 			onProgress(stageIndex, stageCfg.Name, StageStatusRunning)
@@ -124,6 +152,10 @@ func (e *Executor) Execute(
 		now := getTimeNow()
 		result.CompletedAt = &now
 		results = append(results, result)
+
+		if ctx.OnStageCompleted != nil {
+			ctx.OnStageCompleted(stageIndex, result, output)
+		}
 
 		if onProgress != nil {
 			onProgress(stageIndex, stageCfg.Name, StageStatusCompleted)
