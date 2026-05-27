@@ -87,7 +87,7 @@ def _dedupe_pass(text: str) -> str:
             while text.startswith(unit, repeat_end):
                 repeat_count += 1
                 repeat_end += unit_len
-            if repeat_count > 1:
+            if repeat_count >= 3:
                 output.append(unit)
                 index = repeat_end
                 collapsed = True
@@ -103,7 +103,13 @@ def _replace_chinese_number_match(match: re.Match[str]) -> str:
     value = match.group(0)
     if all(char in CHINESE_DIGIT_MAP for char in value):
         return "".join(str(CHINESE_DIGIT_MAP[char]) for char in value)
+    if contains_large_spoken_unit(value):
+        return value
     return convert_chinese_number(value)
+
+
+def contains_large_spoken_unit(value: str) -> bool:
+    return "万" in value or "亿" in value
 
 
 def convert_chinese_number(value: str) -> str:
@@ -568,15 +574,16 @@ def clamp_overlapping_segments(segments: list[dict[str, Any]]) -> list[dict[str,
         return []
 
     normalized: list[dict[str, Any]] = []
-    previous_end = 0
     for segment in segments:
-        start_ms = max(int(segment["start_ms"]), previous_end)
+        start_ms = max(int(segment["start_ms"]), 0)
         end_ms = max(int(segment["end_ms"]), start_ms)
+        if normalized and start_ms < int(normalized[-1]["end_ms"]):
+            previous = normalized[-1]
+            previous["end_ms"] = max(int(previous["start_ms"]), start_ms)
         updated = dict(segment)
         updated["start_ms"] = start_ms
         updated["end_ms"] = end_ms
         normalized.append(updated)
-        previous_end = end_ms
     return normalized
 
 
