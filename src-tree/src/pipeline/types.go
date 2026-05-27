@@ -82,6 +82,13 @@ type PipelineContext struct {
 
 	// FFmpegPath 是 ffmpeg 可执行文件的路径
 	FFmpegPath string
+
+	// StartStage 用于从已完成的阶段之后恢复执行。
+	StartStage int
+	// ShouldDeferStage 在阶段执行前判断是否需要延后。
+	ShouldDeferStage func(stageIndex int, stage StageConfig) (*time.Time, bool)
+	// OnStageCompleted 在单个阶段完成后回调，供持久化当前输出。
+	OnStageCompleted func(stageIndex int, result StageResult, output []FileInfo)
 }
 
 // Stage 管道阶段接口
@@ -239,6 +246,7 @@ type PipelineTask struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	StartedAt      *time.Time      `json:"started_at,omitempty"`
 	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	NotBefore      *time.Time      `json:"not_before,omitempty"`
 	ErrorMessage   string          `json:"error_message,omitempty"`
 	CanRetry       bool            `json:"can_retry"` // 是否可以重试
 }
@@ -282,6 +290,8 @@ func (pt *PipelineTask) MarkStarted() {
 	now := time.Now()
 	pt.Status = PipelineStatusRunning
 	pt.StartedAt = &now
+	pt.NotBefore = nil
+	pt.ErrorMessage = ""
 }
 
 // MarkCompleted 标记任务完成
@@ -289,6 +299,7 @@ func (pt *PipelineTask) MarkCompleted() {
 	now := time.Now()
 	pt.Status = PipelineStatusCompleted
 	pt.CompletedAt = &now
+	pt.NotBefore = nil
 	pt.Progress = 100
 }
 
@@ -297,6 +308,7 @@ func (pt *PipelineTask) MarkFailed(err error) {
 	now := time.Now()
 	pt.Status = PipelineStatusFailed
 	pt.CompletedAt = &now
+	pt.NotBefore = nil
 	if err != nil {
 		pt.ErrorMessage = err.Error()
 	}
@@ -307,6 +319,19 @@ func (pt *PipelineTask) MarkCancelled() {
 	now := time.Now()
 	pt.Status = PipelineStatusCancelled
 	pt.CompletedAt = &now
+	pt.NotBefore = nil
+}
+
+// MarkDeferred 标记任务延后到指定时间继续执行。
+func (pt *PipelineTask) MarkDeferred(notBefore time.Time, stageIndex int, currentFiles []FileInfo) {
+	pt.Status = PipelineStatusPending
+	pt.StartedAt = nil
+	pt.CompletedAt = nil
+	pt.NotBefore = &notBefore
+	pt.ErrorMessage = ""
+	pt.CurrentStage = stageIndex
+	pt.CurrentFiles = currentFiles
+	pt.UpdateProgress()
 }
 
 // AddStageResult 添加阶段结果

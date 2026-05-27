@@ -24,6 +24,7 @@ func TestGetEffectivePipelineConfigAddsSubtitleStage(t *testing.T) {
 	}
 
 	assert.Equal(t, []string{StageNameConvertMp4, StageNameSubtitleGenerate}, stageNames)
+	assert.True(t, pipelineConfig.Stages[1].GetBoolOption(OptionSubtitleScheduled, false))
 }
 
 func TestGetEffectivePipelineConfigSkipsSubtitleStageWhenDisabled(t *testing.T) {

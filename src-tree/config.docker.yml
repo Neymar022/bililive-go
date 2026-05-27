@@ -61,6 +61,9 @@ subtitle:
   cloud:
     vendor: aliyun
     model: qwen3-asr-flash-filetrans
+  schedule:
+    enabled: false
+    run_at: "02:00"
   burn_style:
     preset: vizard_classic_cn
     font_name: Noto Sans CJK SC
