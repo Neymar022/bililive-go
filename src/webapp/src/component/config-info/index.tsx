@@ -163,6 +163,10 @@ interface SubtitleSettingsState {
     public_url_base?: string;
     retention_days?: number;
     language?: string;
+    schedule?: {
+      enabled?: boolean;
+      run_at?: string;
+    };
     local?: Record<string, any>;
     cloud?: Record<string, any>;
     burn_style?: {
@@ -220,6 +224,11 @@ export const SubtitleSettingsPanel: React.FC = () => {
     try {
       const nextSubtitle = {
         ...settings.subtitle,
+        schedule: {
+          run_at: '02:00',
+          ...settings.subtitle.schedule,
+          enabled: !!settings.subtitle.schedule?.enabled,
+        },
         burn_style: {
           ...settings.subtitle.burn_style,
           preset,
@@ -246,6 +255,25 @@ export const SubtitleSettingsPanel: React.FC = () => {
     }
   };
 
+  const updateSubtitleScheduleEnabled = (enabled: boolean) => {
+    setSettings(prev => {
+      if (!prev?.subtitle) {
+        return prev;
+      }
+      return {
+        ...prev,
+        subtitle: {
+          ...prev.subtitle,
+          schedule: {
+            run_at: '02:00',
+            ...prev.subtitle.schedule,
+            enabled,
+          },
+        },
+      };
+    });
+  };
+
   if (loading && !settings) {
     return <Spin />;
   }
@@ -255,6 +283,18 @@ export const SubtitleSettingsPanel: React.FC = () => {
       <Card title="字幕渲染预设" size="small" style={{ marginBottom: 16 }}>
         <Space direction="vertical" size={12} style={{ width: '100%' }}>
           <p>默认渲染 preset 会在自动字幕流程和不显式覆盖 preset 的手动重跑里复用。</p>
+          <Space align="start">
+            <Switch
+              checked={!!settings?.subtitle?.schedule?.enabled}
+              onChange={updateSubtitleScheduleEnabled}
+            />
+            <div>
+              <div>自动字幕凌晨队列</div>
+              <div style={{ color: '#666' }}>
+                开启后自动录播字幕链路延后至 {settings?.subtitle?.schedule?.run_at || '02:00'} 统一处理；手动重跑仍立即执行。
+              </div>
+            </div>
+          </Space>
           <Select value={preset} onChange={setPreset} options={SUBTITLE_PRESET_OPTIONS} style={{ width: 280 }} />
           <Space>
             <Button type="primary" icon={<SaveOutlined />} onClick={saveSubtitleSettings} loading={saving}>

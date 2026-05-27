@@ -2,10 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
@@ -199,10 +201,24 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 			"host":     task.RecordInfo.HostName,
 			"room":     task.RecordInfo.RoomName,
 		}),
-		WorkDir: "", // 后续可以从配置获取
+		WorkDir:    "", // 后续可以从配置获取
+		StartStage: task.CurrentStage,
+	}
+	pipelineCtx.ShouldDeferStage = func(stageIndex int, stage StageConfig) (*time.Time, bool) {
+		return m.shouldDeferStage(task, stageIndex, stage)
+	}
+	pipelineCtx.OnStageCompleted = func(stageIndex int, result StageResult, output []FileInfo) {
+		task.CurrentStage = stageIndex + 1
+		task.CurrentFiles = append([]FileInfo(nil), output...)
+		task.UpdateProgress()
+		if err := m.store.UpdateTask(ctx, task); err != nil {
+			logrus.WithError(err).Warn("failed to update pipeline task current files")
+		}
+		m.broadcastTaskUpdate(task)
 	}
 
 	// 执行管道
+	previousResults := append([]StageResult(nil), task.StageResults...)
 	results, err := m.executor.Execute(
 		pipelineCtx,
 		task.PipelineConfig,
@@ -219,10 +235,18 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 	)
 
 	// 保存阶段结果
-	task.StageResults = results
+	task.StageResults = append(previousResults, results...)
 
 	if err != nil {
-		if ctx.Err() == context.Canceled {
+		var deferred *DeferredExecution
+		if errors.As(err, &deferred) {
+			task.MarkDeferred(deferred.NotBefore, deferred.StageIndex, deferred.CurrentFiles)
+			logrus.WithFields(logrus.Fields{
+				"task_id":    task.ID,
+				"stage":      deferred.StageName,
+				"not_before": deferred.NotBefore,
+			}).Info("pipeline task deferred until scheduled subtitle window")
+		} else if ctx.Err() == context.Canceled {
 			task.MarkCancelled()
 			logrus.WithField("task_id", task.ID).Info("pipeline task cancelled")
 		} else {
@@ -246,6 +270,25 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 
 	// 广播任务状态变化
 	m.broadcastTaskUpdate(task)
+}
+
+func (m *Manager) shouldDeferStage(task *PipelineTask, stageIndex int, stage StageConfig) (*time.Time, bool) {
+	if stage.Name != StageNameSubtitleGenerate || !stage.GetBoolOption(OptionSubtitleScheduled, false) {
+		return nil, false
+	}
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil || !cfg.Subtitle.Schedule.Enabled {
+		return nil, false
+	}
+	notBefore, err := cfg.Subtitle.Schedule.NextRunAfter(task.CreatedAt)
+	if err != nil {
+		logrus.WithError(err).Warn("invalid subtitle schedule, running subtitle stage immediately")
+		return nil, false
+	}
+	if !time.Now().Before(notBefore) {
+		return nil, false
+	}
+	return &notBefore, true
 }
 
 // broadcastTaskUpdate 广播任务更新事件
@@ -341,8 +384,10 @@ func (m *Manager) RetryTask(taskID int64) error {
 	task.Status = PipelineStatusPending
 	task.StartedAt = nil
 	task.CompletedAt = nil
+	task.NotBefore = nil
 	task.ErrorMessage = ""
 	task.CurrentStage = 0
+	task.CurrentFiles = task.InitialFiles
 	task.StageResults = nil
 	task.Progress = 0
 
