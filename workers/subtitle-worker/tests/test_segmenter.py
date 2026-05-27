@@ -8,7 +8,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from ass_generator import build_ass_style_profile
-from segmenter import split_segments_for_timeline, estimate_text_width
+from segmenter import convert_chinese_integer, normalize_text, split_segments_for_timeline, estimate_text_width
 
 
 class SegmenterTest(unittest.TestCase):
@@ -176,6 +176,17 @@ class SegmenterTest(unittest.TestCase):
             [segment["text"] for segment in segments],
         )
 
+    def test_keeps_large_spoken_unit_numbers_as_chinese_text(self):
+        self.assertEqual("一万", normalize_text("一万"))
+        self.assertEqual("的话早就一万年了", normalize_text("的话早就一万年了"))
+        self.assertEqual(10000, convert_chinese_integer("一万"))
+        self.assertEqual(100000, convert_chinese_integer("十万"))
+
+    def test_still_converts_years_and_plain_spoken_numbers_to_arabic(self):
+        self.assertEqual("2026年", normalize_text("二零二六年"))
+        self.assertEqual("2026年", normalize_text("二零二零二六年"))
+        self.assertEqual("1000", normalize_text("一千"))
+
     def test_applies_best_practice_timing_envelope_without_overlap(self):
         segments = split_segments_for_timeline(
             [
@@ -235,6 +246,10 @@ class SegmenterTest(unittest.TestCase):
         self.assertIn("这种", "".join(segment["text"] for segment in segments))
         self.assertIn("那种", "".join(segment["text"] for segment in segments))
 
+    def test_keeps_valid_adjacent_repeated_chinese_words(self):
+        self.assertEqual("这是一条明显非常非常长的字幕", normalize_text("这是一条明显非常非常长的字幕"))
+        self.assertEqual("市场市场化不是简单重复", normalize_text("市场市场化不是简单重复"))
+
     def test_width_budget_forces_extra_splits_before_ass_render(self):
         profile = build_ass_style_profile(720, 1280, {"font_size": 50})
         segments = split_segments_for_timeline(
@@ -286,7 +301,22 @@ class SegmenterTest(unittest.TestCase):
         )
 
         self.assertEqual(["如果你是企业", "你家想要装光伏跟储能"], [segment["text"] for segment in segments])
-        self.assertEqual(30870, segments[1]["start_ms"])
+        self.assertEqual(30280, segments[1]["start_ms"])
+        self.assertEqual(30280, segments[0]["end_ms"])
+        self.assertTrue(all(left["end_ms"] <= right["start_ms"] for left, right in zip(segments, segments[1:])))
+
+    def test_keeps_fast_overlapping_segment_prefix_visible_at_raw_start(self):
+        segments = split_segments_for_timeline(
+            [
+                {"index": 1, "start_ms": 1000, "end_ms": 2100, "text": "上一句还没结束"},
+                {"index": 2, "start_ms": 1850, "end_ms": 2600, "text": "前缀很快出现"},
+            ],
+            max_chars=18,
+        )
+
+        self.assertEqual(["上一句还没结束", "前缀很快出现"], [segment["text"] for segment in segments])
+        self.assertEqual(1850, segments[1]["start_ms"])
+        self.assertEqual(1850, segments[0]["end_ms"])
         self.assertTrue(all(left["end_ms"] <= right["start_ms"] for left, right in zip(segments, segments[1:])))
 
 
