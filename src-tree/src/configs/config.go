@@ -267,6 +267,7 @@ type Bark struct {
 
 const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
 const DefaultSubtitleRenderPreset = "vizard_classic_cn"
+const DefaultSubtitleKnowledgeSyncTimeoutSeconds = 30
 
 type SubtitleLocalConfig struct {
 	Model       string `yaml:"model" json:"model"`
@@ -276,6 +277,44 @@ type SubtitleLocalConfig struct {
 type SubtitleCloudConfig struct {
 	Vendor string `yaml:"vendor" json:"vendor"`
 	Model  string `yaml:"model" json:"model"`
+}
+
+type SubtitleKnowledgeSyncConfig struct {
+	Enabled        bool   `yaml:"enabled" json:"enabled"`
+	Endpoint       string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token          string `yaml:"token,omitempty" json:"token,omitempty"`
+	ProviderID     string `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
+	ModelName      string `yaml:"model_name,omitempty" json:"model_name,omitempty"`
+	GenerateNote   bool   `yaml:"generate_note" json:"generate_note"`
+	NonBlocking    bool   `yaml:"non_blocking" json:"non_blocking"`
+	TimeoutSeconds int    `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
+	return firstTrimmedNonEmpty(
+		os.Getenv("BILINOTE_KNOWLEDGE_INGEST_URL"),
+		os.Getenv("BILINOTE_INGEST_URL"),
+		s.Endpoint,
+	)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetToken() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_TOKEN"), s.Token)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetProviderID() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_PROVIDER_ID"), s.ProviderID)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetModelName() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_MODEL_NAME"), s.ModelName)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetTimeout() time.Duration {
+	if s.TimeoutSeconds <= 0 {
+		return time.Duration(DefaultSubtitleKnowledgeSyncTimeoutSeconds) * time.Second
+	}
+	return time.Duration(s.TimeoutSeconds) * time.Second
 }
 
 type SubtitleBurnStyle struct {
@@ -305,25 +344,26 @@ func (s SubtitleBurnStyle) GetEffectivePreset() string {
 }
 
 type SubtitleConfig struct {
-	Enabled         bool                `yaml:"enabled" json:"enabled"`
-	AutoGenerate    bool                `yaml:"auto_generate" json:"auto_generate"`
-	DefaultProvider string              `yaml:"default_provider" json:"default_provider"`
-	SourceRoot      string              `yaml:"source_root,omitempty" json:"source_root,omitempty"`
-	LibraryRoot     string              `yaml:"library_root,omitempty" json:"library_root,omitempty"`
-	PublicURLBase   string              `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
-	RetentionDays   int                 `yaml:"retention_days" json:"retention_days"`
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	AutoGenerate    bool   `yaml:"auto_generate" json:"auto_generate"`
+	DefaultProvider string `yaml:"default_provider" json:"default_provider"`
+	SourceRoot      string `yaml:"source_root,omitempty" json:"source_root,omitempty"`
+	LibraryRoot     string `yaml:"library_root,omitempty" json:"library_root,omitempty"`
+	PublicURLBase   string `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
+	RetentionDays   int    `yaml:"retention_days" json:"retention_days"`
 	// P11: 字幕生成成功后立即删除源文件（绕过 retention_days 等待 + 12h cleanup ticker）。
 	// 跟 retention_days 互补不冲突：
 	// - DeleteSourceOnCompletion=true 走 pipeline 同步删除（completed 触发瞬间）
 	// - retention_days=N 走后台定期清理（covers KeepSource=false 但 immediate 失败时的兜底）
 	// 默认 false 保守——升级镜像不会破坏现有部署存量数据。运维显式启用后才删。
 	// per-record KeepSource=true 仍优先生效（"这条特别保留"）。
-	DeleteSourceOnCompletion bool                `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
-	Language        string              `yaml:"language" json:"language"`
-	Local           SubtitleLocalConfig `yaml:"local" json:"local"`
-	Cloud           SubtitleCloudConfig `yaml:"cloud" json:"cloud"`
-	BurnStyle       SubtitleBurnStyle   `yaml:"burn_style" json:"burn_style"`
-	UpdatedAt       time.Time           `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+	DeleteSourceOnCompletion bool                        `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
+	Language                 string                      `yaml:"language" json:"language"`
+	Local                    SubtitleLocalConfig         `yaml:"local" json:"local"`
+	Cloud                    SubtitleCloudConfig         `yaml:"cloud" json:"cloud"`
+	KnowledgeSync            SubtitleKnowledgeSyncConfig `yaml:"knowledge_sync" json:"knowledge_sync"`
+	BurnStyle                SubtitleBurnStyle           `yaml:"burn_style" json:"burn_style"`
+	UpdatedAt                time.Time                   `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 func (s SubtitleConfig) GetEffectiveSourceRoot(outPutPath string) string {
@@ -362,7 +402,29 @@ func (s SubtitleConfig) Verify(outPutPath string) error {
 	if _, err := os.Stat(libraryRoot); err != nil {
 		return fmt.Errorf("字幕库路径 \"%s\" 不存在", libraryRoot)
 	}
+	if s.KnowledgeSync.Enabled {
+		endpoint := s.KnowledgeSync.GetEndpoint()
+		if endpoint == "" {
+			return fmt.Errorf("BiliNote 知识同步地址不能为空")
+		}
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("BiliNote 知识同步地址无效: %s", endpoint)
+		}
+		if s.KnowledgeSync.GetToken() == "" {
+			return fmt.Errorf("BiliNote 知识同步 token 不能为空")
+		}
+	}
 	return nil
+}
+
+func firstTrimmedNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // Config content all config info.
@@ -784,6 +846,12 @@ var defaultConfig = Config{
 		Cloud: SubtitleCloudConfig{
 			Vendor: "aliyun",
 			Model:  "qwen3-asr-flash-filetrans",
+		},
+		KnowledgeSync: SubtitleKnowledgeSyncConfig{
+			Enabled:        false,
+			GenerateNote:   true,
+			NonBlocking:    true,
+			TimeoutSeconds: DefaultSubtitleKnowledgeSyncTimeoutSeconds,
 		},
 		BurnStyle: SubtitleBurnStyle{
 			Preset:            DefaultSubtitleRenderPreset,

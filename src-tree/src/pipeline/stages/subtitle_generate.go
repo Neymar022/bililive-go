@@ -147,6 +147,8 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, err
 		}
 
+		s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata)
+
 		// P11: 完成后立即删除源文件（节省存储空间）
 		// 触发条件：cfg.Subtitle.DeleteSourceOnCompletion=true + KeepSource=false +
 		// 源文件还存在。失败不让 pipeline 失败——只 log warning，retention_days 后台

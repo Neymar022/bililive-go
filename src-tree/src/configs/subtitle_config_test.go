@@ -21,6 +21,10 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Equal(t, "aliyun", cfg.Subtitle.Cloud.Vendor)
 	assert.Equal(t, "qwen3-asr-flash-filetrans", cfg.Subtitle.Cloud.Model)
 	assert.Equal(t, "zh", cfg.Subtitle.Language)
+	assert.False(t, cfg.Subtitle.KnowledgeSync.Enabled)
+	assert.True(t, cfg.Subtitle.KnowledgeSync.GenerateNote)
+	assert.True(t, cfg.Subtitle.KnowledgeSync.NonBlocking)
+	assert.Equal(t, DefaultSubtitleKnowledgeSyncTimeoutSeconds, cfg.Subtitle.KnowledgeSync.TimeoutSeconds)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
 	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
 	assert.Equal(t, 1018, cfg.Subtitle.BurnStyle.CardWidth)
@@ -42,6 +46,22 @@ func TestSubtitleConfigWorkerURLUsesEnvironment(t *testing.T) {
 	cfg := NewConfig()
 
 	assert.Equal(t, "http://subtitle-worker:8091", cfg.Subtitle.GetWorkerURL())
+}
+
+func TestSubtitleKnowledgeSyncUsesEnvironment(t *testing.T) {
+	t.Setenv("BILINOTE_KNOWLEDGE_INGEST_URL", "http://bilinote-backend:8483/api/knowledge/ingest")
+	t.Setenv("BILINOTE_INGEST_TOKEN", "env-token")
+	t.Setenv("BILINOTE_INGEST_PROVIDER_ID", "qwen")
+	t.Setenv("BILINOTE_INGEST_MODEL_NAME", "qwen3.6-plus")
+
+	cfg := NewConfig()
+	cfg.Subtitle.KnowledgeSync.Endpoint = "http://wrong.example/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "config-token"
+
+	assert.Equal(t, "http://bilinote-backend:8483/api/knowledge/ingest", cfg.Subtitle.KnowledgeSync.GetEndpoint())
+	assert.Equal(t, "env-token", cfg.Subtitle.KnowledgeSync.GetToken())
+	assert.Equal(t, "qwen", cfg.Subtitle.KnowledgeSync.GetProviderID())
+	assert.Equal(t, "qwen3.6-plus", cfg.Subtitle.KnowledgeSync.GetModelName())
 }
 
 func TestConfigVerifyRejectsInvalidSubtitleLibraryRoot(t *testing.T) {
@@ -71,6 +91,23 @@ func TestConfigVerifyAcceptsSubtitleRoots(t *testing.T) {
 	assert.NoError(t, cfg.Verify())
 }
 
+func TestConfigVerifyRejectsInvalidKnowledgeSync(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := filepath.Join(sourceRoot, "video")
+	err := os.MkdirAll(libraryRoot, 0o755)
+	assert.NoError(t, err)
+
+	cfg := NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+
+	err = cfg.Verify()
+	assert.Error(t, err)
+	assert.ErrorContains(t, err, "BiliNote 知识同步地址")
+}
+
 func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg := NewConfig()
 	cfg.OutPutPath = t.TempDir()
@@ -86,6 +123,12 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.BurnStyle.SingleLine = false
 	cfg.Subtitle.BurnStyle.OverflowMode = "wrap"
 	cfg.Subtitle.BurnStyle.MarginV = 32
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = "http://bilinote-backend:8483/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "config-token"
+	cfg.Subtitle.KnowledgeSync.ProviderID = "qwen"
+	cfg.Subtitle.KnowledgeSync.ModelName = "qwen3.6-plus"
+	cfg.Subtitle.KnowledgeSync.TimeoutSeconds = 45
 	cfg.Subtitle.UpdatedAt = time.Unix(1_763_200_000, 0).UTC()
 
 	blob, err := os.ReadFile("../../config.yml")
@@ -113,4 +156,12 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, "wrap", roundTripped.Subtitle.BurnStyle.OverflowMode)
 	assert.Equal(t, 32, roundTripped.Subtitle.BurnStyle.MarginV)
 	assert.Equal(t, cfg.Subtitle.PublicURLBase, roundTripped.Subtitle.PublicURLBase)
+	assert.True(t, roundTripped.Subtitle.KnowledgeSync.Enabled)
+	assert.Equal(t, cfg.Subtitle.KnowledgeSync.Endpoint, roundTripped.Subtitle.KnowledgeSync.Endpoint)
+	assert.Equal(t, cfg.Subtitle.KnowledgeSync.Token, roundTripped.Subtitle.KnowledgeSync.Token)
+	assert.Equal(t, cfg.Subtitle.KnowledgeSync.ProviderID, roundTripped.Subtitle.KnowledgeSync.ProviderID)
+	assert.Equal(t, cfg.Subtitle.KnowledgeSync.ModelName, roundTripped.Subtitle.KnowledgeSync.ModelName)
+	assert.True(t, roundTripped.Subtitle.KnowledgeSync.GenerateNote)
+	assert.True(t, roundTripped.Subtitle.KnowledgeSync.NonBlocking)
+	assert.Equal(t, 45, roundTripped.Subtitle.KnowledgeSync.TimeoutSeconds)
 }

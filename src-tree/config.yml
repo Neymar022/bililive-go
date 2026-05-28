@@ -147,6 +147,18 @@ subtitle:
   cloud:
     vendor: aliyun
     model: qwen3-asr-flash-filetrans
+  # BiliNote 知识库同步配置
+  # 启用后，subtitle_generate 会在字幕成功后向 BiliNote /api/knowledge/ingest 提交非阻塞任务
+  # endpoint/token 可用 BILINOTE_KNOWLEDGE_INGEST_URL 和 BILINOTE_INGEST_TOKEN 环境变量覆盖
+  knowledge_sync:
+    # 是否启用 BiliNote 知识库同步
+    enabled: false
+    # true 时由 BiliNote 生成文档优先知识笔记
+    generate_note: true
+    # true 时 BiliNote 后台处理，Bililive-go 只等待接收成功
+    non_blocking: true
+    # Bililive-go 等待 BiliNote 接收请求的超时时间
+    timeout_seconds: 30
   burn_style:
     # 字幕卡片渲染预设
     # vizard_classic_cn: 当前默认的 Vizard 风格中文卡片

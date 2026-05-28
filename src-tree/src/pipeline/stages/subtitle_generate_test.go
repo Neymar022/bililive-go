@@ -89,6 +89,195 @@ func TestSubtitleGenerateStageExecute(t *testing.T) {
 	assert.Nil(t, metadata.SourceDeletedAt, "未触发删除时 SourceDeletedAt 应为 nil")
 }
 
+func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "旭东聊装修 - 2026-05-27 20-00-00 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "旭东聊装修", "Season 01", "旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request subtitle.ProcessRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, os.WriteFile(request.OutputVideoPath, []byte("burned"), 0o644))
+		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:02,500\n全屋定制报价要看抽屉数量\n"), 0o644))
+		assPath := strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass"
+		require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
+			ASSPath: assPath,
+			Segments: []subtitle.Segment{
+				{Index: 1, Start: "00:00:00,000", End: "00:00:02,500", Text: "全屋定制报价要看抽屉数量"},
+				{Index: 2, Start: "00:03:01,640", End: "00:03:04,000", Text: "泰州业主要先确认柜体板材"},
+			},
+		}))
+	}))
+	defer worker.Close()
+
+	type knowledgeSegment struct {
+		Start float64 `json:"start"`
+		End   float64 `json:"end"`
+		Text  string  `json:"text"`
+	}
+	type knowledgePayload struct {
+		SourceID        string             `json:"source_id"`
+		SourceType      string             `json:"source_type"`
+		TaskID          string             `json:"task_id"`
+		Host            string             `json:"host"`
+		Title           string             `json:"title"`
+		SourceVideoPath string             `json:"source_video_path"`
+		SubtitlePath    string             `json:"subtitle_path"`
+		Language        string             `json:"language"`
+		ContentHash     string             `json:"content_hash"`
+		GenerateNote    bool               `json:"generate_note"`
+		NonBlocking     bool               `json:"non_blocking"`
+		ModelName       string             `json:"model_name"`
+		ProviderID      string             `json:"provider_id"`
+		Segments        []knowledgeSegment `json:"segments"`
+	}
+
+	var capturedAuth string
+	var capturedPayload knowledgePayload
+	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/knowledge/ingest", r.URL.Path)
+		capturedAuth = r.Header.Get("Authorization")
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedPayload))
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{
+			"ok": true,
+			"data": map[string]any{
+				"note": map[string]any{
+					"queued":  true,
+					"task_id": capturedPayload.TaskID,
+				},
+			},
+		}))
+	}))
+	defer knowledge.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	cfg.Subtitle.KnowledgeSync.ProviderID = "qwen"
+	cfg.Subtitle.KnowledgeSync.ModelName = "qwen3.6-plus"
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	srtPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".srt"
+	_, err = stage.Execute(&pipeline.PipelineContext{
+		TaskID: 473,
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform: "哔哩哔哩",
+			HostName: "旭东聊装修",
+			RoomName: "装修达人。免费连麦解决装修问题。装修知识科普官",
+		},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "Bearer test-token", capturedAuth)
+	assert.Equal(t, "旭东聊装修/Season 01/旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4", capturedPayload.SourceID)
+	assert.Equal(t, "bililive-go", capturedPayload.SourceType)
+	assert.Equal(t, "bililive-go-473", capturedPayload.TaskID)
+	assert.Equal(t, "旭东聊装修", capturedPayload.Host)
+	assert.Equal(t, "旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官", capturedPayload.Title)
+	assert.Equal(t, libraryPath, capturedPayload.SourceVideoPath)
+	assert.Equal(t, srtPath, capturedPayload.SubtitlePath)
+	assert.Equal(t, "zh", capturedPayload.Language)
+	assert.NotEmpty(t, capturedPayload.ContentHash)
+	assert.True(t, capturedPayload.GenerateNote)
+	assert.True(t, capturedPayload.NonBlocking)
+	assert.Equal(t, "qwen3.6-plus", capturedPayload.ModelName)
+	assert.Equal(t, "qwen", capturedPayload.ProviderID)
+	require.Len(t, capturedPayload.Segments, 2)
+	assert.InDelta(t, 2.5, capturedPayload.Segments[0].End, 0.001)
+	assert.InDelta(t, 181.64, capturedPayload.Segments[1].Start, 0.001)
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
+	assert.Equal(t, subtitle.StatusQueued, metadata.KnowledgeSyncStatus)
+	assert.Equal(t, "bililive-go-473", metadata.KnowledgeSyncTaskID)
+	assert.Equal(t, capturedPayload.SourceID, metadata.KnowledgeSyncSourceID)
+	assert.Equal(t, 1, metadata.KnowledgeSyncAttempts)
+	assert.Empty(t, metadata.KnowledgeSyncError)
+	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
+}
+
+func TestSubtitleGenerateDoesNotFailWhenKnowledgeSyncFails(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request subtitle.ProcessRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, os.WriteFile(request.OutputVideoPath, []byte("burned"), 0o644))
+		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:02,000\n字幕\n"), 0o644))
+		assPath := strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass"
+		require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
+			ASSPath:  assPath,
+			Segments: []subtitle.Segment{{Index: 1, Start: "00:00:00,000", End: "00:00:02,000", Text: "字幕"}},
+		}))
+	}))
+	defer worker.Close()
+
+	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unavailable", http.StatusBadGateway)
+	}))
+	defer knowledge.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		TaskID: 473,
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			HostName: "主播",
+		},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+	require.NoError(t, err, "BiliNote 同步失败不能让字幕 pipeline 失败")
+	require.Len(t, output, 3)
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
+	assert.Equal(t, subtitle.StatusFailed, metadata.KnowledgeSyncStatus)
+	assert.Equal(t, "bililive-go-473", metadata.KnowledgeSyncTaskID)
+	assert.Equal(t, 1, metadata.KnowledgeSyncAttempts)
+	assert.Contains(t, metadata.KnowledgeSyncError, "502")
+	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
+}
+
 // TestSubtitleGenerateDeletesSourceOnCompletion P11：DeleteSourceOnCompletion=true 时
 // 字幕生成成功后立即删除源文件，metadata.SourceExists 为 false，SourceDeletedAt 有值。
 func TestSubtitleGenerateDeletesSourceOnCompletion(t *testing.T) {

@@ -137,6 +137,21 @@ func DecorateConfigNode(node *yaml.Node) {
 		setFieldComment(subtitleNode, "public_url_base",
 			`# DashScope 文件转写所需的外部可访问 /files 根地址
 # 仅使用 local-whisper 时可以留空`, "")
+		setFieldComment(subtitleNode, "knowledge_sync",
+			`# BiliNote 知识库同步配置
+# 启用后，subtitle_generate 会在字幕成功后向 BiliNote /api/knowledge/ingest 提交非阻塞任务
+# endpoint/token 可用 BILINOTE_KNOWLEDGE_INGEST_URL 和 BILINOTE_INGEST_TOKEN 环境变量覆盖`, "")
+		knowledgeSyncNode := findNode(subtitleNode, "knowledge_sync")
+		if knowledgeSyncNode != nil {
+			setFieldComment(knowledgeSyncNode, "enabled", "# 是否启用 BiliNote 知识库同步", "")
+			setFieldComment(knowledgeSyncNode, "endpoint", "# BiliNote /api/knowledge/ingest 完整地址", "")
+			setFieldComment(knowledgeSyncNode, "token", "# BiliNote ingest token，建议生产环境使用环境变量提供", "")
+			setFieldComment(knowledgeSyncNode, "provider_id", "# 生成笔记使用的模型 provider，例如 qwen", "")
+			setFieldComment(knowledgeSyncNode, "model_name", "# 生成笔记使用的模型名称，例如 qwen3.6-plus", "")
+			setFieldComment(knowledgeSyncNode, "generate_note", "# true 时由 BiliNote 生成文档优先知识笔记", "")
+			setFieldComment(knowledgeSyncNode, "non_blocking", "# true 时 BiliNote 后台处理，Bililive-go 只等待接收成功", "")
+			setFieldComment(knowledgeSyncNode, "timeout_seconds", "# Bililive-go 等待 BiliNote 接收请求的超时时间", "")
+		}
 		burnStyleNode := findNode(subtitleNode, "burn_style")
 		if burnStyleNode != nil {
 			setFieldComment(burnStyleNode, "preset",
@@ -154,6 +169,9 @@ func DecorateConfigNode(node *yaml.Node) {
 				`# 单排溢出策略
 # ellipsis: 截断并追加省略号
 # wrap: 自动换成双排`, "")
+			setFieldComment(burnStyleNode, "outline",
+				`# 默认 0 = 纯白文字无黑描边；气泡 0.85 不透明度已提供高对比度。
+# 如果在浅色场景需要描边保护，可以显式设 1 或 2。`, "")
 		}
 	}
 }

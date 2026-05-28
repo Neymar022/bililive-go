@@ -10,25 +10,31 @@ import (
 )
 
 type Record struct {
-	RelativePath      string     `json:"relative_path"`
-	VideoPath         string     `json:"video_path"`
-	ASSPath           string     `json:"ass_path,omitempty"`
-	SRTPath           string     `json:"srt_path,omitempty"`
-	SourcePath        string     `json:"source_path,omitempty"`
-	Status            Status     `json:"status"`
-	Provider          string     `json:"provider,omitempty"`
-	RenderPreset      string     `json:"render_preset,omitempty"`
-	RendererStatus    Status     `json:"renderer_status,omitempty"`
-	RendererError     string     `json:"renderer_error,omitempty"`
-	Platform          string     `json:"platform,omitempty"`
-	HostName          string     `json:"host_name,omitempty"`
-	RoomName          string     `json:"room_name,omitempty"`
-	KeepSource        bool       `json:"keep_source"`
-	SourceExists      bool       `json:"source_exists"`
-	RetentionDeadline *time.Time `json:"retention_deadline,omitempty"`
-	RecordedAt        *time.Time `json:"recorded_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	Segments          []Segment  `json:"segments,omitempty"`
+	RelativePath           string     `json:"relative_path"`
+	VideoPath              string     `json:"video_path"`
+	ASSPath                string     `json:"ass_path,omitempty"`
+	SRTPath                string     `json:"srt_path,omitempty"`
+	SourcePath             string     `json:"source_path,omitempty"`
+	Status                 Status     `json:"status"`
+	Provider               string     `json:"provider,omitempty"`
+	RenderPreset           string     `json:"render_preset,omitempty"`
+	RendererStatus         Status     `json:"renderer_status,omitempty"`
+	RendererError          string     `json:"renderer_error,omitempty"`
+	Platform               string     `json:"platform,omitempty"`
+	HostName               string     `json:"host_name,omitempty"`
+	RoomName               string     `json:"room_name,omitempty"`
+	KeepSource             bool       `json:"keep_source"`
+	SourceExists           bool       `json:"source_exists"`
+	RetentionDeadline      *time.Time `json:"retention_deadline,omitempty"`
+	RecordedAt             *time.Time `json:"recorded_at,omitempty"`
+	LastError              string     `json:"last_error,omitempty"`
+	Segments               []Segment  `json:"segments,omitempty"`
+	KnowledgeSyncStatus    Status     `json:"knowledge_sync_status,omitempty"`
+	KnowledgeSyncTaskID    string     `json:"knowledge_sync_task_id,omitempty"`
+	KnowledgeSyncSourceID  string     `json:"knowledge_sync_source_id,omitempty"`
+	KnowledgeSyncError     string     `json:"knowledge_sync_error,omitempty"`
+	KnowledgeSyncAttempts  int        `json:"knowledge_sync_attempts,omitempty"`
+	KnowledgeSyncUpdatedAt *time.Time `json:"knowledge_sync_updated_at,omitempty"`
 }
 
 // ListRecords 返回字幕库中所有 mp4 录制的状态列表。
@@ -166,6 +172,12 @@ func buildRecord(videoPath, libraryRoot, sourceRoot string, retentionDays int) (
 		record.SourceExists = metadata.SourceExists
 		record.LastError = metadata.LastError
 		record.Segments = metadata.Segments
+		record.KnowledgeSyncStatus = metadata.KnowledgeSyncStatus
+		record.KnowledgeSyncTaskID = metadata.KnowledgeSyncTaskID
+		record.KnowledgeSyncSourceID = metadata.KnowledgeSyncSourceID
+		record.KnowledgeSyncError = metadata.KnowledgeSyncError
+		record.KnowledgeSyncAttempts = metadata.KnowledgeSyncAttempts
+		record.KnowledgeSyncUpdatedAt = metadata.KnowledgeSyncUpdatedAt
 
 		if platform, ok := metadata.RecordMeta["platform"].(string); ok {
 			record.Platform = platform
