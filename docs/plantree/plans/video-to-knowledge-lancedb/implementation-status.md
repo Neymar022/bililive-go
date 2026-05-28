@@ -1,0 +1,294 @@
+# Implementation Status
+
+更新时间：2026-05-28
+
+## State Ownership
+
+本文件是后续恢复工作的主状态。旧 thread 和 provider goal 只作为历史执行上下文，不再作为唯一事实源。
+
+- 旧 thread：codex://threads/019e024c-7321-7503-99ec-2973c7c96fc0
+- 旧 goal：`文档优先 + 字幕证据 + 非阻塞同步 + 可重建索引`
+- 当前计划根：`docs/plantree/plans/video-to-knowledge-lancedb/`
+- 恢复入口：先读 `docs/plantree/README.md`、`baseline/`、本文件、`roadmap.md`、`open-questions.md`。
+
+## Current Phase
+
+P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知识质量和检索体验验证。
+
+旧 goal 已拆成四个可验证要求：
+
+1. 文档优先：BiliNote 先生成可读精华 Markdown，再从 Markdown 章节抽取知识。
+2. 字幕证据：知识条目必须保留原字幕片段、时间戳、视频路径和字幕路径。
+3. 非阻塞同步：Bililive-go/BiliNote 同步不得因长 LLM 生成或 LanceDB 不可达阻塞烧录成功状态。
+4. 可重建索引：SQLite/source tables 是事实源，LanceDB 是可删除、可重建、可降级的 side index。
+
+## Completed From Old Thread
+
+- 明确长期状态应从 provider goal 迁移到 plan-tree；goal 以后只作为执行引擎。
+- 已建立 `docs/plantree/` 入口、baseline、计划根、roadmap、open questions 和 ideas inbox。
+- BiliNote 侧已有知识库方向实现进展：
+  - `/api/knowledge/ingest` 机器 token 入口。
+  - `knowledge_sources` / `knowledge_items` 事实源模型。
+  - Markdown-first extractor，可在 `l2_content` 中保留 `原字幕证据`。
+  - 回填脚本 `knowledge_backfill.py` 可从 Bililive-go 媒体库构建 ingest payload。
+  - 回填脚本已补 `--remote-ingest`、sidecar 字幕去重、`--non-blocking` 参数。
+  - BiliNote 非阻塞 document-first ingest 已通过 PR #40 合并到 `Neymar022/bilinote`，merge commit `8b4b401c58b451169eadb782ef8a56f22893896c`。
+- 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
+
+## Current Work
+
+已完成 BiliNote NAS backend 运行态 env 门禁修复。2026-05-28 16:51 +08 通过本机 Chrome/Dockge `.env` 编辑态恢复 backend 可读取的 machine ingest env 和 remote vector env，未在命令输出或 plan-tree 中写入真实 token；重新部署后 `GET /api/knowledge/runtime/machine` 返回 PR #40 build `sha=8b4b401c58b451169eadb782ef8a56f22893896c`，ingest token/user/user_exists 为 true，vector index active 为 remote `http://192.168.1.17:8495`。有效 `non_blocking=true` dry-run、非法 `non_blocking={"invalid": true}` schema 探针和 LanceDB `/healthz` 均已通过。执行层面曾停止在真实样本 payload 构建：2026-05-28 16:58 +08 已通过 Bililive-go HTTP API 找到已完成样本路径，但当时只能拿到任务元数据和最终 `.mp4/.srt/.ass` 路径。2026-05-28 17:21 +08 使用用户提供的 NAS SSH 凭据走只读路径取得 task `473` 最终 `.srt`，构建 1623 segment 的真实 payload；dry-run 返回 `drafts_count=15`、`accepted_count=15`。真实 `generate_note=true` + `non_blocking=true` ingest 立即返回 queued，证明请求非阻塞；后台生成了可见 note markdown，但知识入库失败于 `knowledge_items.id` 唯一约束冲突，未生成 `knowledge_sources/items`，LanceDB 只验证到 `/healthz` 可用。当时不再卡在字幕读取，而是卡在 BiliNote 文档优先知识入库的同批次 item id/dedupe 问题。
+
+2026-05-28 17:28 +08 已通过 NAS SSH 对 BiliNote 生产容器和失败 note record 做只读根因复现。生产镜像的 `KnowledgeExtractor.extract(request, markdown=...)` 会把 Markdown 标题拆成文档章节；无时间戳章节回退到整条字幕的起点，并用起点附近 180 秒证据窗口计算相同 `end`。`deterministic_knowledge_id` 只包含 `source_type`、`source_id`、`start`、`end`、`l0_abstract`，而 `_build_abstract` 会把编号标题 `1. ...` / `2. ...` 截成 `装修: 1` / `装修: 2`。task `473` 的失败 markdown 只读复现结果为 `drafts=11`、`accepted=11`、`unique_accepted_ids=9`，两个重复组分别是 `1. 全屋定制报价审核与避坑` 与 `1. 套餐包含明细` 共享 `e29fee720f753e5cbfe9582c5bfcf16e`，`2. 半包施工报价评估（114㎡ 新房）` 与 `2. 潜在风险与避坑建议` 共享 `c0e3b044157400d02b51d84cbfeded38`。BiliNote `KnowledgeStore.upsert_drafts` 对同批次 accepted drafts 没有入库前去重，循环内按 `draft.id` `db.get` / `db.add` 后统一 commit，因此重复 id 会在 `knowledge_items.id` 唯一约束处失败。根因当时已从“未知入库失败”收窄为 BiliNote 文档优先 id 生成与 store 防御性去重缺口；该阶段计划仍不 implementation-ready 于 Bililive-go 侧自动同步实现。
+
+2026-05-28 17:33 +08 已把 BiliNote 修复策略固化为 [Decision 0001](decisions/0001-bilinote-document-first-id-and-retry.md)。只读核对 PR #40 工作树 `/Volumes/ISCSI-Disk/Folder/Bililive-go/.worktrees/bilinote-unified-knowledge-memory` 后确认：当前测试覆盖 document-first ingest 和 non-blocking queue，但没有覆盖无时间戳重复编号章节导致的同批次重复 id。最小复现脚本在该工作树上得到 `drafts=4`、`unique_ids=2`、`duplicate_groups=2`，证明新增回归用例可稳定触发旧问题。现有 `backfill_notes` 会调用 extractor 的 transcript-first 路径，`source rebuild` 又需要已存在的 `KnowledgeSource`；由于 task `473` 没有 source/items 成功落库，失败记录处理策略确定为：BiliNote patch 部署后，用同一真实 payload、同一 `task_id=bililive-go-473`、`generate_note=true`、`non_blocking=true` 重跑一次，不先清理 DB，不使用现有 backfill/rebuild 路径。
+
+2026-05-28 17:40 +08 已在 BiliNote PR #40 工作树 `/Volumes/ISCSI-Disk/Folder/Bililive-go/.worktrees/bilinote-unified-knowledge-memory` 按 Decision 0001 完成最小本地补丁，未提交、未推送、未部署。修改文件为 `backend/app/services/knowledge_extractor.py`、`backend/app/services/knowledge_store.py`、`backend/tests/test_knowledge_memory.py`。补丁行为：document-first draft 写入 `document_section_index`、`document_section_heading`、`document_section_identity` 并将 section identity 纳入 id seed；abstract 构建时去除编号前缀，避免 `装修: 1` / `装修: 2` 坍缩；store 在 admission 后按 `draft.id` 做同批次 dedupe，重复 id 作为 `duplicate_batch_id` 非致命 rejection。新增三条回归测试先在旧代码上 RED：extractor `2 != 4`、route `2 != 4`、store `items_count 2 != 1`；补丁后 targeted tests `3 passed`，完整 BiliNote backend tests `305 passed, 31 warnings`。
+
+2026-05-28 17:44 +08 发布前 review 已完成，仍未提交、未推送、未发布、未部署。review 中只补了一处健壮性修正：`deterministic_knowledge_id` 读取 `support_info` 时兼容 `None`，避免外部构造 `KnowledgeDraft` 时因 `support_info=None` 报错；不改变 document-first 正常行为。重新验证 targeted regression tests 返回 `3 passed, 42 deselected, 3 warnings`，完整 BiliNote backend tests 返回 `305 passed, 31 warnings in 3.51s`，`git diff --check` 无输出。BiliNote 工作树当前只改 3 个文件：`knowledge_extractor.py`、`knowledge_store.py`、`test_knowledge_memory.py`。
+
+2026-05-28 17:47 +08 已核对 BiliNote 发布路径和授权边界，仍未提交、未推送、未发布、未部署。BiliNote OpenSpec 规则确认该改动属于 bug fix（恢复 document-first 知识入库预期行为），不需要新增 proposal；`openspec list --specs` 当前返回 `No specs found`。`.github/workflows/main.yml` 的 Docker workflow 规则为：push 到 `master` 会构建 backend/frontend 并推 `latest`、`git-<sha>`、`branch-master`；`workflow_dispatch` 可指定 `image_suffix`，默认不推 `latest`，只推 `git-<sha>` 和 `branch-<suffix>`，除非显式 `push_latest=true`。当前补丁仍停在 `codex/nonblocking-knowledge-ingest` 工作树，本轮重新验证 targeted regression tests `3 passed, 42 deselected, 3 warnings in 3.07s`，full backend tests `305 passed, 31 warnings in 3.61s`，`git diff --check` 无输出。下一步若获明确授权，建议先提交并推分支，再用 workflow_dispatch 构建带独立 suffix 的 backend image；NAS 验证通过后再决定是否合并/推 latest，避免直接污染 `latest`。
+
+2026-05-28 17:58 +08 已改用 NAS SSH 做只读运行态复查，不再依赖 Dockge 网页终端输入。`sudo docker ps` 显示 `bilinote-backend`、`bilinote-frontend`、`bilinote-nginx`、`bililive`、`subtitle-worker` 均在运行；`bilinote-backend` 当时镜像仍为 `docker.1ms.run/neymar022/bilinote-backend:latest`，image id 为 `sha256:c1f9b00f0c2e3ea95e16292e7e32481823a7f9eaf0f1767a7a0c6f686bb72166`。容器 env/build flags 显示 build `sha=8b4b401c58b451169eadb782ef8a56f22893896c`、`ref=master`、`tag=branch-master`、`time=2026-05-28T05:41:16Z`，ingest token/user 均已配置，vector backend 为 remote `http://192.168.1.17:8495`。通过容器内 token 调 `http://127.0.0.1:8000/api/knowledge/runtime/machine` 返回同一 build SHA、ingest `user_exists=true`、remote LanceDB available=true；运行中 backend 代码未出现 `document_section_identity`、`_dedupe_batch_accepted`、`duplicate_batch_id` 标记，证明本地 BiliNote patch 当时尚未部署。只读 DB 查询显示 `note_records.task_id=bililive-go-473` 仍为 `FAILED`，`markdown_len=4370`，`knowledge_sources/items` 匹配计数仍为 `0`。该阶段 blocker 因此仍是“已验证补丁尚未进入可部署产物并部署到 NAS”，不是 NAS SSH 访问问题。
+
+2026-05-28 18:02 +08 按 Next Target 第 2 项重新执行发布前验证门禁，仍未提交、未推送、未触发 workflow、未部署 NAS、未重跑 task `473`。BiliNote 工作树仍在 `codex/nonblocking-knowledge-ingest`，只修改 `backend/app/services/knowledge_extractor.py`、`backend/app/services/knowledge_store.py`、`backend/tests/test_knowledge_memory.py`。Targeted regression command 返回 `3 passed, 42 deselected, 3 warnings in 3.07s`；full backend command 返回 `305 passed, 31 warnings in 3.61s`；`git diff --check` 无输出。发布前门禁仍 clean，下一步仍需要用户明确授权后才能提交/推送并构建验证镜像。
+
+2026-05-28 19:11 +08 用户已明确授权继续执行直到链路跑通。提交/推送前再次保留发布前门禁：targeted regression command 返回 `3 passed, 42 deselected, 3 warnings in 3.64s`；full backend command 返回 `305 passed, 31 warnings in 3.28s`；`git diff --check` 无输出。下一步按授权提交并推送 BiliNote 分支，然后触发 `workflow_dispatch` 构建独立 suffix 验证镜像，仍暂不推 `latest`。
+
+2026-05-28 19:12 +08 已按授权提交并推送 BiliNote patch。提交为 `b5544ce120d2910724f06a69e976b8cc152918f1`（`Fix document-first knowledge item IDs`），远端分支为 `origin/codex/nonblocking-knowledge-ingest`。已触发 GitHub Actions `Build & Push Docker images` workflow_dispatch，run id `26571213166`，ref `codex/nonblocking-knowledge-ingest`，head SHA `b5544ce120d2910724f06a69e976b8cc152918f1`，`image_suffix=vtok-473-b5544ce`，`push_latest=false`。预期验证镜像 tag 为 `neymar022/bilinote-backend:branch-vtok-473-b5544ce` 和 `neymar022/bilinote-backend:git-b5544ce120d2910724f06a69e976b8cc152918f1`；等待 workflow 完成后再部署 NAS。
+
+2026-05-28 19:54 +08 GitHub Actions 验证镜像构建已完成。Run `26571213166` 结论为 `success`；backend job `78278544429` 于 `2026-05-28T11:34:14Z` 完成，frontend job `78278544405` 于 `2026-05-28T11:35:22Z` 完成。Docker manifest 已验证：`neymar022/bilinote-backend:branch-vtok-473-b5544ce` 与 `neymar022/bilinote-backend:git-b5544ce120d2910724f06a69e976b8cc152918f1` 均存在且 digest 为 `sha256:0420aa61ad5d7705d219c4ff7bfac225923bb441692cb5bec8a6f4f3072961fc`，包含 `linux/amd64` 和 `linux/arm64` manifest。下一步部署 NAS backend 到该验证 tag，并验证运行态 build SHA。
+
+2026-05-28 20:02 +08 NAS backend 已部署到验证 tag。直连 Docker Hub 在 NAS 上拉取超时，改用现有 compose 使用的镜像代理 `docker.1ms.run` 拉取 `docker.1ms.run/neymar022/bilinote-backend:branch-vtok-473-b5544ce`，拉取成功且 digest 为 `sha256:0420aa61ad5d7705d219c4ff7bfac225923bb441692cb5bec8a6f4f3072961fc`。已备份 `/volume2/docker/dockge/stacks/bilinote/compose.yaml` 为 `compose.yaml.bak-vtok-473-b5544ce-20260528200155`，只把 backend image 改为验证 tag，frontend 仍为 `docker.1ms.run/neymar022/bilinote-frontend:latest`，随后 `docker compose up -d backend` 重建并启动 `bilinote-backend`。运行态验证通过：`GET /api/sys_health` 返回 `200`；container image 为 `docker.1ms.run/neymar022/bilinote-backend:branch-vtok-473-b5544ce`；env/build flags 为 `BILINOTE_BUILD_SHA=b5544ce120d2910724f06a69e976b8cc152918f1`、`BILINOTE_BUILD_REF=codex/nonblocking-knowledge-ingest`、`BILINOTE_BUILD_TAG=branch-vtok-473-b5544ce`；补丁标记 `document_section_identity`、`_dedupe_batch_accepted`、`duplicate_batch_id` 均存在；`/api/knowledge/runtime/machine` 返回 build SHA `b5544ce120d2910724f06a69e976b8cc152918f1`、ingest token/user/user_exists 均 true、remote LanceDB available=true。随后按计划只重跑一次 task `473` 同一真实 payload。
+
+2026-05-28 20:25 +08 已按计划重跑 task `473` 同一真实 payload、同一 `task_id=bililive-go-473`、`generate_note=true`、`non_blocking=true`。POST 在约 `0.084s` 返回 queued，后台状态从 `PENDING`/`SUMMARIZING` 到 `SUCCESS`；最新 `note_records.id=24`，`markdown_len=1551`。SQLite 事实源已落库：`knowledge_sources.id=bbb20216b66679f4d7f6e17364cc2f68`，`status=active`，`item_count=3`，`content_hash=39f98a9e14f8c5069b93a8151957b8acacebac651e4fea22ab661f66c799d83d`。3 个 `knowledge_items` 均来自该 source，均保留 `source_video_path`、`subtitle_path`、`start=0.0`、`end=181.64`、`l2_content` 中的 `原字幕证据`，并带有唯一 `document_section_identity`。首次写入 LanceDB 时出现 `index_status=failed` / `index_error=timed out`；直接查 Mac LanceDB `/search` 返回 HTTP 500，stderr 根因为 `Too many open files (os error 24)`。已对 `com.bilinote.mac-lancedb` 启动脚本加入 `ulimit -n 65536 || ulimit -n 4096 || true` 并用 `launchctl kickstart -k` 重启，`/healthz` 恢复；随后把 NAS BiliNote `.env` 的 `BILINOTE_VECTOR_SERVICE_TIMEOUT` 调整为 `30` 并重建 backend，手动 reindex task `473` 的 3 个 item，最终 3 个 item 均为 `index_status=indexed`、`index_error=null`。BiliNote 检索层 `KnowledgeRetriever.search_response(..., query='全屋定制 报价 装修', mode='keyword')` 返回 `total=3`、`high=3`、`sources=1`；远程 LanceDB `/search` 对 `全屋定制 报价 装修` 和 `泰州 全屋定制 抽屉` 均能命中 task `473` item `b107c2de2a3b657a956003f9ab70dfcc`。BiliNote/task `473` blocker 已解除；下一步回到 Bililive-go 侧自动触发、同步状态、错误消息和重试语义。
+
+2026-05-28 22:25 +08 Bililive-go 侧自动触发已用真实生产任务跑通到检索层。实现提交为 `97c3f27fde58260a7626e624271018edeb73ad88`（`Add BiliNote knowledge sync to subtitle pipeline`），远端分支 `origin/codex/bililive-knowledge-sync-status-p17`；GitHub Actions `Publish Docker Images` run `26576824942` 成功，NAS `bililive` 已部署 `docker.1ms.run/neymar022/bililive-go-app:sha-97c3f27`，运行 image config digest 为 `sha256:3ba28fb0499fa2eb86a495eae0427ff7bcd2c4938307ef6d97a1240df7e9888c`。NAS `/volume2/docker/bililive-go/config.yml` 已启用 `subtitle.knowledge_sync.enabled=true`，endpoint 为 `http://192.168.1.80:3015/api/knowledge/ingest`，`provider_id=qwen`，`model_name=qwen3.6-plus`，`generate_note=true`，`non_blocking=true`，`timeout_seconds=30`；`/api/subtitles/settings` 运行态返回同一配置。自动样本为 pipeline task `476`（`Geek徐Sir.S01E0013.2026-05-28 - 今晚开干：零基础学AI编程，开发电商管理系统！.mp4`）。该任务先受串行字幕/烧录通道影响，Mac `/burn` 于 22:18 +08 返回 `200` 后，Bililive stage 日志出现 `POST BiliNote /api/knowledge/ingest (non-blocking)`，task `476` 状态变为 `completed`，不被知识生成阻塞。对应 `.subtitle.json` 为 `status=completed`、`renderer_status=completed`、`segments=2833`、`knowledge_sync_status=queued`、`knowledge_sync_task_id=bililive-go-476`、`knowledge_sync_source_id=Geek徐Sir/Season 01/Geek徐Sir.S01E0013.2026-05-28 - 今晚开干：零基础学AI编程，开发电商管理系统！.mp4`、`knowledge_sync_attempts=1`、`knowledge_sync_error=null`。BiliNote 后台随后生成 note `id=25`，`status=SUCCESS`，`markdown_len=3907`；SQLite 事实源落库 `knowledge_sources.id=42b301ffe99c0f424e5fbaac1a2b2fa6`，`task_id=bililive-go-476`，`status=active`，`item_count=19`，`content_hash=ca3331e0c2f33a2730edc7b661a02d18231388ccffbb9e062fdee9fafa99f5f8`。19 个 `knowledge_items` 均通过 `source_ref_id=42b301ffe99c0f424e5fbaac1a2b2fa6` 关联，全部 `index_status=indexed`、`index_error=null`，并保留 `source_id` 相对媒体库路径、`source_video_path`、`subtitle_path`、时间戳和 `原字幕证据`。远程 Mac LanceDB `/healthz` 返回 `ok=true`；`/search` 查询 `Vue Vite Element UI Flask MySQL 电商管理系统` 命中 task `476` item `f606f358722b26e87776a99543e33f50`，查询 `DeepSeek Trae AI编程 成本 token` 命中 task `476` item `74490e2b098e0720bb74691ea816389f`。该证据闭合了 Bililive-go 新视频烧录完成后自动非阻塞触发 BiliNote ingest、可见 note、SQLite source/items、LanceDB index/search 的端到端成功路径。task `474`、`475`、`477` 仍在串行字幕/烧录队列中运行或排队，属于后续观察项，不再是 task `476` 成功链路的 blocker。
+
+2026-05-28 22:51 +08 连续自动样本观察已补齐。pipeline task `474`、`475`、`477`、`478` 均为 `completed`；对应 stage 日志均出现 `POST BiliNote /api/knowledge/ingest (non-blocking)` 和 `知识同步已提交`。四个 `.subtitle.json` 均为 `status=completed`、`renderer_status=completed`、`knowledge_sync_status=queued`、`knowledge_sync_attempts=1`、`knowledge_sync_error=null`，task id 分别写为 `bililive-go-474/475/477/478`。BiliNote 后台 note 均为 `SUCCESS`：task `474` note `id=27` `markdown_len=437`，task `475` note `id=26` `markdown_len=1265`，task `477` note `id=28` `markdown_len=164`，task `478` note `id=29` `markdown_len=406`。SQLite source 均已落库：task `474` source `e90ed25b97b83a94dd6bd2adc778beb3` `item_count=2`，task `475` source `f418fb95e1735460868264b9ef605e74` `item_count=4`，task `477` source `72294e5bb5d659d2c33013ecd865d681` `item_count=1`，task `478` source `2e68128e66f845b608af521662b7b491` `item_count=0`。其中 `474`、`475`、`477` 的 7 个 item 全部 `index_status=indexed` 且 `index_error=null`；task `478` 是只有 1 段字幕的退化样本，证明 note/source 入口成功和非阻塞语义，但不适合作为检索验收样本。远程 LanceDB `/search` 验证：`设计师 加班 画图 建筑师` 命中 task `477` item `e55cdb7957e655a399b0228182edc362`；`墙面基层 涂料 51 cm 衣帽间` 命中 task `475` items `415bb4ae17df2126678615b45787687c`、`35c9f406c1d67877472d5d39e99864ae`；`装修达人 免费连麦 连麦问答 核心内容` 命中 task `474` items `86d4f66bcd5a7df9fe0b1cad6780a826`、`46f0bbf6577b0c4a43f1c25bf1a94b63`。运行态排队核对：`task_queue.max_concurrent=3`，task `474/475` 于 21:33 +08 开始，task `477` 于 22:18 +08 开始，task `478` 于 22:39 +08 开始；当前 API 配置没有暴露“只在凌晨 2 点烧录”的生效字段，本批次也已在 2 点前实际启动，当前观察到的延迟更符合 pipeline/远端 burn 串行排队，而不是一个仍在阻止任务运行的 02:00 gate。
+
+2026-05-28 22:51 +08 发布治理状态已收窄。BiliNote workflow run `26571213166` 和 Bililive-go workflow run `26576824942` 均为 `success`；但 BiliNote 验证提交 `b5544ce120d2910724f06a69e976b8cc152918f1` 尚未进入 `origin/master`（当前 `origin/master=8b4b401c58b451169eadb782ef8a56f22893896c`），Bililive-go 验证提交 `97c3f27fde58260a7626e624271018edeb73ad88` 也尚未进入 `origin/master`（当前 `origin/master=e2931e6e5b1acff0a788c463686a95cdc0eb35f5`）。`Neymar022/bililive-go` 当前没有该 head branch 的 PR；`Neymar022/bilinote` 只查到已 merged 的 PR #40，验证提交 `b5544ce` 是该分支后续新增提交，不应误认为已经随 PR #40 进入 master。决策：NAS 继续 pin BiliNote `branch-vtok-473-b5544ce` 与 Bililive-go `sha-97c3f27` 作为验证 tag；进入稳定发布前需要显式开 PR/合并/打稳定 tag 或明确继续 pin。链路成功路径已经 implementation-ready；小批量/全量 backfill 仍不 implementation-ready，需先完成发布 tag 决策、失败 smoke/rebuild/限流恢复策略。
+
+## Active TODO
+
+- 单样本端到端自动链路已通过：
+  - BiliNote/task `473` 手动真实 payload 验证已通过：note/source/items/index/search 均成功。
+  - Bililive-go/task `476` 自动触发验证已通过：烧录完成后自动 POST BiliNote，`.subtitle.json` 写入 `knowledge_sync_status=queued`，BiliNote note `SUCCESS`，1 个 source、19 个 item 成功落库，19 个 item 全部 `indexed`，远程 LanceDB `/search` 可命中。
+  - 连续自动样本 task `474`、`475`、`477`、`478` 已验证：全部 pipeline completed，全部 sidecar 写入 `knowledge_sync_status=queued`，全部进入 BiliNote note/source；其中 `474/475/477` 共产生 7 个 indexed item 且 LanceDB search 可命中，`478` 因只有 1 段字幕产生 0 item，不作为检索样本。
+  - Bililive-go 成功状态未被 BiliNote 后台生成阻塞；知识同步请求本身为非阻塞 queued 语义。
+- 当前仅剩收尾/发布治理目标：
+  - 决定 BiliNote 验证 tag 与 Bililive-go 验证 tag 是否开 PR、合并、发布稳定 tag，或继续 pin 在 NAS。
+  - 如需生产级失败验收，再做受控坏 endpoint/停 BiliNote 的非阻塞失败 smoke；当前代码单测已覆盖 BiliNote 502 不影响 subtitle stage。
+  - backfill 暂不进入执行，直到发布 tag、失败 smoke、限流/恢复和 LanceDB rebuild 路径明确。
+
+## Last Known Verification
+
+- 本仓库已有 PRD 记录 3 个烧录成功样本，速度约 2.8x-3.0x。
+- BiliNote 后端相关测试在旧 thread 中通过：`PYTHONPATH=backend python3 -m pytest backend/tests -q`，结果 `302 passed, 29 warnings`。
+- 2026-05-28 14:00 +08 运行态门禁检查：
+  - `GET http://192.168.1.80:3015/api/sys_health` 返回 `200`。
+  - 未带 token 访问 `GET /api/knowledge/runtime/machine` 返回 `401 Missing bearer token`，说明 machine runtime 路由存在。
+  - 带 `BILINOTE_INGEST_TOKEN` 访问 `GET /api/knowledge/runtime/machine` 返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`, `ref=master`, `tag=branch-master`, `time=2026-05-27T14:55:09Z`；ingest token/user/user_exists 均为 true；vector index active 为 remote `http://192.168.1.17:8495`，remote backend 为 `mac_lancedb`。
+  - `POST /api/knowledge/ingest?dry_run=true` 带 machine token 可接受最小 bililive-go payload 并返回 `dry_run=true`, `drafts_count=1`, `accepted_count=1`；但 dry-run 不能证明 `non_blocking` 生效，因为 PR #39 代码会忽略未知字段。
+  - `GET http://192.168.1.17:8495/healthz` 返回 `200`，root 为 `/Volumes/BiliNoteRuntime/mac-lancedb/data`，table 为 `knowledge_items`；`GET /stats` 返回 `404`。
+  - `git fetch origin master` 后，`origin/master` 为 `8b4b401c58b451169eadb782ef8a56f22893896c`（PR #40，提交时间 2026-05-28 13:40 +08）。运行态 build SHA `5bb2758b5ea35c81ae5e455578e97447c12ee0b4` 是 PR #39 merge，且是 `8b4b401` 的祖先。
+  - `git diff 5bb2758..8b4b401 -- backend/app/models/knowledge_model.py backend/app/routers/knowledge.py` 显示 PR #40 才新增 `non_blocking` 字段、`BackgroundTasks` 队列返回和后台文档优先 ingest 路径。
+- 2026-05-28 14:02 +08 复查运行态门禁：
+  - `GET /api/knowledge/runtime/machine` 仍返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`，vector index 仍 active remote，ingest token/user/user_exists 仍为 true。
+  - `POST /api/knowledge/ingest?dry_run=true` 带 `non_blocking={"invalid": true}` 仍返回 `200` 和 `dry_run=true`，而不是请求模型校验失败；这说明当前生产请求模型会忽略未知 `non_blocking` 字段，不能证明 PR #40 的 `KnowledgeIngestRequest.non_blocking: bool` 已部署。
+  - `POST /api/knowledge/ingest?dry_run=true` 带 `non_blocking=true` 也返回 `200`，但结合非法类型探针，只能证明 dry-run ingest 可用，不能证明后台非阻塞分支存在。
+  - LanceDB `GET /healthz` 仍返回 `200`，`GET /stats` 仍返回 `404`。
+- 2026-05-28 14:07 +08 镜像发布与 NAS 刷新复查：
+  - Docker Hub `neymar022/bilinote-backend:branch-master`、`:latest`、`:git-8b4b401c58b451169eadb782ef8a56f22893896c` 均已存在，且共同指向 digest `sha256:9d365865165d0c4194ec9365cb278e95f1a2448e8461614502ae3d57541d895d`。
+  - `branch-master` tag `last_updated=2026-05-28T06:02:14Z`，`git-8b4b401c58b451169eadb782ef8a56f22893896c` tag `last_updated=2026-05-28T06:02:11Z`。
+  - 复查 `GET /api/knowledge/runtime/machine` 仍返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`, `time=2026-05-27T14:55:09Z`，晚于 Docker Hub 新 tag 发布时间后仍未变化。
+  - 复查非法 `non_blocking={"invalid": true}` dry-run 仍返回 `200` 和 `dry_run=true`，进一步证明 NAS backend 尚未运行 PR #40 请求模型。
+  - 本机没有可用的 NAS Docker context；`/volume2/docker/dockge/stacks/bilinote` 未挂载到当前 Mac；直接 SSH 到 `192.168.1.80` 此前返回认证失败。因此当前线程只能证明需要刷新 NAS Dockge/backend 容器，不能安全执行该部署动作。
+- 2026-05-28 16:10 +08 再次复查版本门禁和访问路径：
+  - `GET /api/knowledge/runtime/machine` 仍返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`, `time=2026-05-27T14:55:09Z`。
+  - 非法 `non_blocking={"invalid": true}` dry-run 仍返回 `200` 和 `dry_run=true`。
+  - `GET /api/sys_health` 返回 `200`，LanceDB `GET /healthz` 返回 `200`。
+  - Dockge 在 `http://192.168.1.80:5001` 可访问，但 Chrome 打开后是登录页；当前没有可复用的已登录会话。
+  - 非交互 SSH 探针 `Neymar@192.168.1.80`、`neymar@192.168.1.80`、`root@192.168.1.80` 均返回 `Permission denied (publickey,password)`。
+  - 结论：当前线程仍不能安全刷新 NAS backend 容器；需要用户在 Dockge 登录后刷新/recreate，或提供可用 SSH/Docker context。
+- 2026-05-28 16:13 +08 复查版本门禁：
+  - `GET /api/knowledge/runtime/machine` 仍返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`, `time=2026-05-27T14:55:09Z`。
+  - 非法 `non_blocking={"invalid": true}` dry-run 仍返回 `200` 和 `dry_run=true`。
+  - Docker Hub `neymar022/bilinote-backend:git-8b4b401c58b451169eadb782ef8a56f22893896c` 仍存在，`last_updated=2026-05-28T06:02:11Z`，digest 为 `sha256:9d365865165d0c4194ec9365cb278e95f1a2448e8461614502ae3d57541d895d`。
+  - Dockge 页面仍是登录页；非交互 SSH `Neymar@192.168.1.80` 仍返回 `Permission denied (publickey,password)`；Docker context 仍只有本机 `default`/`desktop-linux`。
+- 2026-05-28 16:15 +08 复查版本门禁：
+  - `GET /api/knowledge/runtime/machine` 仍返回 build `sha=5bb2758b5ea35c81ae5e455578e97447c12ee0b4`, `time=2026-05-27T14:55:09Z`。
+  - 非法 `non_blocking={"invalid": true}` dry-run 仍返回 `200` 和 `dry_run=true`。
+  - Docker Hub `neymar022/bilinote-backend:git-8b4b401c58b451169eadb782ef8a56f22893896c` 仍存在，`last_updated=2026-05-28T06:02:11Z`，digest 为 `sha256:9d365865165d0c4194ec9365cb278e95f1a2448e8461614502ae3d57541d895d`。
+  - Dockge HTTP 首页可访问但仍需要登录；非交互 SSH `Neymar@192.168.1.80` 仍返回 `Permission denied (publickey,password)`；Docker context 仍只有本机 `default`/`desktop-linux`。
+- 2026-05-28 16:23 +08 通过本机 Chrome/Computer Use 使用已登录 Dockge 会话进入 `http://192.168.1.80:5001/compose/bilinote`：
+  - Dockge 项目页显示 backend 镜像为 `docker.1ms.run/neymar022/bilinote-backend:latest`，frontend 镜像为 `docker.1ms.run/neymar022/bilinote-frontend:latest`，nginx 为 `nginx:1.25-alpine`。
+  - 点击项目级 `更新` 后，Dockge 日志显示 `backend Pulled`、`frontend Pulled`、`nginx Pulled`，随后 `container bilinote-nginx Started`、`container bilinote-frontend Started`、`container bilinote-backend Started`。
+  - 更新后 `GET /api/sys_health` 返回 `200`。
+  - 更新后带 machine token 访问 `GET /api/knowledge/runtime/machine` 返回 `401 {"detail":"BILINOTE_INGEST_TOKEN is not configured"}`，因此无法从 machine endpoint 读取 build SHA、vector index 或 ingest user 状态。
+  - 更新后非法 `non_blocking={"invalid": true}` dry-run 返回 `422 Unprocessable Entity`，包含 `loc=["body","non_blocking"]` 和 `type="bool_type"`，证明请求模型已包含 PR #40 的 `non_blocking: bool` 字段。
+  - 更新后有效 `non_blocking=true` dry-run 无论带不带 machine token 都返回 `401 BILINOTE_INGEST_TOKEN is not configured`，因此不能执行真实样本 ingest。
+- 2026-05-28 16:29 +08 再次复查 env/schema 门禁：
+  - `GET /api/sys_health` 仍返回 `200`。
+  - 带本机保存的 machine token 访问 `GET /api/knowledge/runtime/machine` 仍返回 `401 {"detail":"BILINOTE_INGEST_TOKEN is not configured"}`。
+  - 非法 `non_blocking={"invalid": true}` dry-run 仍返回 `422 Unprocessable Entity`，且只剩 `loc=["body","non_blocking"]` / `type="bool_type"`，继续证明 PR #40 请求模型已部署。
+  - LanceDB `GET http://192.168.1.17:8495/healthz` 仍返回 `200`，root 为 `/Volumes/BiliNoteRuntime/mac-lancedb/data`，table 为 `knowledge_items`。
+  - 尝试通过 Dockge backend Bash 执行不打印 secret 的 env/build probe，但页面终端输入未产生可审计输出；不要把该路径作为当前证明来源。
+- 2026-05-28 16:51 +08 BiliNote NAS backend env 修复与门禁复查：
+  - 先用小写 ASCII 终端 smoke command 验证 Dockge Web terminal 输入通道，`printf 'ok\n'` 输出 `ok`。
+  - BiliNote backend 容器内非敏感 env probe 显示：`token_set=no`、`user_id_set=no`、`user_id=unset`、`build_sha=8b4b401c58b451169eadb782ef8a56f22893896c`、`build_tag=branch-master`、`lancedb_runtime=unset`。
+  - Dockge `bilinote` stack `.env` key-only 检查显示原先缺少 `BILINOTE_INGEST_TOKEN`、`BILINOTE_INGEST_USER_ID`、`BILINOTE_LANCEDB_RUNTIME`、`BILINOTE_VECTOR_BACKEND`、`BILINOTE_VECTOR_SERVICE_URL`、`BILINOTE_VECTOR_SERVICE_TIMEOUT`；通过页面编辑器同步本机 BiliNote `.env` 中对应值并点击 `部署`，未打印真实 token。
+  - 部署后 `GET /api/knowledge/runtime/machine` 返回 build `sha=8b4b401c58b451169eadb782ef8a56f22893896c`，`ref=master`，`tag=branch-master`，ingest `token_configured/user_id_configured/user_exists` 均为 true；vector index 为 adaptive/remote active，remote URL `http://192.168.1.17:8495`，remote backend `mac_lancedb`，remote root `/Volumes/BiliNoteRuntime/mac-lancedb/data`。
+  - 有效 `POST /api/knowledge/ingest?dry_run=true` 带 `non_blocking=true` 返回 `200`，`dry_run=true`、`drafts_count=1`、`accepted_count=1`。
+  - 非法 `non_blocking={"invalid": true}` dry-run 返回 `422`，`loc=["body","non_blocking"]`，`type="bool_type"`。
+  - LanceDB `GET http://192.168.1.17:8495/healthz` 返回 `200`，`ok=true`，backend `mac_lancedb`，table `knowledge_items`。
+- 2026-05-28 16:51 +08 真实样本访问复查：
+  - 当前 Mac 的 `/Volumes/ISCSI-Disk/Folder/Bililive-go` 未挂载 NAS 媒体库 `video/`，`/Volumes/MOVESPEED` 也未找到 PRD 中的 `旭东聊装修.S01E0003/0004/0005` 样本。
+  - BiliNote backend 容器内 `test -d /volume2/docker/bililive-go/video` 返回 `media_mount=no`，不能从 BiliNote backend 直接读取样本字幕。
+  - Dockge `/console` 显示 `Console is not enabled`，不能通过 Dockge 主终端访问 host Docker/stack 文件。
+  - Dockge `bililive-go` stack 页面显示 compose `env_file: /volume2/docker/bililive-go/.env`，终端日志报该 env file 不存在，`bililive` 与 `subtitle-worker` 服务状态为 `N/A`；`subtitle-worker` terminal 只显示 env file missing，未得到可用 shell。不要在本计划范围内顺手修复 bililive-go stack。
+- 2026-05-28 16:58 +08 真实样本路径发现：
+  - NAS SMB/NFS 端口对当前 Mac 不可用；本机仍未挂载 NAS 媒体库。
+  - `http://192.168.1.80:18090/` 的 Bililive-go Web/API 可访问；`GET /api/info` 返回 `200`。
+  - `GET /api/pipeline/tasks?status=completed&limit=10` 返回多个已完成样本；候选 task `473` 为 `旭东聊装修`，最终文件包括 `/volume2/docker/bililive-go/video/旭东聊装修/Season 01/旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4`、同名 `.srt` 和 `.ass`，stage `subtitle_generate` 状态为 `completed`。
+  - `GET /api/file/旭东聊装修` 只暴露当前 `out_put_path=/volume2/docker/bililive-go/srt_video` 下的文件；未发现可用于 payload 的 `.srt`、`.ass` 或 `.subtitle.json`。
+  - 通过 `/files/../video/...` 和 `/api/file/../video/...` 读取最终媒体库 `.srt` 均不可用或被重定向后返回 `404`；因此当前只能证明候选样本路径，不能读取真实字幕内容。
+  - 避免在后续日志或文档中转储完整 `/api/config`，该接口可能包含 cookies 等敏感字段；需要配置事实时只提取非敏感字段。
+- 2026-05-28 17:03 +08 真实字幕内容访问路径复查：
+  - 仓库代码 `src/servers/server.go` 与 `src/servers/handler.go` 显示 `/files/`、`/api/file/{path}` 均以 `configs.GetCurrentConfig().OutPutPath` 为根，并通过 `getSafePath` 阻止越界；这解释了为什么无法通过 `../video` 读取最终媒体库字幕。
+  - `GET /api/pipeline/tasks/473` 可返回完整 task 元数据、最终 `.mp4/.srt/.ass` 路径、`subtitle_generate` completed 状态和 worker command，但响应不包含字幕正文。
+  - 横向扫描 `GET /api/file/` 下所有可访问主播目录，未发现 `.srt`、`.ass` 或 `.subtitle.json`。
+  - `192.168.1.80:8091` 连接拒绝，subtitle-worker 没有对当前 Mac 暴露只读 API；`GET /api/openlist/status` 返回 `openlist_running=false`，没有可用 OpenList 存储导出。
+  - `18090/files/旭东聊装修/` 可列出 `srt_video` 当前目录中的 nfo 和未归集/处理中视频，但没有 task `473` 的最终 `.srt` 内容。
+- 2026-05-28 17:09 +08 其它只读访问路径复查：
+  - `GET /api/config/effective` 只提取非敏感字段，确认运行态 `out_put_path=/volume2/docker/bililive-go/srt_video`、`app_data_path=/srv/bililive/.appdata`；`/api/file/.appdata`、`/api/file/reports`、`/api/file/tools`、`/api/file/video` 均返回获取目录失败。
+  - 当前 Mac 只挂载 `/Volumes/ISCSI-Disk`、`/Volumes/MOVESPEED`、`/Volumes/BiliNoteRuntime` 和本地时间磁盘，没有 `192.168.1.80` 的 SMB/NFS/WebDAV 媒体库挂载。
+  - UGREEN `http://192.168.1.80:9999/desktop/?os=ugospro` 可达，但当前 Chrome 会话跳转到 `#/login/account`，没有可复用登录态；未尝试提交登录。
+  - WebDAV `5005/5006` 可达，但 `OPTIONS`、`PROPFIND` 和候选 `.srt` `HEAD` 均返回 `401 Unauthorized`；未尝试凭证。
+  - SSH `jansonhan`、`Neymar`、`neymar`、`root`、`admin` 使用 BatchMode 均返回 `Permission denied (publickey,password)`。
+  - openresty 常见静态路径 `/video`、`/media`、`/downloads`、`/files` 和绝对路径变体访问候选 `.srt` 均为 `404`。
+- 2026-05-28 17:21 +08 SSH 样本读取与真实 ingest 验证：
+  - 使用用户提供的 NAS SSH 凭据建立只读访问路径；未把密码写入 plan-tree。
+  - `sudo docker ps` 显示实际运行容器包括 `bililive`、`subtitle-worker`、`bilinote-backend`、`bilinote-nginx`；这说明 Dockge `bililive-go` 页面 `env_file` 报错是 Dockge/compose 管理视图漂移，不等同于实际 `18090` 服务未运行。
+  - 通过远端 `find /volume2/docker/bililive-go/video -name "*S01E0047*.srt"` 定位并流式读取 task `473` 最终 `.srt`；本机临时文件大小 `97328` bytes，解析出 `1623` 个 segments，时间范围 `00:00:00.000` 到 `3655.22s`。
+  - 运行态 BiliNote backend 代码确认 `KnowledgeIngestRequest` 支持 `generate_note` 与 `non_blocking`；`generate_note=true` 需要同时提供 `model_name` 和 `provider_id` 才会进入文档优先生成。
+  - 只读 DB 检查显示用户级 provider setting 中 `qwen` enabled，候选 model 为 `qwen3.6-plus`；未读取或记录 API key。
+  - 构建真实 payload：`source_id` 为最终 `.mp4` 相对媒体库路径，`task_id=bililive-go-473`，`host=旭东聊装修`，`source_video_path` 和 `subtitle_path` 均指向 `/volume2/docker/bililive-go/video/...`。
+  - `POST /api/knowledge/ingest?dry_run=true` 返回 `200`，`dry_run=true`、`drafts_count=15`、`accepted_count=15`、`rejected_count=0`。
+  - 真实 `POST /api/knowledge/ingest` 返回 `200`，耗时约 `0.05s`，`source.queued=true`、`note.queued=true`、`note.mode=background`，证明请求非阻塞。
+  - 后台任务先进入 `SUMMARIZING`，随后 `note_records.task_id=bililive-go-473` 变为 `FAILED`；`markdown_len=4370`，说明可见 note markdown 已生成。
+  - 失败原因是 `(sqlite3.IntegrityError) UNIQUE constraint failed: knowledge_items.id`，发生在写入 `knowledge_items` 时；错误参数显示同一次文档优先抽取产生了重复 item id。
+  - `knowledge_sources` 中没有 task `473` 或 `S01E0047` 对应 source，相关 `knowledge_items` 计数为 `0`；因此 LanceDB 没有该样本可验证的新增索引。
+  - LanceDB `GET http://192.168.1.17:8495/healthz` 仍返回 `200`；但该样本的 search/index 验证未通过，因为源和 item 未落库。
+- 2026-05-28 17:28 +08 BiliNote document-first 重复 id 根因复现：
+  - 生产容器 `/app/app/services/knowledge_extractor.py` 确认 document-first 分支会从 Markdown 标题生成知识 draft；无时间戳章节回退到 `fallback_start=0.0`，并选取起点后 180 秒字幕作为证据窗口。
+  - 生产容器 `deterministic_knowledge_id` 只使用 `source_type`、`source_id`、`start`、`end` 和 `l0_abstract`，没有章节序号、原始 heading、section hash 或 source range。
+  - 对 `note_records.task_id=bililive-go-473` 的 `form_data + markdown` 只读调用 extractor：`segments=1623`、`markdown_len=4370`、`drafts=11`、`accepted=11`、`unique_accepted_ids=9`。
+  - 重复组 1：`1. 全屋定制报价审核与避坑` 与 `1. 套餐包含明细` 均为 `start=0.0`、`end=181.64`、`abstract=装修: 1`，共享 id `e29fee720f753e5cbfe9582c5bfcf16e`。
+  - 重复组 2：`2. 半包施工报价评估（114㎡ 新房）` 与 `2. 潜在风险与避坑建议` 均为 `start=0.0`、`end=181.64`、`abstract=装修: 2`，共享 id `c0e3b044157400d02b51d84cbfeded38`。
+  - 生产容器 `KnowledgeStore.upsert_drafts` 在 admission 后直接循环 accepted drafts，按 `draft.id` 查找或新增 `KnowledgeItem`，没有同批次 dedupe/merge；最终 commit 时触发 `knowledge_items.id` 唯一约束。
+- 2026-05-28 17:33 +08 BiliNote 修复策略收敛：
+  - 已新增 [Decision 0001](decisions/0001-bilinote-document-first-id-and-retry.md)，接受三段式修复：document-first id 加章节级身份、abstract 避免编号坍缩、store 同批次重复 id 非致命 dedupe。
+  - PR #40 工作树最小脚本复现：四个无时间戳 Markdown 编号章节生成 `drafts=4`、`unique_ids=2`、`duplicate_groups=2`，两个 `1.` 章节共享一个 id，两个 `2.` 章节共享另一个 id。
+  - 当前 BiliNote 测试只覆盖 document-first 正常抽取和 non-blocking queue；缺少 extractor/store/route 层的重复编号章节回归测试。
+  - `backfill_notes` 当前会从 note record 重建 request 后调用 transcript-first extractor；`source rebuild` 要求已有 `KnowledgeSource`；二者都不适合直接修复 task `473` 的 failed note record。
+  - task `473` 后续处理策略确定为补丁部署后同 `task_id` 重跑同一真实 payload；重跑前仍不得再次触发真实 ingest。
+- 2026-05-28 17:40 +08 BiliNote 本地补丁和测试：
+  - RED：`PYTHONPATH=backend python3 -m pytest backend/tests/test_knowledge_memory.py -q -k 'document_first_markdown_sections_get_unique_ids_when_headings_repeat_numbers or upsert_drafts_deduplicates_duplicate_ids_before_commit or ingest_generate_note_handles_duplicate_numbered_markdown_sections'` 在旧代码上失败，失败点分别证明 extractor 只有 2 个唯一 id、route 返回重复 `item_ids`、store 未把同批次重复 id 降为 1 个 item。
+  - GREEN：同一 targeted command 在补丁后返回 `3 passed, 42 deselected, 3 warnings`。
+  - FULL：`PYTHONPATH=backend python3 -m pytest backend/tests -q` 返回 `305 passed, 31 warnings in 4.49s`。
+  - 本地补丁未触发 NAS task `473` ingest，未提交、未推送、未发布 Docker image。
+- 2026-05-28 17:44 +08 BiliNote 发布前 review 后复验：
+  - review 修正：`deterministic_knowledge_id` 改为通过 `support_info = draft.support_info or {}` 读取 `document_section_identity`，兼容外部构造 `KnowledgeDraft(support_info=None)`。
+  - Targeted regression：`PYTHONPATH=backend python3 -m pytest backend/tests/test_knowledge_memory.py -q -k 'document_first_markdown_sections_get_unique_ids_when_headings_repeat_numbers or upsert_drafts_deduplicates_duplicate_ids_before_commit or ingest_generate_note_handles_duplicate_numbered_markdown_sections'` 返回 `3 passed, 42 deselected, 3 warnings in 2.09s`。
+  - Full backend：`PYTHONPATH=backend python3 -m pytest backend/tests -q` 返回 `305 passed, 31 warnings in 3.51s`。
+  - `git diff --check` 无输出；BiliNote 工作树只包含 3 个改动文件，未触发真实 ingest，未提交、未推送、未构建或发布镜像。
+- 2026-05-28 17:47 +08 BiliNote 发布路径核对和复验：
+  - OpenSpec：`openspec list` 显示存在多个历史/活跃 change，`openspec list --specs` 返回 `No specs found`；按 `openspec/AGENTS.md`，本次是 bug fix，跳过新 proposal。
+  - Docker workflow：`.github/workflows/main.yml` push `master` 会推 `latest`；manual `workflow_dispatch` 默认 `push_latest=false`，适合先构建带 suffix 的验证镜像。
+  - Targeted regression：`PYTHONPATH=backend python3 -m pytest backend/tests/test_knowledge_memory.py -q -k 'document_first_markdown_sections_get_unique_ids_when_headings_repeat_numbers or upsert_drafts_deduplicates_duplicate_ids_before_commit or ingest_generate_note_handles_duplicate_numbered_markdown_sections'` 返回 `3 passed, 42 deselected, 3 warnings in 3.07s`。
+  - Full backend：`PYTHONPATH=backend python3 -m pytest backend/tests -q` 返回 `305 passed, 31 warnings in 3.61s`。
+  - `git diff --check` 无输出；仍未触发真实 ingest，未提交、未推送、未构建或发布镜像。
+- 2026-05-28 17:58 +08 NAS SSH 只读运行态复查：
+  - `bilinote-backend` 运行镜像仍为 `docker.1ms.run/neymar022/bilinote-backend:latest`，image id 为 `sha256:c1f9b00f0c2e3ea95e16292e7e32481823a7f9eaf0f1767a7a0c6f686bb72166`。
+  - backend container env/build flags：`BILINOTE_BUILD_SHA=8b4b401c58b451169eadb782ef8a56f22893896c`、`BILINOTE_BUILD_REF=master`、`BILINOTE_BUILD_TAG=branch-master`、`BILINOTE_BUILD_TIME=2026-05-28T05:41:16Z`；ingest token/user 均为 set；remote vector URL 为 `http://192.168.1.17:8495`。
+  - 容器内 token 调 `http://127.0.0.1:8000/api/knowledge/runtime/machine` 返回同一 build SHA、ingest `token_configured/user_id_configured/user_exists=true`、remote LanceDB `available=true`，remote root `/Volumes/BiliNoteRuntime/mac-lancedb/data`，table `knowledge_items`。
+  - 运行中 backend 代码未包含本地补丁标记 `document_section_identity`、`_dedupe_batch_accepted`、`duplicate_batch_id`。
+  - 只读 DB 查询显示 `note_records.task_id=bililive-go-473` 仍为 `FAILED`，`markdown_len=4370`；`knowledge_sources` 与 `knowledge_items` 对 `S01E0047` / `bililive-go-473` 的匹配计数均为 `0`。
+- 2026-05-28 18:02 +08 发布前门禁复验：
+  - BiliNote 工作树仍在 `codex/nonblocking-knowledge-ingest`，未提交、未推送、未构建、未部署、未重跑 task `473`。
+  - Targeted regression：`PYTHONPATH=backend python3 -m pytest backend/tests/test_knowledge_memory.py -q -k 'document_first_markdown_sections_get_unique_ids_when_headings_repeat_numbers or upsert_drafts_deduplicates_duplicate_ids_before_commit or ingest_generate_note_handles_duplicate_numbered_markdown_sections'` 返回 `3 passed, 42 deselected, 3 warnings in 3.07s`。
+  - Full backend：`PYTHONPATH=backend python3 -m pytest backend/tests -q` 返回 `305 passed, 31 warnings in 3.61s`。
+  - `git diff --check` 无输出。
+- 2026-05-28 19:11 +08 授权后提交/推送前门禁复验：
+  - Targeted regression：`PYTHONPATH=backend python3 -m pytest backend/tests/test_knowledge_memory.py -q -k 'document_first_markdown_sections_get_unique_ids_when_headings_repeat_numbers or upsert_drafts_deduplicates_duplicate_ids_before_commit or ingest_generate_note_handles_duplicate_numbered_markdown_sections'` 返回 `3 passed, 42 deselected, 3 warnings in 3.64s`。
+  - Full backend：`PYTHONPATH=backend python3 -m pytest backend/tests -q` 返回 `305 passed, 31 warnings in 3.28s`。
+  - `git diff --check` 无输出。
+- 2026-05-28 19:12 +08 BiliNote patch 提交/推送与验证镜像构建触发：
+  - Commit：`b5544ce120d2910724f06a69e976b8cc152918f1`，message `Fix document-first knowledge item IDs`。
+  - Remote branch：`origin/codex/nonblocking-knowledge-ingest`。
+  - GitHub Actions：workflow `Build & Push Docker images`，run id `26571213166`，event `workflow_dispatch`，status `in_progress`，head SHA `b5544ce120d2910724f06a69e976b8cc152918f1`。
+  - Dispatch inputs：`image_suffix=vtok-473-b5544ce`，`push_latest=false`。
+- 2026-05-28 19:54 +08 验证镜像构建完成：
+  - GitHub Actions run `26571213166` conclusion `success`。
+  - Backend job `78278544429` success, completed at `2026-05-28T11:34:14Z`。
+  - Frontend job `78278544405` success, completed at `2026-05-28T11:35:22Z`。
+  - `neymar022/bilinote-backend:branch-vtok-473-b5544ce` digest `sha256:0420aa61ad5d7705d219c4ff7bfac225923bb441692cb5bec8a6f4f3072961fc`，platforms include `linux/amd64` and `linux/arm64`。
+  - `neymar022/bilinote-backend:git-b5544ce120d2910724f06a69e976b8cc152918f1` points to the same digest.
+- 2026-05-28 20:02 +08 NAS backend 验证镜像部署与运行态门禁：
+  - NAS 直连 Docker Hub 拉取 `neymar022/bilinote-backend:branch-vtok-473-b5544ce` 超时；使用现有镜像代理 `docker.1ms.run/neymar022/bilinote-backend:branch-vtok-473-b5544ce` 拉取成功，digest `sha256:0420aa61ad5d7705d219c4ff7bfac225923bb441692cb5bec8a6f4f3072961fc`。
+  - 已备份 compose 为 `/volume2/docker/dockge/stacks/bilinote/compose.yaml.bak-vtok-473-b5544ce-20260528200155`，只改 backend image 到验证 tag，frontend/nginx 未变。
+  - `docker compose up -d backend` 完成，`bilinote-backend` recreate/start 成功。
+  - `GET http://192.168.1.80:3015/api/sys_health` 返回 `200`。
+  - `docker inspect` 显示 backend container image 为 `docker.1ms.run/neymar022/bilinote-backend:branch-vtok-473-b5544ce`。
+  - container env/build flags：`BILINOTE_BUILD_SHA=b5544ce120d2910724f06a69e976b8cc152918f1`、`BILINOTE_BUILD_REF=codex/nonblocking-knowledge-ingest`、`BILINOTE_BUILD_TAG=branch-vtok-473-b5544ce`、`BILINOTE_BUILD_TIME=2026-05-28T11:13:06Z`；ingest token/user 均 set；remote vector URL `http://192.168.1.17:8495`。
+  - 运行中代码包含补丁标记 `document_section_identity`、`_dedupe_batch_accepted`、`duplicate_batch_id`。
+  - `/api/knowledge/runtime/machine` 返回 build SHA `b5544ce120d2910724f06a69e976b8cc152918f1`，ingest `token_configured/user_id_configured/user_exists=true`，remote LanceDB `available=true`，remote root `/Volumes/BiliNoteRuntime/mac-lancedb/data`，table `knowledge_items`。
+- 2026-05-28 20:02 +08 NAS backend 验证镜像部署与运行态门禁：
+  - NAS 直连 Docker Hub 拉取 `neymar022/bilinote-backend:branch-vtok-473-b5544ce` 超时；使用现有镜像代理 `docker.1ms.run/neymar022/bilinote-backend:branch-vtok-473-b5544ce` 拉取成功，digest `sha256:0420aa61ad5d7705d219c4ff7bfac225923bb441692cb5bec8a6f4f3072961fc`。
+  - 已备份 compose 为 `/volume2/docker/dockge/stacks/bilinote/compose.yaml.bak-vtok-473-b5544ce-20260528200155`，只改 backend image 到验证 tag，frontend/nginx 未变。
+  - `GET http://192.168.1.80:3015/api/sys_health` 返回 `200`；`/api/knowledge/runtime/machine` 返回 build SHA `b5544ce120d2910724f06a69e976b8cc152918f1`、ingest token/user/user_exists 均 true、remote LanceDB available=true。
+- 2026-05-28 20:25 +08 task `473` 重跑和知识链路验证：
+  - 最新 `note_records.task_id=bililive-go-473` 为 `SUCCESS`，`note_records.id=24`，`markdown_len=1551`，`updated_at=2026-05-28 12:14:26`。
+  - `knowledge_sources.id=bbb20216b66679f4d7f6e17364cc2f68`，`status=active`，`item_count=3`。
+  - `knowledge_items` 为 `7163881f446cb54b86a8809bf694ecc7`、`b107c2de2a3b657a956003f9ab70dfcc`、`d3142f010ac7acb2b4a0d5dc15b50266`；三者均 `index_status=indexed`、`index_error=null`。
+  - 三个 item 均有 `source_video_path`、`subtitle_path`、`start=0.0`、`end=181.64`、`原字幕证据` 和 `document_section_identity`。
+  - Mac LanceDB 初次 search 失败根因为 `Too many open files (os error 24)`；已通过 `com.bilinote.mac-lancedb` 启动脚本 `ulimit` 和 launchd 重启修复。
+  - NAS backend `.env` 已把 `BILINOTE_VECTOR_SERVICE_TIMEOUT` 调整为 `30` 并重建 backend；3 个 task `473` item 已 reindex 成功。
+  - 远程 LanceDB `/search` 查询 `全屋定制 报价 装修` 命中 `b107c2de2a3b657a956003f9ab70dfcc`；查询 `装修达人 免费连麦` 命中 task `473` 的三个 item。
+- Bililive-go 本仓库当前仍只修改 `docs/plantree`/PRD 相关规划文档；尚未进入 Bililive-go 自动同步实现。
+
+## Blockers
+
+- 成功路径 blocker 已解除：真实字幕读取、BiliNote document-first 入库、字幕证据字段、路径字段、Bililive-go 自动触发、sidecar 状态、LanceDB index/search 均已验证。
+- 剩余不是实现阻塞，而是发布/运维风险：
+  - BiliNote backend 当前运行验证 tag `branch-vtok-473-b5544ce`，对应提交 `b5544ce` 尚未进入 BiliNote `origin/master`；Bililive-go app 当前运行验证 tag `sha-97c3f27`，对应提交 `97c3f27` 尚未进入 Bililive-go `origin/master`。
+  - 生产级失败路径尚未用受控坏 endpoint 实测；当前只通过 Go 单元测试证明 BiliNote 502 不会让 subtitle stage 失败。
+  - LanceDB 可从 SQLite facts 全量 rebuild 仍未验证；当前已证明 task `473` 手动 reindex/search 和 task `476` 自动 index/search。
+  - task `478` 为 1 段字幕退化样本，BiliNote note/source 成功但 item_count 为 0；这不是同步 blocker，但不能作为检索质量验收样本。
+
+## Next Target
+
+当前 Next Target 不再是实现自动同步；task `476` 和连续样本 `474/475/477` 已证明自动同步成功路径，task `478` 已证明退化短字幕样本不会阻塞 pipeline。下一步唯一目标是收尾发布治理：
+
+1. 对 BiliNote `branch-vtok-473-b5544ce` 和 Bililive-go `sha-97c3f27` 做发布治理决策：开 PR/合并/发布稳定 tag，或明确继续 NAS pin 验证 tag。
+2. 如需要更强生产验收，补一次受控失败 smoke：临时 bad endpoint 或 BiliNote 不可达，确认 `.subtitle.json` 记录 `knowledge_sync_status=failed`，但 pipeline 仍 completed。
+3. 后续再进入小批量 backfill/全量回填策略；不要在未决定发布 tag、失败 smoke、限流/恢复和 LanceDB rebuild 路径之前扩大到 100+ 视频。
+
+## Verification Commands
+
+- 后端 Go 变更：`make dev`
+- 前端变更：`make build-web dev`
+- 单元测试：`make test`
+- lint：`make lint`
+- E2E：`make test-e2e`
+- BiliNote backend 测试参考：`PYTHONPATH=backend python3 -m pytest backend/tests -q`
+- BiliNote 运行态需额外验证：Docker image SHA、`/api/knowledge/runtime/machine`、`/api/knowledge/ingest` dry-run/real-run、LanceDB `/healthz` 和 search/rebuild 证据。
+
+## Handoff Notes
+
+- 不要把知识抽取和长期治理搬进 Bililive-go。
+- 不要让 BiliNote/LanceDB 失败改变视频烧录成功状态。
+- 不要把 LanceDB 当成事实源；索引必须可重建。
+- 不要在未验证镜像 SHA 和运行态之前宣称生产链路已跑通。
+- 不要继续依赖旧 provider goal 的内存状态；任何新结论都要回写 plan-tree。
