@@ -473,17 +473,6 @@ func (s *captureSubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, in
 	return input, nil
 }
 
-func waitForCapturedInputs(t *testing.T, received <-chan []pipeline.FileInfo) []pipeline.FileInfo {
-	t.Helper()
-	select {
-	case inputs := <-received:
-		return inputs
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for rerun input capture")
-		return nil
-	}
-}
-
 func waitForCreatedTask(t *testing.T, created <-chan *pipeline.PipelineTask) *pipeline.PipelineTask {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

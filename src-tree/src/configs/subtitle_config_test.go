@@ -24,6 +24,12 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.False(t, cfg.Subtitle.KnowledgeSync.Enabled)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.GenerateNote)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.NonBlocking)
+	assert.Empty(t, cfg.Subtitle.KnowledgeSync.Format)
+	assert.Nil(t, cfg.Subtitle.KnowledgeSync.Link)
+	assert.Nil(t, cfg.Subtitle.KnowledgeSync.Screenshot)
+	assert.Nil(t, cfg.Subtitle.KnowledgeSync.VideoUnderstanding)
+	assert.Zero(t, cfg.Subtitle.KnowledgeSync.VideoInterval)
+	assert.Empty(t, cfg.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, DefaultSubtitleKnowledgeSyncTimeoutSeconds, cfg.Subtitle.KnowledgeSync.TimeoutSeconds)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
 	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
@@ -128,6 +134,12 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.KnowledgeSync.Token = "config-token"
 	cfg.Subtitle.KnowledgeSync.ProviderID = "qwen"
 	cfg.Subtitle.KnowledgeSync.ModelName = "qwen3.6-plus"
+	cfg.Subtitle.KnowledgeSync.Format = []string{"toc", "link", "screenshot", "summary"}
+	cfg.Subtitle.KnowledgeSync.Link = boolValue(true)
+	cfg.Subtitle.KnowledgeSync.Screenshot = boolValue(true)
+	cfg.Subtitle.KnowledgeSync.VideoUnderstanding = boolValue(true)
+	cfg.Subtitle.KnowledgeSync.VideoInterval = 4
+	cfg.Subtitle.KnowledgeSync.GridSize = []int{3, 3}
 	cfg.Subtitle.KnowledgeSync.TimeoutSeconds = 45
 	cfg.Subtitle.UpdatedAt = time.Unix(1_763_200_000, 0).UTC()
 
@@ -163,5 +175,18 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, cfg.Subtitle.KnowledgeSync.ModelName, roundTripped.Subtitle.KnowledgeSync.ModelName)
 	assert.True(t, roundTripped.Subtitle.KnowledgeSync.GenerateNote)
 	assert.True(t, roundTripped.Subtitle.KnowledgeSync.NonBlocking)
+	assert.Equal(t, []string{"toc", "link", "screenshot", "summary"}, roundTripped.Subtitle.KnowledgeSync.Format)
+	assert.NotNil(t, roundTripped.Subtitle.KnowledgeSync.Link)
+	assert.True(t, *roundTripped.Subtitle.KnowledgeSync.Link)
+	assert.NotNil(t, roundTripped.Subtitle.KnowledgeSync.Screenshot)
+	assert.True(t, *roundTripped.Subtitle.KnowledgeSync.Screenshot)
+	assert.NotNil(t, roundTripped.Subtitle.KnowledgeSync.VideoUnderstanding)
+	assert.True(t, *roundTripped.Subtitle.KnowledgeSync.VideoUnderstanding)
+	assert.Equal(t, 4, roundTripped.Subtitle.KnowledgeSync.VideoInterval)
+	assert.Equal(t, []int{3, 3}, roundTripped.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, 45, roundTripped.Subtitle.KnowledgeSync.TimeoutSeconds)
+}
+
+func boolValue(value bool) *bool {
+	return &value
 }

@@ -21,22 +21,30 @@ import (
 )
 
 type knowledgeIngestPayload struct {
-	SourceID        string                    `json:"source_id"`
-	SourceType      string                    `json:"source_type"`
-	TaskID          string                    `json:"task_id,omitempty"`
-	Host            string                    `json:"host,omitempty"`
-	Title           string                    `json:"title"`
-	Topic           string                    `json:"topic,omitempty"`
-	SourceVideoPath string                    `json:"source_video_path,omitempty"`
-	SourceURL       string                    `json:"source_url,omitempty"`
-	SubtitlePath    string                    `json:"subtitle_path,omitempty"`
-	Language        string                    `json:"language,omitempty"`
-	ContentHash     string                    `json:"content_hash,omitempty"`
-	Segments        []knowledgeSegmentPayload `json:"segments"`
-	GenerateNote    bool                      `json:"generate_note"`
-	NonBlocking     bool                      `json:"non_blocking"`
-	ModelName       string                    `json:"model_name,omitempty"`
-	ProviderID      string                    `json:"provider_id,omitempty"`
+	SourceID           string                    `json:"source_id"`
+	SourceType         string                    `json:"source_type"`
+	TaskID             string                    `json:"task_id,omitempty"`
+	Host               string                    `json:"host,omitempty"`
+	Title              string                    `json:"title"`
+	Topic              string                    `json:"topic,omitempty"`
+	SourceVideoPath    string                    `json:"source_video_path,omitempty"`
+	SourceURL          string                    `json:"source_url,omitempty"`
+	SubtitlePath       string                    `json:"subtitle_path,omitempty"`
+	Language           string                    `json:"language,omitempty"`
+	ContentHash        string                    `json:"content_hash,omitempty"`
+	Segments           []knowledgeSegmentPayload `json:"segments"`
+	GenerateNote       bool                      `json:"generate_note"`
+	NonBlocking        bool                      `json:"non_blocking"`
+	ModelName          string                    `json:"model_name,omitempty"`
+	ProviderID         string                    `json:"provider_id,omitempty"`
+	Format             []string                  `json:"format,omitempty"`
+	Link               *bool                     `json:"link,omitempty"`
+	Screenshot         *bool                     `json:"screenshot,omitempty"`
+	Style              string                    `json:"style,omitempty"`
+	Extras             string                    `json:"extras,omitempty"`
+	VideoUnderstanding *bool                     `json:"video_understanding,omitempty"`
+	VideoInterval      int                       `json:"video_interval,omitempty"`
+	GridSize           []int                     `json:"grid_size,omitempty"`
 }
 
 type knowledgeSegmentPayload struct {
@@ -125,21 +133,29 @@ func buildKnowledgeIngestPayload(
 	}
 
 	payload := knowledgeIngestPayload{
-		SourceID:        sourceID,
-		SourceType:      "bililive-go",
-		TaskID:          knowledgeTaskID(ctx),
-		Host:            host,
-		Title:           title,
-		Topic:           topic,
-		SourceVideoPath: libraryPath,
-		SubtitlePath:    metadata.SRTPath,
-		Language:        metadata.Language,
-		ContentHash:     knowledgeContentHash(sourceID, metadata.Language, metadata.Segments),
-		Segments:        segments,
-		GenerateNote:    cfg.GenerateNote,
-		NonBlocking:     cfg.NonBlocking,
-		ModelName:       cfg.GetModelName(),
-		ProviderID:      cfg.GetProviderID(),
+		SourceID:           sourceID,
+		SourceType:         "bililive-go",
+		TaskID:             knowledgeTaskID(ctx),
+		Host:               host,
+		Title:              title,
+		Topic:              topic,
+		SourceVideoPath:    libraryPath,
+		SubtitlePath:       metadata.SRTPath,
+		Language:           metadata.Language,
+		ContentHash:        knowledgeContentHash(sourceID, metadata.Language, metadata.Segments),
+		Segments:           segments,
+		GenerateNote:       cfg.GenerateNote,
+		NonBlocking:        cfg.NonBlocking,
+		ModelName:          cfg.GetModelName(),
+		ProviderID:         cfg.GetProviderID(),
+		Format:             append([]string(nil), cfg.Format...),
+		Link:               cfg.Link,
+		Screenshot:         cfg.Screenshot,
+		Style:              cfg.Style,
+		Extras:             cfg.Extras,
+		VideoUnderstanding: cfg.VideoUnderstanding,
+		VideoInterval:      cfg.VideoInterval,
+		GridSize:           append([]int(nil), cfg.GridSize...),
 	}
 	return payload, nil
 }

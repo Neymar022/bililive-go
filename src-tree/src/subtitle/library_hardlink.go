@@ -80,22 +80,6 @@ func buildEpisodeFilename(aliasName string, episodeNumber int, recordedAt time.T
 	return prefix + displayTitle + extension
 }
 
-// countMp4FilesInDir counts the number of *.mp4 files directly inside dir.
-// Returns 0 if the directory does not exist or cannot be read.
-func countMp4FilesInDir(dir string) int {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return 0
-	}
-	count := 0
-	for _, e := range entries {
-		if !e.IsDir() && strings.EqualFold(filepath.Ext(e.Name()), ".mp4") {
-			count++
-		}
-	}
-	return count
-}
-
 // nextAvailableEpisodeNumber returns the first S01E slot not already used by
 // any file in the season directory. Sidecars reserve slots too, because a stale
 // .srt/.ass/.subtitle.json without an mp4 must not be matched to a new source.

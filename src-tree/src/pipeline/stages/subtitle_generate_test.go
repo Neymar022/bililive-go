@@ -122,20 +122,26 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 		Text  string  `json:"text"`
 	}
 	type knowledgePayload struct {
-		SourceID        string             `json:"source_id"`
-		SourceType      string             `json:"source_type"`
-		TaskID          string             `json:"task_id"`
-		Host            string             `json:"host"`
-		Title           string             `json:"title"`
-		SourceVideoPath string             `json:"source_video_path"`
-		SubtitlePath    string             `json:"subtitle_path"`
-		Language        string             `json:"language"`
-		ContentHash     string             `json:"content_hash"`
-		GenerateNote    bool               `json:"generate_note"`
-		NonBlocking     bool               `json:"non_blocking"`
-		ModelName       string             `json:"model_name"`
-		ProviderID      string             `json:"provider_id"`
-		Segments        []knowledgeSegment `json:"segments"`
+		SourceID           string             `json:"source_id"`
+		SourceType         string             `json:"source_type"`
+		TaskID             string             `json:"task_id"`
+		Host               string             `json:"host"`
+		Title              string             `json:"title"`
+		SourceVideoPath    string             `json:"source_video_path"`
+		SubtitlePath       string             `json:"subtitle_path"`
+		Language           string             `json:"language"`
+		ContentHash        string             `json:"content_hash"`
+		GenerateNote       bool               `json:"generate_note"`
+		NonBlocking        bool               `json:"non_blocking"`
+		ModelName          string             `json:"model_name"`
+		ProviderID         string             `json:"provider_id"`
+		Format             []string           `json:"format"`
+		Link               *bool              `json:"link"`
+		Screenshot         *bool              `json:"screenshot"`
+		VideoUnderstanding *bool              `json:"video_understanding"`
+		VideoInterval      int                `json:"video_interval"`
+		GridSize           []int              `json:"grid_size"`
+		Segments           []knowledgeSegment `json:"segments"`
 	}
 
 	var capturedAuth string
@@ -199,6 +205,12 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	assert.True(t, capturedPayload.NonBlocking)
 	assert.Equal(t, "qwen3.6-plus", capturedPayload.ModelName)
 	assert.Equal(t, "qwen", capturedPayload.ProviderID)
+	assert.Empty(t, capturedPayload.Format)
+	assert.Nil(t, capturedPayload.Link)
+	assert.Nil(t, capturedPayload.Screenshot)
+	assert.Nil(t, capturedPayload.VideoUnderstanding)
+	assert.Zero(t, capturedPayload.VideoInterval)
+	assert.Empty(t, capturedPayload.GridSize)
 	require.Len(t, capturedPayload.Segments, 2)
 	assert.InDelta(t, 2.5, capturedPayload.Segments[0].End, 0.001)
 	assert.InDelta(t, 181.64, capturedPayload.Segments[1].Start, 0.001)
@@ -212,6 +224,56 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	assert.Equal(t, 1, metadata.KnowledgeSyncAttempts)
 	assert.Empty(t, metadata.KnowledgeSyncError)
 	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
+}
+
+func TestBuildKnowledgePayloadPassesOptionalNoteOverrides(t *testing.T) {
+	link := true
+	screenshot := true
+	videoUnderstanding := true
+	cfg := configs.SubtitleKnowledgeSyncConfig{
+		GenerateNote:       true,
+		NonBlocking:        true,
+		ProviderID:         "qwen",
+		ModelName:          "qwen3.6-plus",
+		Format:             []string{"toc", "link", "screenshot", "summary"},
+		Link:               &link,
+		Screenshot:         &screenshot,
+		VideoUnderstanding: &videoUnderstanding,
+		VideoInterval:      4,
+		GridSize:           []int{3, 3},
+	}
+	metadata := &subtitle.Metadata{
+		SRTPath:  "/video/host/e1.srt",
+		Language: "zh",
+		Segments: []subtitle.Segment{
+			{Index: 1, Start: "00:00:00,000", End: "00:00:02,000", Text: "字幕内容"},
+		},
+	}
+
+	payload, err := buildKnowledgeIngestPayload(
+		&pipeline.PipelineContext{
+			TaskID: 473,
+			RecordInfo: pipeline.RecordInfo{
+				HostName: "主播",
+				RoomName: "主题",
+			},
+		},
+		cfg,
+		"/video",
+		"/video/host/e1.mp4",
+		metadata,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"toc", "link", "screenshot", "summary"}, payload.Format)
+	require.NotNil(t, payload.Link)
+	assert.True(t, *payload.Link)
+	require.NotNil(t, payload.Screenshot)
+	assert.True(t, *payload.Screenshot)
+	require.NotNil(t, payload.VideoUnderstanding)
+	assert.True(t, *payload.VideoUnderstanding)
+	assert.Equal(t, 4, payload.VideoInterval)
+	assert.Equal(t, []int{3, 3}, payload.GridSize)
 }
 
 func TestSubtitleGenerateDoesNotFailWhenKnowledgeSyncFails(t *testing.T) {

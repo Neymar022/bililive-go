@@ -280,14 +280,22 @@ type SubtitleCloudConfig struct {
 }
 
 type SubtitleKnowledgeSyncConfig struct {
-	Enabled        bool   `yaml:"enabled" json:"enabled"`
-	Endpoint       string `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Token          string `yaml:"token,omitempty" json:"token,omitempty"`
-	ProviderID     string `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
-	ModelName      string `yaml:"model_name,omitempty" json:"model_name,omitempty"`
-	GenerateNote   bool   `yaml:"generate_note" json:"generate_note"`
-	NonBlocking    bool   `yaml:"non_blocking" json:"non_blocking"`
-	TimeoutSeconds int    `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Enabled            bool     `yaml:"enabled" json:"enabled"`
+	Endpoint           string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token              string   `yaml:"token,omitempty" json:"token,omitempty"`
+	ProviderID         string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
+	ModelName          string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
+	GenerateNote       bool     `yaml:"generate_note" json:"generate_note"`
+	NonBlocking        bool     `yaml:"non_blocking" json:"non_blocking"`
+	Format             []string `yaml:"format,omitempty" json:"format,omitempty"`
+	Link               *bool    `yaml:"link,omitempty" json:"link,omitempty"`
+	Screenshot         *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
+	Style              string   `yaml:"style,omitempty" json:"style,omitempty"`
+	Extras             string   `yaml:"extras,omitempty" json:"extras,omitempty"`
+	VideoUnderstanding *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
+	VideoInterval      int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
+	GridSize           []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
+	TimeoutSeconds     int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 }
 
 func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
