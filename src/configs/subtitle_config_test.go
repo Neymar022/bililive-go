@@ -21,6 +21,8 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Equal(t, "aliyun", cfg.Subtitle.Cloud.Vendor)
 	assert.Equal(t, "qwen3-asr-flash-filetrans", cfg.Subtitle.Cloud.Model)
 	assert.Equal(t, "zh", cfg.Subtitle.Language)
+	assert.False(t, cfg.Subtitle.Schedule.Enabled)
+	assert.Equal(t, "02:00", cfg.Subtitle.Schedule.RunAt)
 	assert.False(t, cfg.Subtitle.KnowledgeSync.Enabled)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.GenerateNote)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.NonBlocking)
@@ -68,6 +70,19 @@ func TestSubtitleKnowledgeSyncUsesEnvironment(t *testing.T) {
 	assert.Equal(t, "env-token", cfg.Subtitle.KnowledgeSync.GetToken())
 	assert.Equal(t, "qwen", cfg.Subtitle.KnowledgeSync.GetProviderID())
 	assert.Equal(t, "qwen3.6-plus", cfg.Subtitle.KnowledgeSync.GetModelName())
+}
+
+func TestSubtitleScheduleNextRunAfter(t *testing.T) {
+	schedule := SubtitleScheduleConfig{Enabled: true, RunAt: "02:00"}
+	loc := time.FixedZone("test", 8*60*60)
+
+	sameDay, err := schedule.NextRunAfter(time.Date(2026, 5, 27, 1, 30, 0, 0, loc))
+	assert.NoError(t, err)
+	assert.Equal(t, time.Date(2026, 5, 27, 2, 0, 0, 0, loc), sameDay)
+
+	nextDay, err := schedule.NextRunAfter(time.Date(2026, 5, 27, 15, 0, 0, 0, loc))
+	assert.NoError(t, err)
+	assert.Equal(t, time.Date(2026, 5, 28, 2, 0, 0, 0, loc), nextDay)
 }
 
 func TestConfigVerifyRejectsInvalidSubtitleLibraryRoot(t *testing.T) {
@@ -120,6 +135,8 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = filepath.Join(cfg.OutPutPath, "video")
 	cfg.Subtitle.RetentionDays = 14
+	cfg.Subtitle.Schedule.Enabled = true
+	cfg.Subtitle.Schedule.RunAt = "02:00"
 	cfg.Subtitle.BurnStyle.FontSize = 28
 	cfg.Subtitle.BurnStyle.CardWidth = 960
 	cfg.Subtitle.BurnStyle.CardHeight = 180
@@ -158,6 +175,8 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, roundTripped.Subtitle.Enabled)
 	assert.Equal(t, 14, roundTripped.Subtitle.RetentionDays)
+	assert.True(t, roundTripped.Subtitle.Schedule.Enabled)
+	assert.Equal(t, "02:00", roundTripped.Subtitle.Schedule.RunAt)
 	assert.Equal(t, 28, roundTripped.Subtitle.BurnStyle.FontSize)
 	assert.Equal(t, 960, roundTripped.Subtitle.BurnStyle.CardWidth)
 	assert.Equal(t, 180, roundTripped.Subtitle.BurnStyle.CardHeight)

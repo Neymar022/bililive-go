@@ -186,6 +186,10 @@ describe('SubtitleSettingsPanel', () => {
           data: {
             subtitle: {
               enabled: true,
+              schedule: {
+                enabled: false,
+                run_at: '02:00',
+              },
               burn_style: {
                 preset: 'vizard_classic_cn',
               },
@@ -207,8 +211,13 @@ describe('SubtitleSettingsPanel', () => {
     const view = render(<SubtitleSettingsPanel />);
 
     expect(await view.findByText('字幕渲染预设')).toBeInTheDocument();
+    expect(view.getByText('自动字幕凌晨队列')).toBeInTheDocument();
     const presetSelect = view.getByDisplayValue('vizard_classic_cn') as HTMLSelectElement;
     expect(presetSelect).toBeInTheDocument();
+
+    const scheduleSwitch = view.getByRole('checkbox') as HTMLInputElement;
+    expect(scheduleSwitch.checked).toBe(false);
+    scheduleSwitch.click();
 
     presetSelect.value = 'vizard_classic_cn';
     presetSelect.dispatchEvent(new Event('change', { bubbles: true }));
@@ -223,5 +232,10 @@ describe('SubtitleSettingsPanel', () => {
       headers: { 'Content-Type': 'application/json' },
       body: expect.stringContaining('"preset":"vizard_classic_cn"'),
     }));
+    const requestBody = JSON.parse(mockFetch.mock.calls[1][1].body);
+    expect(requestBody.subtitle.schedule).toEqual({
+      enabled: true,
+      run_at: '02:00',
+    });
   });
 });

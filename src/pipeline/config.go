@@ -28,6 +28,8 @@ const (
 	OptionCommand = "command"
 	// OptionFileTypes 处理的文件类型过滤
 	OptionFileTypes = "file_types"
+	// OptionSubtitleScheduled 标记自动录播生成的字幕阶段，可被字幕定时队列延后。
+	OptionSubtitleScheduled = "scheduled"
 )
 
 // OnRecordFinishedPipeline 扩展版的录制完成后配置
@@ -75,6 +77,9 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 	if currentCfg := configs.GetCurrentConfig(); currentCfg != nil && currentCfg.Subtitle.Enabled && currentCfg.Subtitle.AutoGenerate && legacy.ConvertToMp4 {
 		stages = append(stages, StageConfig{
 			Name: StageNameSubtitleGenerate,
+			Options: map[string]any{
+				OptionSubtitleScheduled: true,
+			},
 		})
 	}
 

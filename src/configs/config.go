@@ -268,6 +268,7 @@ type Bark struct {
 const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
 const DefaultSubtitleRenderPreset = "vizard_classic_cn"
 const DefaultSubtitleKnowledgeSyncTimeoutSeconds = 30
+const DefaultSubtitleScheduleRunAt = "02:00"
 
 type SubtitleLocalConfig struct {
 	Model       string `yaml:"model" json:"model"`
@@ -325,6 +326,35 @@ func (s SubtitleKnowledgeSyncConfig) GetTimeout() time.Duration {
 	return time.Duration(s.TimeoutSeconds) * time.Second
 }
 
+type SubtitleScheduleConfig struct {
+	Enabled bool   `yaml:"enabled" json:"enabled"`
+	RunAt   string `yaml:"run_at" json:"run_at"`
+}
+
+func (s SubtitleScheduleConfig) GetRunAt() string {
+	runAt := strings.TrimSpace(s.RunAt)
+	if runAt == "" {
+		return DefaultSubtitleScheduleRunAt
+	}
+	return runAt
+}
+
+func (s SubtitleScheduleConfig) NextRunAfter(base time.Time) (time.Time, error) {
+	parsed, err := time.Parse("15:04", s.GetRunAt())
+	if err != nil {
+		return time.Time{}, fmt.Errorf("字幕定时队列时间格式无效，应为 HH:MM: %w", err)
+	}
+	loc := base.Location()
+	if loc == nil {
+		loc = time.Local
+	}
+	target := time.Date(base.Year(), base.Month(), base.Day(), parsed.Hour(), parsed.Minute(), 0, 0, loc)
+	if base.Before(target) {
+		return target, nil
+	}
+	return target.Add(24 * time.Hour), nil
+}
+
 type SubtitleBurnStyle struct {
 	Preset            string  `yaml:"preset" json:"preset"`
 	FontName          string  `yaml:"font_name" json:"font_name"`
@@ -369,6 +399,7 @@ type SubtitleConfig struct {
 	Language                 string                      `yaml:"language" json:"language"`
 	Local                    SubtitleLocalConfig         `yaml:"local" json:"local"`
 	Cloud                    SubtitleCloudConfig         `yaml:"cloud" json:"cloud"`
+	Schedule                 SubtitleScheduleConfig      `yaml:"schedule" json:"schedule"`
 	KnowledgeSync            SubtitleKnowledgeSyncConfig `yaml:"knowledge_sync" json:"knowledge_sync"`
 	BurnStyle                SubtitleBurnStyle           `yaml:"burn_style" json:"burn_style"`
 	UpdatedAt                time.Time                   `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
@@ -401,6 +432,11 @@ func (s SubtitleConfig) Verify(outPutPath string) error {
 	}
 	if s.RetentionDays < 0 {
 		return fmt.Errorf("字幕源文件保留天数不能为负数")
+	}
+	if s.Schedule.Enabled {
+		if _, err := s.Schedule.NextRunAfter(time.Now()); err != nil {
+			return err
+		}
 	}
 	sourceRoot := s.GetEffectiveSourceRoot(outPutPath)
 	if _, err := os.Stat(sourceRoot); err != nil {
@@ -860,6 +896,10 @@ var defaultConfig = Config{
 			GenerateNote:   true,
 			NonBlocking:    true,
 			TimeoutSeconds: DefaultSubtitleKnowledgeSyncTimeoutSeconds,
+		},
+		Schedule: SubtitleScheduleConfig{
+			Enabled: false,
+			RunAt:   DefaultSubtitleScheduleRunAt,
 		},
 		BurnStyle: SubtitleBurnStyle{
 			Preset:            DefaultSubtitleRenderPreset,

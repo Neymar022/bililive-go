@@ -147,6 +147,12 @@ subtitle:
   cloud:
     vendor: aliyun
     model: qwen3-asr-flash-filetrans
+  schedule:
+    # true 时自动录播字幕链路延后到 run_at 统一处理
+    # 手动重跑字幕不受此开关影响
+    enabled: false
+    # 自动字幕队列每日开始处理时间，格式 HH:MM
+    run_at: "02:00"
   # BiliNote 知识库同步配置
   # 启用后，subtitle_generate 会在字幕成功后向 BiliNote /api/knowledge/ingest 提交非阻塞任务
   # endpoint/token 可用 BILINOTE_KNOWLEDGE_INGEST_URL 和 BILINOTE_INGEST_TOKEN 环境变量覆盖
