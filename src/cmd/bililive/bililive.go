@@ -41,6 +41,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
 	"github.com/bililive-go/bililive-go/src/servers"
+	"github.com/bililive-go/bililive-go/src/subtitle"
 	"github.com/bililive-go/bililive-go/src/tools"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -386,6 +387,7 @@ func main() {
 	// 注册所有内置阶段
 	stages.RegisterBuiltinStagesToManager(pipelineManager)
 	inst.PipelineManager = pipelineManager
+	subtitleModule := subtitle.NewModule()
 
 	// 初始化直播间状态管理器
 	liveStateDbPath := filepath.Join(config.AppDataPath, "db", "lives.db")
@@ -457,6 +459,9 @@ func main() {
 	// 启动 Pipeline 管道管理器
 	if err = pipelineManager.Start(ctx); err != nil {
 		logger.Fatalf("failed to init pipeline manager, error: %s", err)
+	}
+	if err = subtitleModule.Start(ctx); err != nil {
+		logger.Fatalf("failed to init subtitle manager, error: %s", err)
 	}
 
 	if err = metrics.NewCollector(ctx).Start(ctx); err != nil {
@@ -712,6 +717,7 @@ func main() {
 		if inst.PipelineManager != nil {
 			inst.PipelineManager.Close(ctx)
 		}
+		subtitleModule.Close(ctx)
 		// 关闭直播间状态管理器
 		if liveStateManager != nil {
 			liveStateManager.Close()

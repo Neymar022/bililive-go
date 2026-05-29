@@ -143,6 +143,7 @@ func initMux(ctx context.Context) *mux.Router {
 	if pm := pipeline.GetManager(inst); pm != nil {
 		RegisterPipelineHandlers(apiRoute, pm)
 	}
+	RegisterSubtitleHandlers(apiRoute)
 
 	// OSRP 开放直播录制协议路由
 	RegisterOSRPRoutes(m, inst)

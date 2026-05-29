@@ -18,10 +18,11 @@ test.describe('导航功能测试', () => {
 
     // 验证菜单项（使用 menuitem 角色）
     const menuItems = page.getByRole('menuitem');
-    await expect(menuItems).toHaveCount(8); // 8个菜单项
+    await expect(menuItems).toHaveCount(9); // 9个菜单项
 
     // 验证各个菜单项文本
     await expect(page.getByRole('menuitem', { name: /监控列表/ })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /录屏字幕/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /系统状态/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /设置/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /文件/ })).toBeVisible();

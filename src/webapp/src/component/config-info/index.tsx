@@ -10,7 +10,7 @@ import {
   BellOutlined, LinkOutlined, InfoCircleOutlined, SaveOutlined,
   ReloadOutlined, EditOutlined, DeleteOutlined,
   RightOutlined, PlusOutlined, WarningOutlined,
-  ExclamationCircleOutlined, MobileOutlined
+  ExclamationCircleOutlined, MobileOutlined, FileTextOutlined
 } from '@ant-design/icons';
 import { useLocation, Link } from 'react-router-dom';
 import Editor from 'react-simple-code-editor';
@@ -152,6 +152,128 @@ interface PlatformStatsResponse {
   available_platforms: string[];
   global_interval: number;
 }
+
+interface SubtitleSettingsState {
+  subtitle?: {
+    enabled?: boolean;
+    auto_generate?: boolean;
+    default_provider?: string;
+    source_root?: string;
+    library_root?: string;
+    public_url_base?: string;
+    retention_days?: number;
+    language?: string;
+    local?: Record<string, any>;
+    cloud?: Record<string, any>;
+    burn_style?: {
+      preset?: string;
+      font_name?: string;
+      font_size?: number;
+      margin_v?: number;
+      outline?: number;
+      shadow?: number;
+    };
+    updated_at?: string;
+  };
+  source_root?: string;
+  library_root?: string;
+  worker_url?: string;
+}
+
+const SUBTITLE_PRESET_OPTIONS = [
+  { label: 'vizard_classic_cn', value: 'vizard_classic_cn' },
+];
+
+export const SubtitleSettingsPanel: React.FC = () => {
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [settings, setSettings] = useState<SubtitleSettingsState | null>(null);
+  const [preset, setPreset] = useState('vizard_classic_cn');
+
+  const loadSubtitleSettings = useCallback(async () => {
+    setLoading(true);
+    try {
+      const response = await fetch('/api/subtitles/settings');
+      const payload = await response.json();
+      if (!response.ok || payload.err_no !== 0) {
+        throw new Error(payload.err_msg || '加载字幕设置失败');
+      }
+      const data = (payload.data || {}) as SubtitleSettingsState;
+      setSettings(data);
+      setPreset(data.subtitle?.burn_style?.preset || 'vizard_classic_cn');
+    } catch (error: any) {
+      message.error(error.message || '加载字幕设置失败');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadSubtitleSettings();
+  }, [loadSubtitleSettings]);
+
+  const saveSubtitleSettings = async () => {
+    if (!settings?.subtitle) {
+      return;
+    }
+    setSaving(true);
+    try {
+      const nextSubtitle = {
+        ...settings.subtitle,
+        burn_style: {
+          ...settings.subtitle.burn_style,
+          preset,
+        },
+      };
+      const response = await fetch('/api/subtitles/settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subtitle: nextSubtitle }),
+      });
+      const payload = await response.json();
+      if (!response.ok || payload.err_no !== 0) {
+        throw new Error(payload.err_msg || '保存字幕设置失败');
+      }
+      setSettings({
+        ...settings,
+        subtitle: nextSubtitle,
+      });
+      message.success('字幕设置已保存');
+    } catch (error: any) {
+      message.error(error.message || '保存字幕设置失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading && !settings) {
+    return <Spin />;
+  }
+
+  return (
+    <div className="config-content">
+      <Card title="字幕渲染预设" size="small" style={{ marginBottom: 16 }}>
+        <Space direction="vertical" size={12} style={{ width: '100%' }}>
+          <p>默认渲染 preset 会在自动字幕流程和不显式覆盖 preset 的手动重跑里复用。</p>
+          <Select value={preset} onChange={setPreset} options={SUBTITLE_PRESET_OPTIONS} style={{ width: 280 }} />
+          <Space>
+            <Button type="primary" icon={<SaveOutlined />} onClick={saveSubtitleSettings} loading={saving}>
+              保存字幕设置
+            </Button>
+            <Button icon={<ReloadOutlined />} onClick={loadSubtitleSettings} loading={loading}>
+              刷新字幕设置
+            </Button>
+          </Space>
+          <div>
+            <div>源目录：{settings?.source_root || '-'}</div>
+            <div>展示目录：{settings?.library_root || '-'}</div>
+            <div>Worker：{settings?.worker_url || '-'}</div>
+          </div>
+        </Space>
+      </Card>
+    </div>
+  );
+};
 
 // 实际生效值显示组件
 const EffectiveValue: React.FC<{ value: string; label?: string }> = ({ value, label }) => {
@@ -2016,7 +2138,7 @@ const ConfigInfo: React.FC = () => {
         else if (hash.startsWith('#notify')) tab = 'notify';
       }
 
-      if (tab && ['global', 'platforms', 'rooms', 'notify'].includes(tab)) {
+      if (tab && ['global', 'platforms', 'rooms', 'notify', 'subtitle'].includes(tab)) {
         setActiveTab(tab);
       }
 
@@ -2192,6 +2314,15 @@ const ConfigInfo: React.FC = () => {
               loading={saving}
             />
           ) : <Spin />
+        },
+        {
+          key: 'subtitle',
+          label: (
+            <span>
+              <FileTextOutlined /> 字幕增强
+            </span>
+          ),
+          children: <SubtitleSettingsPanel />
         }
       ]}
     />

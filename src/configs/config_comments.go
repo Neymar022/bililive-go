@@ -127,6 +127,61 @@ func DecorateConfigNode(node *yaml.Node) {
 # 这可以避免因编码参数变化导致的花屏问题
 # 注意：启用后会在本地启动一个 FLV 代理服务器，FFmpeg 从代理读取流`, "")
 	}
+
+	subtitleNode := findNode(root, "subtitle")
+	if subtitleNode != nil {
+		setFieldHeadComment(root, "subtitle", "# 字幕增强配置")
+		setFieldComment(subtitleNode, "default_provider",
+			`# 默认字幕 provider
+# 可选值：dashscope、local-whisper`, "")
+		setFieldComment(subtitleNode, "public_url_base",
+			`# DashScope 文件转写所需的外部可访问 /files 根地址
+# 仅使用 local-whisper 时可以留空`, "")
+		setFieldComment(subtitleNode, "knowledge_sync",
+			`# BiliNote 知识库同步配置
+# 启用后，subtitle_generate 会在字幕成功后向 BiliNote /api/knowledge/ingest 提交非阻塞任务
+# endpoint/token 可用 BILINOTE_KNOWLEDGE_INGEST_URL 和 BILINOTE_INGEST_TOKEN 环境变量覆盖`, "")
+		knowledgeSyncNode := findNode(subtitleNode, "knowledge_sync")
+		if knowledgeSyncNode != nil {
+			setFieldComment(knowledgeSyncNode, "enabled", "# 是否启用 BiliNote 知识库同步", "")
+			setFieldComment(knowledgeSyncNode, "endpoint", "# BiliNote /api/knowledge/ingest 完整地址", "")
+			setFieldComment(knowledgeSyncNode, "token", "# BiliNote ingest token，建议生产环境使用环境变量提供", "")
+			setFieldComment(knowledgeSyncNode, "provider_id", "# 生成笔记使用的模型 provider，例如 qwen", "")
+			setFieldComment(knowledgeSyncNode, "model_name", "# 生成笔记使用的模型名称，例如 qwen3.6-plus", "")
+			setFieldComment(knowledgeSyncNode, "generate_note", "# true 时由 BiliNote 生成文档优先知识笔记", "")
+			setFieldComment(knowledgeSyncNode, "non_blocking", "# true 时 BiliNote 后台处理，Bililive-go 只等待接收成功", "")
+			setFieldComment(knowledgeSyncNode, "format", "# 可选：覆盖 BiliNote 机器 ingest 默认笔记格式，例如 [toc, link, screenshot, summary]", "")
+			setFieldComment(knowledgeSyncNode, "link", "# 可选：覆盖是否生成原片跳转；留空时使用 BiliNote 默认值", "")
+			setFieldComment(knowledgeSyncNode, "screenshot", "# 可选：覆盖是否生成原片截图；留空时使用 BiliNote 默认值", "")
+			setFieldComment(knowledgeSyncNode, "style", "# 可选：覆盖 BiliNote 笔记风格", "")
+			setFieldComment(knowledgeSyncNode, "extras", "# 可选：覆盖 BiliNote 备注提示词", "")
+			setFieldComment(knowledgeSyncNode, "video_understanding", "# 可选：覆盖是否启用视频理解；留空时使用 BiliNote 默认值", "")
+			setFieldComment(knowledgeSyncNode, "video_interval", "# 可选：覆盖视频理解采样间隔（秒）", "")
+			setFieldComment(knowledgeSyncNode, "grid_size", "# 可选：覆盖视频理解截图网格，例如 [3, 3]", "")
+			setFieldComment(knowledgeSyncNode, "timeout_seconds", "# Bililive-go 等待 BiliNote 接收请求的超时时间", "")
+		}
+		burnStyleNode := findNode(subtitleNode, "burn_style")
+		if burnStyleNode != nil {
+			setFieldComment(burnStyleNode, "preset",
+				`# 字幕卡片渲染预设
+# vizard_classic_cn: 当前默认的 Vizard 风格中文卡片
+# bottom_center 会自动兼容映射到 vizard_classic_cn`, "")
+			setFieldComment(burnStyleNode, "font_size", "# 字幕字号，供样式实验室和烧录任务共享", "")
+			setFieldComment(burnStyleNode, "card_width", "# 字幕卡片宽度（像素）", "")
+			setFieldComment(burnStyleNode, "card_height", "# 字幕卡片高度（像素）", "")
+			setFieldComment(burnStyleNode, "bottom_offset", "# 字幕卡片距底部的偏移量（像素）", "")
+			setFieldComment(burnStyleNode, "background_opacity", "# 字幕卡片背景透明度，范围 0-1", "")
+			setFieldComment(burnStyleNode, "border_opacity", "# 字幕卡片边框透明度，范围 0-1", "")
+			setFieldComment(burnStyleNode, "single_line", "# true 时强制单排显示，超长文本按 overflow_mode 处理", "")
+			setFieldComment(burnStyleNode, "overflow_mode",
+				`# 单排溢出策略
+# ellipsis: 截断并追加省略号
+# wrap: 自动换成双排`, "")
+			setFieldComment(burnStyleNode, "outline",
+				`# 默认 0 = 纯白文字无黑描边；气泡 0.85 不透明度已提供高对比度。
+# 如果在浅色场景需要描边保护，可以显式设 1 或 2。`, "")
+		}
+	}
 }
 
 func findNode(mapNode *yaml.Node, key string) *yaml.Node {

@@ -131,3 +131,60 @@ update:
   check_interval_hours: 6
   auto_download: true
   include_prerelease: false
+# 字幕增强配置
+subtitle:
+  enabled: false
+  auto_generate: true
+  # 默认字幕 provider
+  # 可选值：dashscope、local-whisper
+  default_provider: dashscope
+  retention_days: 7
+  delete_source_on_completion: false
+  language: zh
+  local:
+    model: small
+    compute_type: int8
+  cloud:
+    vendor: aliyun
+    model: qwen3-asr-flash-filetrans
+  # BiliNote 知识库同步配置
+  # 启用后，subtitle_generate 会在字幕成功后向 BiliNote /api/knowledge/ingest 提交非阻塞任务
+  # endpoint/token 可用 BILINOTE_KNOWLEDGE_INGEST_URL 和 BILINOTE_INGEST_TOKEN 环境变量覆盖
+  knowledge_sync:
+    # 是否启用 BiliNote 知识库同步
+    enabled: false
+    # true 时由 BiliNote 生成文档优先知识笔记
+    generate_note: true
+    # true 时 BiliNote 后台处理，Bililive-go 只等待接收成功
+    non_blocking: true
+    # Bililive-go 等待 BiliNote 接收请求的超时时间
+    timeout_seconds: 30
+  burn_style:
+    # 字幕卡片渲染预设
+    # vizard_classic_cn: 当前默认的 Vizard 风格中文卡片
+    # bottom_center 会自动兼容映射到 vizard_classic_cn
+    preset: vizard_classic_cn
+    font_name: Noto Sans CJK SC
+    # 字幕字号，供样式实验室和烧录任务共享
+    font_size: 50
+    # 字幕卡片宽度（像素）
+    card_width: 1018
+    # 字幕卡片高度（像素）
+    card_height: 196
+    # 字幕卡片距底部的偏移量（像素）
+    bottom_offset: 640
+    # 字幕卡片背景透明度，范围 0-1
+    background_opacity: 0.9
+    # 字幕卡片边框透明度，范围 0-1
+    border_opacity: 0.3
+    # true 时强制单排显示，超长文本按 overflow_mode 处理
+    single_line: true
+    # 单排溢出策略
+    # ellipsis: 截断并追加省略号
+    # wrap: 自动换成双排
+    overflow_mode: ellipsis
+    margin_v: 24
+    # 默认 0 = 纯白文字无黑描边；气泡 0.85 不透明度已提供高对比度。
+    # 如果在浅色场景需要描边保护，可以显式设 1 或 2。
+    outline: 0
+    shadow: 0

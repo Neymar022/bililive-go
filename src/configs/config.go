@@ -265,6 +265,176 @@ type Bark struct {
 	Level     string `yaml:"level" json:"level"`         // 通知级别: active/timeSensitive/passive/critical
 }
 
+const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
+const DefaultSubtitleRenderPreset = "vizard_classic_cn"
+const DefaultSubtitleKnowledgeSyncTimeoutSeconds = 30
+
+type SubtitleLocalConfig struct {
+	Model       string `yaml:"model" json:"model"`
+	ComputeType string `yaml:"compute_type" json:"compute_type"`
+}
+
+type SubtitleCloudConfig struct {
+	Vendor string `yaml:"vendor" json:"vendor"`
+	Model  string `yaml:"model" json:"model"`
+}
+
+type SubtitleKnowledgeSyncConfig struct {
+	Enabled            bool     `yaml:"enabled" json:"enabled"`
+	Endpoint           string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token              string   `yaml:"token,omitempty" json:"token,omitempty"`
+	ProviderID         string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
+	ModelName          string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
+	GenerateNote       bool     `yaml:"generate_note" json:"generate_note"`
+	NonBlocking        bool     `yaml:"non_blocking" json:"non_blocking"`
+	Format             []string `yaml:"format,omitempty" json:"format,omitempty"`
+	Link               *bool    `yaml:"link,omitempty" json:"link,omitempty"`
+	Screenshot         *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
+	Style              string   `yaml:"style,omitempty" json:"style,omitempty"`
+	Extras             string   `yaml:"extras,omitempty" json:"extras,omitempty"`
+	VideoUnderstanding *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
+	VideoInterval      int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
+	GridSize           []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
+	TimeoutSeconds     int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
+	return firstTrimmedNonEmpty(
+		os.Getenv("BILINOTE_KNOWLEDGE_INGEST_URL"),
+		os.Getenv("BILINOTE_INGEST_URL"),
+		s.Endpoint,
+	)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetToken() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_TOKEN"), s.Token)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetProviderID() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_PROVIDER_ID"), s.ProviderID)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetModelName() string {
+	return firstTrimmedNonEmpty(os.Getenv("BILINOTE_INGEST_MODEL_NAME"), s.ModelName)
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetTimeout() time.Duration {
+	if s.TimeoutSeconds <= 0 {
+		return time.Duration(DefaultSubtitleKnowledgeSyncTimeoutSeconds) * time.Second
+	}
+	return time.Duration(s.TimeoutSeconds) * time.Second
+}
+
+type SubtitleBurnStyle struct {
+	Preset            string  `yaml:"preset" json:"preset"`
+	FontName          string  `yaml:"font_name" json:"font_name"`
+	FontSize          int     `yaml:"font_size" json:"font_size"`
+	CardWidth         int     `yaml:"card_width" json:"card_width"`
+	CardHeight        int     `yaml:"card_height" json:"card_height"`
+	BottomOffset      int     `yaml:"bottom_offset" json:"bottom_offset"`
+	BackgroundOpacity float64 `yaml:"background_opacity" json:"background_opacity"`
+	BorderOpacity     float64 `yaml:"border_opacity" json:"border_opacity"`
+	SingleLine        bool    `yaml:"single_line" json:"single_line"`
+	OverflowMode      string  `yaml:"overflow_mode" json:"overflow_mode"`
+	MarginV           int     `yaml:"margin_v" json:"margin_v"`
+	Outline           int     `yaml:"outline" json:"outline"`
+	Shadow            int     `yaml:"shadow" json:"shadow"`
+}
+
+func (s SubtitleBurnStyle) GetEffectivePreset() string {
+	preset := strings.TrimSpace(s.Preset)
+	switch preset {
+	case "", "bottom_center":
+		return DefaultSubtitleRenderPreset
+	default:
+		return preset
+	}
+}
+
+type SubtitleConfig struct {
+	Enabled         bool   `yaml:"enabled" json:"enabled"`
+	AutoGenerate    bool   `yaml:"auto_generate" json:"auto_generate"`
+	DefaultProvider string `yaml:"default_provider" json:"default_provider"`
+	SourceRoot      string `yaml:"source_root,omitempty" json:"source_root,omitempty"`
+	LibraryRoot     string `yaml:"library_root,omitempty" json:"library_root,omitempty"`
+	PublicURLBase   string `yaml:"public_url_base,omitempty" json:"public_url_base,omitempty"`
+	RetentionDays   int    `yaml:"retention_days" json:"retention_days"`
+	// P11: 字幕生成成功后立即删除源文件（绕过 retention_days 等待 + 12h cleanup ticker）。
+	// 跟 retention_days 互补不冲突：
+	// - DeleteSourceOnCompletion=true 走 pipeline 同步删除（completed 触发瞬间）
+	// - retention_days=N 走后台定期清理（covers KeepSource=false 但 immediate 失败时的兜底）
+	// 默认 false 保守——升级镜像不会破坏现有部署存量数据。运维显式启用后才删。
+	// per-record KeepSource=true 仍优先生效（"这条特别保留"）。
+	DeleteSourceOnCompletion bool                        `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
+	Language                 string                      `yaml:"language" json:"language"`
+	Local                    SubtitleLocalConfig         `yaml:"local" json:"local"`
+	Cloud                    SubtitleCloudConfig         `yaml:"cloud" json:"cloud"`
+	KnowledgeSync            SubtitleKnowledgeSyncConfig `yaml:"knowledge_sync" json:"knowledge_sync"`
+	BurnStyle                SubtitleBurnStyle           `yaml:"burn_style" json:"burn_style"`
+	UpdatedAt                time.Time                   `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+}
+
+func (s SubtitleConfig) GetEffectiveSourceRoot(outPutPath string) string {
+	if strings.TrimSpace(s.SourceRoot) != "" {
+		return s.SourceRoot
+	}
+	return outPutPath
+}
+
+func (s SubtitleConfig) GetEffectiveLibraryRoot(outPutPath string) string {
+	if strings.TrimSpace(s.LibraryRoot) != "" {
+		return s.LibraryRoot
+	}
+	return outPutPath
+}
+
+func (s SubtitleConfig) GetWorkerURL() string {
+	if workerURL := strings.TrimSpace(os.Getenv("SUBTITLE_WORKER_URL")); workerURL != "" {
+		return workerURL
+	}
+	return DefaultSubtitleWorkerURL
+}
+
+func (s SubtitleConfig) Verify(outPutPath string) error {
+	if !s.Enabled {
+		return nil
+	}
+	if s.RetentionDays < 0 {
+		return fmt.Errorf("字幕源文件保留天数不能为负数")
+	}
+	sourceRoot := s.GetEffectiveSourceRoot(outPutPath)
+	if _, err := os.Stat(sourceRoot); err != nil {
+		return fmt.Errorf("字幕源目录 \"%s\" 不存在", sourceRoot)
+	}
+	libraryRoot := s.GetEffectiveLibraryRoot(outPutPath)
+	if _, err := os.Stat(libraryRoot); err != nil {
+		return fmt.Errorf("字幕库路径 \"%s\" 不存在", libraryRoot)
+	}
+	if s.KnowledgeSync.Enabled {
+		endpoint := s.KnowledgeSync.GetEndpoint()
+		if endpoint == "" {
+			return fmt.Errorf("BiliNote 知识同步地址不能为空")
+		}
+		parsed, err := url.Parse(endpoint)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("BiliNote 知识同步地址无效: %s", endpoint)
+		}
+		if s.KnowledgeSync.GetToken() == "" {
+			return fmt.Errorf("BiliNote 知识同步 token 不能为空")
+		}
+	}
+	return nil
+}
+
+func firstTrimmedNonEmpty(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
 // Config content all config info.
 type Config struct {
 	// 核心配置
@@ -312,6 +482,9 @@ type Config struct {
 
 	// 自动更新配置
 	Update UpdateConfig `yaml:"update" json:"update"`
+
+	// 字幕增强配置
+	Subtitle SubtitleConfig `yaml:"subtitle" json:"subtitle"`
 
 	// 平台特定配置（层级覆盖，使用 OverridableConfig 中的指针模式）
 	PlatformConfigs map[string]PlatformConfig `yaml:"platform_configs,omitempty" json:"platform_configs,omitempty"`
@@ -665,9 +838,45 @@ var defaultConfig = Config{
 	ToolRootFolder:     "",
 	TaskQueue:          defaultTaskQueue,
 
-	Proxy:           defaultProxy,
-	OpenList:        defaultOpenListConfig,
-	Update:          defaultUpdateConfig,
+	Proxy:    defaultProxy,
+	OpenList: defaultOpenListConfig,
+	Update:   defaultUpdateConfig,
+	Subtitle: SubtitleConfig{
+		Enabled:         false,
+		AutoGenerate:    true,
+		DefaultProvider: "dashscope",
+		RetentionDays:   7,
+		Language:        "zh",
+		Local: SubtitleLocalConfig{
+			Model:       "small",
+			ComputeType: "int8",
+		},
+		Cloud: SubtitleCloudConfig{
+			Vendor: "aliyun",
+			Model:  "qwen3-asr-flash-filetrans",
+		},
+		KnowledgeSync: SubtitleKnowledgeSyncConfig{
+			Enabled:        false,
+			GenerateNote:   true,
+			NonBlocking:    true,
+			TimeoutSeconds: DefaultSubtitleKnowledgeSyncTimeoutSeconds,
+		},
+		BurnStyle: SubtitleBurnStyle{
+			Preset:            DefaultSubtitleRenderPreset,
+			FontName:          "Noto Sans CJK SC",
+			FontSize:          50,
+			CardWidth:         1018,
+			CardHeight:        196,
+			BottomOffset:      640,
+			BackgroundOpacity: 0.9,
+			BorderOpacity:     0.08,
+			SingleLine:        true,
+			OverflowMode:      "ellipsis",
+			MarginV:           24,
+			Outline:           0,
+			Shadow:            0,
+		},
+	},
 	PlatformConfigs: map[string]PlatformConfig{},
 }
 
@@ -739,6 +948,9 @@ func (c *Config) Verify() error {
 	}
 	if !c.RPC.Enable && len(c.LiveRooms) == 0 {
 		return fmt.Errorf("RPC 服务已禁用且未配置直播间，程序无任务可执行")
+	}
+	if err := c.Subtitle.Verify(c.OutPutPath); err != nil {
+		return err
 	}
 
 	// 验证平台配置
@@ -834,16 +1046,29 @@ func (c *Config) Marshal() error {
 		return errors.New("config path not set")
 	}
 
+	bytes, err := c.ToYAMLBytes()
+	if err != nil {
+		return err
+	}
+
+	return os.WriteFile(c.File, bytes, 0644)
+}
+
+func (c *Config) ToYAMLBytes() ([]byte, error) {
+	if c == nil {
+		return nil, errors.New("config is nil")
+	}
+
 	// 1. 将当前配置结构体序列化为新 Node
 	var newNode yaml.Node
 	// 我们先序列化为字节，然后反序列化为 Node，因为 yaml.Marshal 返回字节。
 	// 另外也可以使用 Encoder，但 Unmarshal 更容易获得干净的 Node 树。
 	tempBytes, err := yaml.Marshal(c)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if err := yaml.Unmarshal(tempBytes, &newNode); err != nil {
-		return err
+		return nil, err
 	}
 
 	// 2. 注入硬编码的注释
@@ -855,10 +1080,10 @@ func (c *Config) Marshal() error {
 	encoder := yaml.NewEncoder(&buf)
 	encoder.SetIndent(2)
 	if err := encoder.Encode(&newNode); err != nil {
-		return err
+		return nil, err
 	}
 
-	return os.WriteFile(c.File, buf.Bytes(), 0644)
+	return buf.Bytes(), nil
 }
 
 func (c Config) GetFilePath() (string, error) {

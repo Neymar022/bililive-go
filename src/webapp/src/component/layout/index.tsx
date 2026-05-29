@@ -11,7 +11,8 @@ import {
     MenuFoldOutlined,
     MenuUnfoldOutlined,
     LineChartOutlined,
-    CloudUploadOutlined
+    CloudUploadOutlined,
+    FileTextOutlined
 } from '@ant-design/icons';
 import './layout.css';
 
@@ -119,6 +120,11 @@ class RootLayout extends React.Component<Props, State> {
                                         key: '4',
                                         icon: <FolderOutlined />,
                                         label: <Link to="/fileList">文件</Link>,
+                                    },
+                                    {
+                                        key: 'recordings',
+                                        icon: <FileTextOutlined />,
+                                        label: <Link to="/recordings">录屏字幕</Link>,
                                     },
                                     {
                                         key: '5',

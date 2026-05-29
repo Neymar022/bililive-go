@@ -74,6 +74,7 @@ func NewRecordInfo(info *live.Info) RecordInfo {
 
 // PipelineContext 管道执行上下文
 type PipelineContext struct {
+	TaskID     int64                  // 当前 pipeline 任务 ID
 	Ctx        context.Context        // 取消控制
 	RecordInfo RecordInfo             // 录制信息
 	Logger     *livelogger.LiveLogger // 日志记录器
