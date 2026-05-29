@@ -191,6 +191,7 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 
 	// 构建执行上下文
 	pipelineCtx := &PipelineContext{
+		TaskID:     task.ID,
 		Ctx:        ctx,
 		RecordInfo: task.RecordInfo,
 		Logger: livelogger.New(livelogger.DefaultBufferSize, logrus.Fields{
