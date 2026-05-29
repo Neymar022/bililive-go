@@ -33,7 +33,9 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - SUBTITLE_SOURCE_ROOT=/volume2/docker/bililive-go/srt_video
-      - SUBTITLE_DASHSCOPE_MODEL=qwen3-asr-flash-filetrans
+      - SUBTITLE_PROVIDER_CHAIN=remote-mac-mlx
+      - SUBTITLE_ALLOW_CLOUD_ASR=false
+      - SUBTITLE_MAC_TRANSCRIBER_MODEL=large-v3-turbo
       - SUBTITLE_LOCAL_MODEL=small
       - SUBTITLE_LOCAL_COMPUTE_TYPE=int8
     volumes:

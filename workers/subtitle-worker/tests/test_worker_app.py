@@ -11,7 +11,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app import ProcessRequest, app, process
-from worker_core import WorkerSafeError
+from worker_core import WorkerRetryLater, WorkerSafeError
 
 
 class WorkerAppRoutesTest(unittest.TestCase):
@@ -45,6 +45,28 @@ class WorkerAppRoutesTest(unittest.TestCase):
         self.assertEqual("/dev/dri/renderD128", kwargs["vaapi_device"])
         self.assertEqual(19, kwargs["vaapi_qp"])
 
+    def test_process_passes_cloud_asr_policy_from_environment(self):
+        request = ProcessRequest(
+            source_path="/tmp/source.mp4",
+            output_video_path="/tmp/output.mp4",
+            output_srt_path="/tmp/output.srt",
+            provider="auto",
+        )
+
+        with mock.patch.dict(
+            "os.environ",
+            {
+                "SUBTITLE_PROVIDER_CHAIN": "remote-mac-mlx,dashscope",
+                "SUBTITLE_ALLOW_CLOUD_ASR": "false",
+            },
+            clear=False,
+        ), mock.patch("app.transcribe_and_burn", return_value={"segments": []}) as worker_mock:
+            process(request)
+
+        kwargs = worker_mock.call_args.kwargs
+        self.assertFalse(kwargs["allow_cloud_asr"])
+
+
     def _make_request(self) -> ProcessRequest:
         return ProcessRequest(
             source_path="/tmp/source.mp4",
@@ -65,6 +87,27 @@ class WorkerAppRoutesTest(unittest.TestCase):
 
         self.assertEqual(500, ctx.exception.status_code)
         self.assertEqual("缺少 DASHSCOPE_API_KEY", ctx.exception.detail)
+
+    def test_retry_later_errors_return_503_with_code(self):
+        request = self._make_request()
+        with mock.patch(
+            "app.transcribe_and_burn",
+            side_effect=WorkerRetryLater(
+                "mac_transcriber_unavailable",
+                "mac_transcriber_unavailable: Mac 转写服务不可用，等待恢复后重试",
+            ),
+        ):
+            with self.assertRaises(HTTPException) as ctx:
+                process(request)
+
+        self.assertEqual(503, ctx.exception.status_code)
+        self.assertEqual(
+            {
+                "code": "mac_transcriber_unavailable",
+                "message": "mac_transcriber_unavailable: Mac 转写服务不可用，等待恢复后重试",
+            },
+            ctx.exception.detail,
+        )
 
     def test_value_errors_return_400_with_message(self):
         request = self._make_request()

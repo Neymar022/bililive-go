@@ -109,7 +109,7 @@ worker 会通过 multipart 把抽好的音频上传到 `/transcribe`，把返回
 NAS bililive worker 端的 `processSemaphore`（容量 1）也是同样道理。两端形成双闸门：
 HTTP 请求并发抵达，应用层 FIFO 排队，**避免 GPU 抢资源/模型权重重复加载**。
 
-## Provider Chain（自动降级）
+## Provider Chain（自动调度）
 
 把 `provider` 设置成 `auto`、再配置 `SUBTITLE_PROVIDER_CHAIN`，worker 会按链顺序选择第一个**健康的 provider** 接管转写：
 
@@ -122,20 +122,36 @@ subtitle:
 
 # docker-compose.yaml
 environment:
-  SUBTITLE_PROVIDER_CHAIN: "remote-mac-mlx,dashscope,local-whisper"
+  SUBTITLE_PROVIDER_CHAIN: "remote-mac-mlx"
+  SUBTITLE_ALLOW_CLOUD_ASR: "false"
   SUBTITLE_MAC_TRANSCRIBER_URL: http://192.168.1.17:8484
   SUBTITLE_MAC_TRANSCRIBER_TOKEN: <token>
+  SUBTITLE_MAC_TRANSCRIBER_MODEL: large-v3-turbo
+```
+
+生产推荐是 **Mac-only 等待恢复**：只保留 `remote-mac-mlx`，并设置
+`SUBTITLE_ALLOW_CLOUD_ASR=false`。这样 Mac 不通或转写失败时，worker 返回
+`mac_transcriber_unavailable`，Go 侧会把同一个 pipeline task 重新置为 `pending`，
+写入 `not_before` 延后调度，`.subtitle.json` 保持 `queued`，不会回退到 Qwen ASR 产生费用。
+
+如确实需要云端兜底，才显式启用：
+
+```yaml
+environment:
+  SUBTITLE_PROVIDER_CHAIN: "remote-mac-mlx,dashscope,local-whisper"
+  SUBTITLE_ALLOW_CLOUD_ASR: "true"
   DASHSCOPE_API_KEY: <key>
 ```
 
-降级触发条件：
+调度触发条件：
 
 | 情境 | 行为 |
 |------|------|
 | 主链 `remote-mac-mlx` 健康（`/healthz` 1.5s 内 200） | 用 Mac 转写 |
-| Mac 不健康（关机/重启/超时） | **跳过 Mac**，立即试 `dashscope`（不浪费 60s+ HTTP timeout） |
-| Mac 健康但 transcribe 中途异常 | 异常上抛后切下一档 |
-| `dashscope` 调用失败（OSS/任务失败/网络） | 切到 `local-whisper` |
+| Mac 不健康（关机/重启/超时）且 `SUBTITLE_ALLOW_CLOUD_ASR=false` | 返回 `mac_transcriber_unavailable`，同任务延后重试 |
+| Mac 不健康且显式允许云 ASR | 跳过 Mac，继续尝试 `dashscope` |
+| Mac 健康但 transcribe 中途异常，且未配置本地兜底 | 返回 `mac_transcriber_unavailable`，同任务延后重试 |
+| `dashscope` 调用失败（OSS/任务失败/网络）且链里有 `local-whisper` | 切到 `local-whisper` |
 | 所有 provider 都失败 | 抛最后一次的异常，标记 metadata 为 Failed |
 
 **烧录阶段在转写成功后只跑一次**——chain 只覆盖转写阶段，不会重复 ffmpeg 浪费时间。
@@ -146,20 +162,26 @@ environment:
 
 | Env | 必须 | 说明 |
 |-----|-----|------|
-| `SUBTITLE_PROVIDER_CHAIN` | 是 | 逗号分隔，例 `remote-mac-mlx,dashscope,local-whisper` |
+| `SUBTITLE_PROVIDER_CHAIN` | 是 | 生产推荐 `remote-mac-mlx`；云兜底才写 `remote-mac-mlx,dashscope,local-whisper` |
+| `SUBTITLE_ALLOW_CLOUD_ASR` | 是 | 生产推荐 `false`，防止误配 `dashscope` 后产生 Qwen ASR 费用 |
 | `SUBTITLE_MAC_TRANSCRIBER_URL` | 链含 mac 时必填 | 例 `http://192.168.1.17:8484` |
-| `SUBTITLE_MAC_TRANSCRIBER_TOKEN` | 跟 BiliNote 端一致 | **写错会静默走云端，账单飙升**——见下方 token 故障排查 |
-| `DASHSCOPE_API_KEY` | 链含 dashscope 时必填 | — |
+| `SUBTITLE_MAC_TRANSCRIBER_TOKEN` | 跟 BiliNote 端一致 | 写错会触发 `mac_transcriber_unavailable`，不会再静默走云端 |
+| `SUBTITLE_MAC_TRANSCRIBER_MODEL` | 否 | 用于落 sidecar，生产当前为 `large-v3-turbo` |
+| `DASHSCOPE_API_KEY` | 仅云兜底时必填 | `SUBTITLE_ALLOW_CLOUD_ASR=false` 时不会调用 |
 | `SUBTITLE_MAC_HEALTH_TIMEOUT_SECONDS` | 否（默认 3.0） | 跨网段或 Mac 频繁睡眠唤醒时调高 |
+| `SUBTITLE_RETRY_LATER_DELAY` | 否（默认 5m） | Mac 不可用后同一任务的下次调度延迟 |
 
-### 故障排查：明明 Mac 在线却走云端
+成功后 `.subtitle.json` 会记录 `actual_provider`、`actual_model`、`actual_burn_provider`。
+确认是否产生云 ASR 费用时，以这三个字段为准。
+
+### 故障排查：Mac 不可用导致等待
 
 链跳过 Mac 的两种语义：
 
 - **真不在线**（连不上、超时、5xx）→ worker 日志 INFO `mac transcriber health probe failed`
 - **token 错配**（401）→ worker 日志 **WARNING** `mac transcriber rejected health probe with 401`
 
-如果发现 dashscope 调用频次异常增加，先 grep worker stderr 是否有上述 WARNING：
+如果任务持续 queued，先 grep worker stderr 是否有上述 WARNING：
 
 ```bash
 docker logs subtitle-worker 2>&1 | grep "mac transcriber"

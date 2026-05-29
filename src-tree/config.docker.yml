@@ -45,6 +45,8 @@ subtitle:
   # 启用后会在录制转 MP4 成功后自动生成 SRT 和烧录版
   enabled: false
   auto_generate: true
+  # 可选值：auto、remote-mac-mlx、dashscope、local-whisper
+  # 生产推荐 default_provider: auto + SUBTITLE_PROVIDER_CHAIN=remote-mac-mlx + SUBTITLE_ALLOW_CLOUD_ASR=false
   default_provider: dashscope
   # 原始录屏根目录，供 bililive-go 与 subtitle-worker 共享
   source_root: /srv/bililive-source

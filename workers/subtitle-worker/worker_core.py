@@ -28,6 +28,8 @@ FINALIZE_RETRY_ERRNOS = {errno.ENOENT, errno.EACCES, errno.EPERM, errno.EBUSY}
 DEFAULT_OUTPUT_VISIBILITY_TIMEOUT_SECONDS = 60.0
 DEFAULT_OUTPUT_VISIBILITY_POLL_INTERVAL_SECONDS = 0.25
 DEFAULT_OUTPUT_VISIBILITY_STABLE_POLLS = 2
+MAC_TRANSCRIBER_UNAVAILABLE = "mac_transcriber_unavailable"
+CLOUD_ASR_PROVIDERS = {"dashscope"}
 
 
 class WorkerSafeError(RuntimeError):
@@ -41,6 +43,14 @@ class WorkerSafeError(RuntimeError):
     - message 是开发者写死的中文短语 → 安全（如 "缺少 DASHSCOPE_API_KEY"）。
     - message 含 f-string 拼接的 stderr/路径/URL → 不安全，保持 RuntimeError。
     """
+
+
+class WorkerRetryLater(WorkerSafeError):
+    """临时不可用错误：HTTP 层返回 503，上层任务应等待后重试。"""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
 
 
 def ms_to_srt_time(milliseconds: int) -> str:
@@ -809,6 +819,7 @@ def _transcribe_with_chain(
     provider_chain: list[str],
     audio_path: str,
     language: str,
+    allow_cloud_asr: bool = True,
     **kwargs: Any,
 ) -> tuple[str, list[dict[str, Any]]]:
     """按 provider_chain 顺序尝试，返回 (实际成功的 provider, segments)。
@@ -830,11 +841,17 @@ def _transcribe_with_chain(
         )
 
     last_error: Optional[Exception] = None
+    mac_unavailable_reason: Optional[str] = None
     attempt_log: list[tuple[str, str]] = []  # 结构化记录每档结局，便于运维查日志
 
     health_timeout = float(os.getenv("SUBTITLE_MAC_HEALTH_TIMEOUT_SECONDS", str(DEFAULT_MAC_HEALTH_TIMEOUT_SECONDS)))
 
     for provider in provider_chain:
+        if provider in CLOUD_ASR_PROVIDERS and not allow_cloud_asr:
+            attempt_log.append((provider, "skipped:cloud-disabled"))
+            _logger.info("subtitle chain skipped cloud provider=%s because cloud ASR is disabled", provider)
+            continue
+
         # remote-mac-mlx 有便宜的健康探测，不健康直接跳——避免用 60s+ timeout 才发现
         if provider == "remote-mac-mlx":
             mac_url = kwargs.get("mac_transcriber_url")
@@ -844,6 +861,7 @@ def _transcribe_with_chain(
                 timeout_seconds=health_timeout,
             ):
                 attempt_log.append((provider, "skipped:health"))
+                mac_unavailable_reason = "Mac 转写服务健康检查失败"
                 continue
 
         try:
@@ -853,12 +871,19 @@ def _transcribe_with_chain(
             return provider, segments
         except Exception as exc:  # noqa: BLE001 - 故意拦截一切，让链能往下走
             last_error = exc
+            if provider == "remote-mac-mlx":
+                mac_unavailable_reason = f"Mac 转写服务调用失败: {exc}"
             attempt_log.append((provider, f"failed:{type(exc).__name__}"))
             _logger.warning("subtitle chain provider=%s failed: %s", provider, exc)
             continue
 
     # 所有 provider 都跳/失败；若 last_error 为空说明全被健康检查跳过
     _logger.error("subtitle chain exhausted, attempts=%s", attempt_log)
+    if mac_unavailable_reason and not allow_cloud_asr:
+        raise WorkerRetryLater(
+            MAC_TRANSCRIBER_UNAVAILABLE,
+            f"{MAC_TRANSCRIBER_UNAVAILABLE}: {mac_unavailable_reason}；云端 ASR 回退已禁用，等待 Mac 恢复后重试",
+        )
     if last_error is not None:
         raise last_error
     raise WorkerSafeError(f"provider chain 全部不可用: {provider_chain}")
@@ -991,8 +1016,10 @@ def transcribe_and_burn(
     dashscope_model: str = "qwen3-asr-flash-filetrans",
     local_model: str = "small",
     local_compute_type: str = "int8",
+    allow_cloud_asr: bool = True,
     mac_transcriber_url: Optional[str] = None,
     mac_transcriber_token: Optional[str] = None,
+    mac_transcriber_model: str = "large-v3-turbo",
     mac_transcriber_timeout_seconds: float = DEFAULT_MAC_TRANSCRIBER_TIMEOUT_SECONDS,
     video_encoder: str = DEFAULT_VIDEO_ENCODER,
     vaapi_device: str = DEFAULT_VAAPI_DEVICE,
@@ -1038,10 +1065,27 @@ def transcribe_and_burn(
                     "provider=auto 时必须配置 SUBTITLE_PROVIDER_CHAIN，"
                     "例 SUBTITLE_PROVIDER_CHAIN=remote-mac-mlx,dashscope,local-whisper"
                 )
-            actual_provider, segments = _transcribe_with_chain(provider_chain, audio_path, language, **provider_kwargs)
+            actual_provider, segments = _transcribe_with_chain(
+                provider_chain,
+                audio_path,
+                language,
+                allow_cloud_asr=allow_cloud_asr,
+                **provider_kwargs,
+            )
         else:
+            if provider in CLOUD_ASR_PROVIDERS and not allow_cloud_asr:
+                raise WorkerSafeError(f"cloud_asr_disabled: 字幕 provider {provider} 已被 SUBTITLE_ALLOW_CLOUD_ASR=false 禁用")
             segments = _transcribe_with_provider(provider, audio_path, language, **provider_kwargs)
             actual_provider = provider
+
+        if actual_provider == "dashscope":
+            actual_model = dashscope_model
+        elif actual_provider == "local-whisper":
+            actual_model = local_model
+        elif actual_provider == "remote-mac-mlx":
+            actual_model = mac_transcriber_model
+        else:
+            actual_model = ""
 
         video_width, video_height = probe_video_size(source_path)
         ass_content, segments = build_ass_document(
@@ -1092,6 +1136,7 @@ def transcribe_and_burn(
             "ass_path": ass_path,
             "render_preset": render_preset,
             "actual_provider": actual_provider,
+            "actual_model": actual_model,
             "actual_burn_provider": actual_burn_provider,
         }
     finally:

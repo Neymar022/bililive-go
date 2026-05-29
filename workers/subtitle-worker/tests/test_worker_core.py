@@ -118,6 +118,8 @@ class WorkerCoreTest(unittest.TestCase):
         self.assertEqual(str(output_ass_path), result.get("ass_path"))
         self.assertEqual("local-whisper", result.get("actual_provider"),
                          "actual_provider 必须暴露给 NAS 主进程，让 .subtitle.json 记录实际转写者")
+        self.assertEqual("small", result.get("actual_model"),
+                         "actual_model 必须暴露给 NAS 主进程，用于定位是否触发云端 ASR 计费")
         self.assertTrue(output_srt_path.exists())
         self.assertTrue(output_ass_path.exists())
 
@@ -811,6 +813,29 @@ class ProviderChainFallbackTest(unittest.TestCase):
         self.assertEqual("dashscope", chosen)
         self.assertEqual("云端兜底", segments[0]["text"])
         mac_mock.assert_not_called()  # 健康检查失败，不应真正调用 transcribe
+
+    def test_chain_cloud_disabled_pauses_when_mac_unhealthy_instead_of_dashscope(self):
+        """生产禁用云 ASR 时，即使链里误配 dashscope，也不能上传到 DashScope。
+
+        Mac 不健康时要返回可恢复等待错误，让 Go 侧保留当前任务等待下次调度。
+        """
+        upload_mock = mock.MagicMock(return_value="oss://x.wav")
+        with mock.patch("worker_core.check_mac_transcriber_health", return_value=False), \
+             mock.patch("worker_core.run_remote_mac_mlx") as mac_mock, \
+             mock.patch("worker_core.upload_file_to_dashscope_oss", upload_mock), \
+             mock.patch("worker_core.run_dashscope_transcription") as dash_mock:
+            with self.assertRaisesRegex(Exception, "mac_transcriber_unavailable"):
+                _transcribe_with_chain(
+                    ["remote-mac-mlx", "dashscope"],
+                    audio_path="/tmp/a.wav",
+                    language="zh",
+                    allow_cloud_asr=False,
+                    **self._BASE_KWARGS,
+                )
+
+        mac_mock.assert_not_called()
+        upload_mock.assert_not_called()
+        dash_mock.assert_not_called()
 
     def test_chain_falls_through_on_runtime_exception(self):
         """Mac 健康但 transcribe 期间抛异常（网络中断、模型崩）也要降级。"""

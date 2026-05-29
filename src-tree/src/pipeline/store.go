@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -92,6 +93,7 @@ func (s *SQLiteStore) initSchema() error {
 		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 		started_at TIMESTAMP,
 		completed_at TIMESTAMP,
+		not_before TIMESTAMP,
 		error_message TEXT,
 		can_retry INTEGER DEFAULT 1
 	);
@@ -100,7 +102,41 @@ func (s *SQLiteStore) initSchema() error {
 	CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_created_at ON pipeline_tasks(created_at);
 	`
 
-	_, err := s.db.Exec(schema)
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	if err := s.ensureColumn("pipeline_tasks", "not_before", "TIMESTAMP"); err != nil {
+		return err
+	}
+	_, err := s.db.Exec("CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_not_before ON pipeline_tasks(not_before)")
+	return err
+}
+
+func (s *SQLiteStore) ensureColumn(table, column, definition string) error {
+	rows, err := s.db.Query(fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var cid int
+		var name, dataType string
+		var notNull int
+		var defaultValue any
+		var pk int
+		if err := rows.Scan(&cid, &name, &dataType, &notNull, &defaultValue, &pk); err != nil {
+			return err
+		}
+		if name == column {
+			return rows.Err()
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec(fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", table, column, definition))
 	return err
 }
 
@@ -120,8 +156,8 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task *PipelineTask) error 
 			status, record_info_json, pipeline_config_json,
 			initial_files_json, current_files_json,
 			current_stage, total_stages, stage_results_json,
-			progress, created_at, can_retry
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			progress, created_at, not_before, can_retry
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		task.Status,
 		string(recordInfoJSON),
@@ -133,6 +169,7 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task *PipelineTask) error 
 		string(stageResultsJSON),
 		task.Progress,
 		task.CreatedAt,
+		task.NotBefore,
 		boolToInt(task.CanRetry),
 	)
 	if err != nil {
@@ -158,7 +195,7 @@ func (s *SQLiteStore) GetTask(ctx context.Context, id int64) (*PipelineTask, err
 			initial_files_json, current_files_json,
 			current_stage, total_stages, stage_results_json,
 			progress, created_at, started_at, completed_at,
-			error_message, can_retry
+			not_before, error_message, can_retry
 		FROM pipeline_tasks WHERE id = ?
 	`, id)
 
@@ -182,6 +219,7 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task *PipelineTask) error 
 			progress = ?,
 			started_at = ?,
 			completed_at = ?,
+			not_before = ?,
 			error_message = ?,
 			can_retry = ?
 		WHERE id = ?
@@ -193,6 +231,7 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task *PipelineTask) error 
 		task.Progress,
 		task.StartedAt,
 		task.CompletedAt,
+		task.NotBefore,
 		task.ErrorMessage,
 		boolToInt(task.CanRetry),
 		task.ID,
@@ -219,7 +258,7 @@ func (s *SQLiteStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Pipe
 			initial_files_json, current_files_json,
 			current_stage, total_stages, stage_results_json,
 			progress, created_at, started_at, completed_at,
-			error_message, can_retry
+			not_before, error_message, can_retry
 		FROM pipeline_tasks
 	`
 
@@ -273,12 +312,12 @@ func (s *SQLiteStore) GetPendingTasks(ctx context.Context, limit int) ([]*Pipeli
 			initial_files_json, current_files_json,
 			current_stage, total_stages, stage_results_json,
 			progress, created_at, started_at, completed_at,
-			error_message, can_retry
+			not_before, error_message, can_retry
 		FROM pipeline_tasks
-		WHERE status = ?
+		WHERE status = ? AND (not_before IS NULL OR not_before <= ?)
 		ORDER BY created_at ASC
 		LIMIT ?
-	`, PipelineStatusPending, limit)
+	`, PipelineStatusPending, time.Now().UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -303,7 +342,7 @@ func (s *SQLiteStore) ResetRunningTasks(ctx context.Context) error {
 	defer s.mu.Unlock()
 
 	_, err := s.db.ExecContext(ctx, `
-		UPDATE pipeline_tasks SET status = ?, started_at = NULL
+		UPDATE pipeline_tasks SET status = ?, started_at = NULL, not_before = NULL
 		WHERE status = ?
 	`, PipelineStatusPending, PipelineStatusRunning)
 	return err
@@ -333,7 +372,7 @@ func scanTask(row *sql.Row) (*PipelineTask, error) {
 	var task PipelineTask
 	var recordInfoJSON, pipelineConfigJSON, initialFilesJSON, currentFilesJSON, stageResultsJSON string
 	var status string
-	var startedAt, completedAt sql.NullTime
+	var startedAt, completedAt, notBefore sql.NullTime
 	var errorMessage sql.NullString
 	var canRetry int
 
@@ -351,6 +390,7 @@ func scanTask(row *sql.Row) (*PipelineTask, error) {
 		&task.CreatedAt,
 		&startedAt,
 		&completedAt,
+		&notBefore,
 		&errorMessage,
 		&canRetry,
 	)
@@ -366,6 +406,9 @@ func scanTask(row *sql.Row) (*PipelineTask, error) {
 	}
 	if completedAt.Valid {
 		task.CompletedAt = &completedAt.Time
+	}
+	if notBefore.Valid {
+		task.NotBefore = &notBefore.Time
 	}
 	if errorMessage.Valid {
 		task.ErrorMessage = errorMessage.String
@@ -396,7 +439,7 @@ func scanTaskFromRows(rows *sql.Rows) (*PipelineTask, error) {
 	var task PipelineTask
 	var recordInfoJSON, pipelineConfigJSON, initialFilesJSON, currentFilesJSON, stageResultsJSON string
 	var status string
-	var startedAt, completedAt sql.NullTime
+	var startedAt, completedAt, notBefore sql.NullTime
 	var errorMessage sql.NullString
 	var canRetry int
 
@@ -414,6 +457,7 @@ func scanTaskFromRows(rows *sql.Rows) (*PipelineTask, error) {
 		&task.CreatedAt,
 		&startedAt,
 		&completedAt,
+		&notBefore,
 		&errorMessage,
 		&canRetry,
 	)
@@ -429,6 +473,9 @@ func scanTaskFromRows(rows *sql.Rows) (*PipelineTask, error) {
 	}
 	if completedAt.Valid {
 		task.CompletedAt = &completedAt.Time
+	}
+	if notBefore.Valid {
+		task.NotBefore = &notBefore.Time
 	}
 	if errorMessage.Valid {
 		task.ErrorMessage = errorMessage.String
@@ -543,8 +590,28 @@ func (s *MemoryStore) ListTasks(ctx context.Context, filter TaskFilter) ([]*Pipe
 }
 
 func (s *MemoryStore) GetPendingTasks(ctx context.Context, limit int) ([]*PipelineTask, error) {
-	status := PipelineStatusPending
-	return s.ListTasks(ctx, TaskFilter{Status: &status, Limit: limit})
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	now := time.Now().UTC()
+	tasks := make([]*PipelineTask, 0)
+	for _, task := range s.tasks {
+		if task.Status != PipelineStatusPending {
+			continue
+		}
+		if task.NotBefore != nil && task.NotBefore.After(now) {
+			continue
+		}
+		taskCopy := *task
+		tasks = append(tasks, &taskCopy)
+	}
+	sort.Slice(tasks, func(i, j int) bool {
+		return tasks[i].CreatedAt.Before(tasks[j].CreatedAt)
+	})
+	if limit > 0 && len(tasks) > limit {
+		tasks = tasks[:limit]
+	}
+	return tasks, nil
 }
 
 func (s *MemoryStore) ResetRunningTasks(ctx context.Context) error {
@@ -555,6 +622,7 @@ func (s *MemoryStore) ResetRunningTasks(ctx context.Context) error {
 		if task.Status == PipelineStatusRunning {
 			task.Status = PipelineStatusPending
 			task.StartedAt = nil
+			task.NotBefore = nil
 		}
 	}
 	return nil

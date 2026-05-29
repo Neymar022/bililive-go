@@ -34,7 +34,10 @@ func TestSubtitleGenerateStageExecute(t *testing.T) {
 		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:02,000\n测试字幕\n"), 0o644))
 		require.NoError(t, os.WriteFile(strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath))+".ass", []byte("[Script Info]\n"), 0o644))
 		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
-			ASSPath: strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass",
+			ASSPath:            strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass",
+			ActualProvider:     "remote-mac-mlx",
+			ActualModel:        "large-v3-turbo",
+			ActualBurnProvider: "remote-mac",
 			Segments: []subtitle.Segment{
 				{Index: 1, Start: "00:00:00,000", End: "00:00:02,000", Text: "测试字幕"},
 			},
@@ -80,6 +83,9 @@ func TestSubtitleGenerateStageExecute(t *testing.T) {
 	assert.Equal(t, sourcePath, metadata.SourcePath)
 	assert.Equal(t, assPath, metadata.ASSPath)
 	assert.Equal(t, srtPath, metadata.SRTPath)
+	assert.Equal(t, "remote-mac-mlx", metadata.ActualProvider)
+	assert.Equal(t, "large-v3-turbo", metadata.ActualModel)
+	assert.Equal(t, "remote-mac", metadata.ActualBurnProvider)
 	assert.Len(t, metadata.Segments, 1)
 
 	// P11 默认 false：源文件应该还在（走传统 retention_days 后台清理路径）
@@ -87,6 +93,56 @@ func TestSubtitleGenerateStageExecute(t *testing.T) {
 	assert.NoError(t, statErr, "DeleteSourceOnCompletion 默认 false 时源文件不应被删")
 	assert.True(t, metadata.SourceExists, "metadata.SourceExists 应为 true")
 	assert.Nil(t, metadata.SourceDeletedAt, "未触发删除时 SourceDeletedAt 应为 nil")
+}
+
+func TestSubtitleGenerateQueuesSidecarWhenMacTranscriberUnavailable(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-05-29 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-05-29 - 测试标题.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]string{
+			"code":   "mac_transcriber_unavailable",
+			"detail": "Mac 转写服务不可用，等待恢复后重试",
+		}))
+	}))
+	defer worker.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	_, err = stage.Execute(&pipeline.PipelineContext{
+		Logger:     livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{HostName: "主播"},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.Error(t, err)
+	var retryLater *pipeline.RetryLaterError
+	require.ErrorAs(t, err, &retryLater)
+	assert.Contains(t, retryLater.Error(), "Mac 转写服务不可用")
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusQueued, metadata.Status)
+	assert.Equal(t, subtitle.StatusQueued, metadata.RendererStatus)
+	assert.Contains(t, metadata.LastError, "Mac 转写服务不可用")
+	assert.Contains(t, metadata.RendererError, "Mac 转写服务不可用")
 }
 
 func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
