@@ -20,6 +20,11 @@ class DockerReleaseTargetsTest(unittest.TestCase):
         self.assertIn("workflow_dispatch:", text)
         self.assertIn("github.event.inputs.ref", text)
         self.assertNotIn("chigusa/bililive-go", text)
+        self.assertIn("Resolve subtitle worker context", text)
+        self.assertIn("workers/subtitle-worker/Dockerfile", text)
+        self.assertIn("contrib/subtitle-worker/Dockerfile", text)
+        self.assertIn("if: steps.worker-context.outputs.exists == 'true'", text)
+        self.assertNotIn("context: ./contrib/subtitle-worker", text)
 
     def test_default_branch_publish_workflow_uses_buildx_and_hub_login(self) -> None:
         text = (

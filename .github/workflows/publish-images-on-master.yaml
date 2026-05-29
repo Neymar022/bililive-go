@@ -57,7 +57,25 @@ jobs:
           tags: ${{ steps.app-meta.outputs.tags }}
           labels: ${{ steps.app-meta.outputs.labels }}
 
+      - name: Resolve subtitle worker context
+        id: worker-context
+        shell: bash
+        run: |
+          if [ -f workers/subtitle-worker/Dockerfile ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "context=./workers/subtitle-worker" >> "$GITHUB_OUTPUT"
+            echo "file=./workers/subtitle-worker/Dockerfile" >> "$GITHUB_OUTPUT"
+          elif [ -f contrib/subtitle-worker/Dockerfile ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "context=./contrib/subtitle-worker" >> "$GITHUB_OUTPUT"
+            echo "file=./contrib/subtitle-worker/Dockerfile" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::subtitle worker context is not present on this ref; skipping worker image publish"
+          fi
+
       - name: Docker metadata for subtitle worker image
+        if: steps.worker-context.outputs.exists == 'true'
         id: worker-meta
         uses: docker/metadata-action@v5
         with:
@@ -67,10 +85,11 @@ jobs:
             type=sha,prefix=sha-
 
       - name: Build and push subtitle worker image
+        if: steps.worker-context.outputs.exists == 'true'
         uses: docker/build-push-action@v6
         with:
-          context: ./contrib/subtitle-worker
-          file: ./contrib/subtitle-worker/Dockerfile
+          context: ${{ steps.worker-context.outputs.context }}
+          file: ${{ steps.worker-context.outputs.file }}
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.worker-meta.outputs.tags }}
