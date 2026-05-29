@@ -32,7 +32,7 @@ COPY . .
 #配置golang编译环境并进行构建
 RUN go env -w GO111MODULE=on && \
     make build-web && \
-    make
+    make build
 
 RUN sh -c "/build/bin/bililive* --version"
 
