@@ -75,6 +75,187 @@ func (f *Feature) GetEffectiveDownloaderType() DownloaderType {
 	return DownloaderFFmpeg
 }
 
+// DanmakuConfig 弹幕录制配置
+type DanmakuConfig struct {
+	FontSize        int    `yaml:"font_size" json:"font_size"`                                     // 字体大小 (12~120)
+	FontName        string `yaml:"font_name" json:"font_name"`                                     // 字体名称
+	ScrollArea      string `yaml:"scroll_area" json:"scroll_area"`                                 // 滚动区域: full(全屏), top(顶部), bottom(底部)
+	ScrollTime      int    `yaml:"scroll_time" json:"scroll_time"`                                 // 弹幕滚过屏幕的秒数 (5~20)
+	Resolution      string `yaml:"resolution" json:"resolution"`                                   // 播放分辨率
+	Outline         int    `yaml:"outline" json:"outline"`                                         // 描边粗细 (0~4)
+	Opacity         int    `yaml:"opacity" json:"opacity"`                                         // 背景透明度 (0~255)
+	RecordGift      *bool  `yaml:"record_gift,omitempty" json:"record_gift,omitempty"`             // 是否录制礼物
+	RecordGuard     *bool  `yaml:"record_guard,omitempty" json:"record_guard,omitempty"`           // 是否录制上舰
+	RecordSuperChat *bool  `yaml:"record_super_chat,omitempty" json:"record_super_chat,omitempty"` // 是否录制SC
+	GuardPosition   string `yaml:"guard_position" json:"guard_position"`                           // 上舰位置: bottom-left, bottom-right, top-left, top-right
+	ScPosition      string `yaml:"sc_position" json:"sc_position"`                                 // SC位置: bottom-left, bottom-right, top-left, top-right
+}
+
+func BoolPtr(b bool) *bool { return &b }
+
+var defaultDanmakuConfig = DanmakuConfig{
+	FontSize:        36,
+	FontName:        "Microsoft YaHei",
+	ScrollArea:      "full",
+	ScrollTime:      10,
+	Resolution:      "1920x1080",
+	Outline:         1,
+	Opacity:         128,
+	RecordGift:      BoolPtr(true),
+	RecordGuard:     BoolPtr(true),
+	RecordSuperChat: BoolPtr(true),
+	GuardPosition:   "bottom-left",
+	ScPosition:      "bottom-left",
+}
+
+// validScrollAreas 支持的滚动区域
+var validScrollAreas = map[string]bool{
+	"full":   true, // 全屏滚动
+	"top":    true, // 仅在屏幕上半部分滚动
+	"bottom": true, // 仅在屏幕下半部分滚动
+}
+
+// validResolutions 支持的分辨率列表
+var validResolutions = map[string]bool{
+	"1920x1080": true,
+	"1280x720":  true,
+	"2560x1440": true,
+	"3840x2160": true,
+}
+
+// validMessagePositions 支持的消息位置
+var validMessagePositions = map[string]bool{
+	"bottom-left":  true,
+	"bottom-right": true,
+	"top-left":     true,
+	"top-right":    true,
+}
+
+// SetDefaults 将空字段设为默认值（应在 Validate 之前调用）
+func (d *DanmakuConfig) SetDefaults() {
+	if d.FontSize == 0 {
+		d.FontSize = defaultDanmakuConfig.FontSize
+	}
+	if d.FontName == "" {
+		d.FontName = defaultDanmakuConfig.FontName
+	}
+	if d.ScrollArea == "" {
+		d.ScrollArea = "full"
+	}
+	if d.ScrollTime == 0 {
+		d.ScrollTime = defaultDanmakuConfig.ScrollTime
+	}
+	if d.Resolution == "" {
+		d.Resolution = "1920x1080"
+	}
+	if d.Outline == 0 {
+		d.Outline = defaultDanmakuConfig.Outline
+	}
+	if d.Opacity == 0 {
+		d.Opacity = defaultDanmakuConfig.Opacity
+	}
+	if d.RecordGift == nil {
+		d.RecordGift = BoolPtr(true)
+	}
+	if d.RecordGuard == nil {
+		d.RecordGuard = BoolPtr(true)
+	}
+	if d.RecordSuperChat == nil {
+		d.RecordSuperChat = BoolPtr(true)
+	}
+	if d.GuardPosition == "" {
+		d.GuardPosition = "bottom-left"
+	}
+	if d.ScPosition == "" {
+		d.ScPosition = "bottom-left"
+	}
+}
+
+// Validate 验证弹幕配置参数的有效性
+func (d *DanmakuConfig) Validate() error {
+	d.SetDefaults()
+	if d.FontSize < 12 || d.FontSize > 120 {
+		return fmt.Errorf("字体大小必须在 12~120 之间，当前值: %d", d.FontSize)
+	}
+	if d.FontName == "" {
+		return fmt.Errorf("字体名称不能为空")
+	}
+	if !validScrollAreas[d.ScrollArea] {
+		return fmt.Errorf("不支持的滚动区域: %s，可选值: full, top, bottom", d.ScrollArea)
+	}
+	if d.ScrollTime < 5 || d.ScrollTime > 20 {
+		return fmt.Errorf("滚动时间必须在 5~20 秒之间，当前值: %d", d.ScrollTime)
+	}
+	if !validResolutions[d.Resolution] {
+		return fmt.Errorf("不支持的分辨率: %s，可选值: 1920x1080, 1280x720, 2560x1440, 3840x2160", d.Resolution)
+	}
+	if d.Outline < 0 || d.Outline > 4 {
+		return fmt.Errorf("描边粗细必须在 0~4 之间，当前值: %d", d.Outline)
+	}
+	if d.Opacity < 0 || d.Opacity > 255 {
+		return fmt.Errorf("背景透明度必须在 0~255 之间，当前值: %d", d.Opacity)
+	}
+	if !validMessagePositions[d.GuardPosition] {
+		return fmt.Errorf("不支持的上舰消息位置: %s，可选值: bottom-left, bottom-right, top-left, top-right", d.GuardPosition)
+	}
+	if !validMessagePositions[d.ScPosition] {
+		return fmt.Errorf("不支持的SC消息位置: %s，可选值: bottom-left, bottom-right, top-left, top-right", d.ScPosition)
+	}
+	return nil
+}
+
+// mergeDanmakuConfig 合并弹幕配置，override 中的非零值覆盖 base
+// *bool 字段：nil 表示继承，非 nil 表示覆盖
+func mergeDanmakuConfig(base, override *DanmakuConfig) DanmakuConfig {
+	if override == nil {
+		return *base
+	}
+	result := *base
+	if override.FontSize != 0 {
+		result.FontSize = override.FontSize
+	}
+	if override.FontName != "" {
+		result.FontName = override.FontName
+	}
+	if override.ScrollArea != "" {
+		result.ScrollArea = override.ScrollArea
+	}
+	if override.ScrollTime != 0 {
+		result.ScrollTime = override.ScrollTime
+	}
+	if override.Resolution != "" {
+		result.Resolution = override.Resolution
+	}
+	if override.Outline != 0 {
+		result.Outline = override.Outline
+	}
+	if override.Opacity != 0 {
+		result.Opacity = override.Opacity
+	}
+	if override.RecordGift != nil {
+		result.RecordGift = override.RecordGift
+	}
+	if override.RecordGuard != nil {
+		result.RecordGuard = override.RecordGuard
+	}
+	if override.RecordSuperChat != nil {
+		result.RecordSuperChat = override.RecordSuperChat
+	}
+	if override.GuardPosition != "" {
+		result.GuardPosition = override.GuardPosition
+	}
+	if override.ScPosition != "" {
+		result.ScPosition = override.ScPosition
+	}
+	result.SetDefaults()
+	return result
+}
+
+// GetDefaultDanmakuConfig 返回弹幕配置的默认值
+func GetDefaultDanmakuConfig() DanmakuConfig {
+	return defaultDanmakuConfig
+}
+
 // VideoSplitStrategies info.
 type VideoSplitStrategies struct {
 	OnRoomNameChanged bool          `yaml:"on_room_name_changed" json:"on_room_name_changed"`
@@ -107,9 +288,15 @@ type OnRecordFinished struct {
 	DeleteFlvAfterConvert bool         `yaml:"delete_flv_after_convert" json:"delete_flv_after_convert"`
 	CustomCommandline     string       `yaml:"custom_commandline" json:"custom_commandline"`
 	FixFlvAtFirst         bool         `yaml:"fix_flv_at_first" json:"fix_flv_at_first"`
-	SaveCover             bool         `yaml:"save_cover" json:"save_cover"`       // 保存视频第一帧作为封面图（.jpg）
-	CloudUpload           CloudUpload  `yaml:"cloud_upload" json:"cloud_upload"`   // 云上传配置
-	UploadTiming          UploadTiming `yaml:"upload_timing" json:"upload_timing"` // 上传时机
+	SaveCover             bool         `yaml:"save_cover" json:"save_cover"`                       // 保存视频第一帧作为封面图（.jpg）
+	CloudUpload           CloudUpload  `yaml:"cloud_upload" json:"cloud_upload"`                   // 云上传配置
+	UploadTiming          UploadTiming `yaml:"upload_timing" json:"upload_timing"`                 // 上传时机
+	BurnSubtitles         bool         `yaml:"burn_subtitles" json:"burn_subtitles"`               // 烧录弹幕字幕到视频（硬编码）
+	BurnSubtitlesCodec    string       `yaml:"burn_subtitles_codec" json:"burn_subtitles_codec"`   // 烧录用视频编码器，默认 libx264
+	BurnSubtitlesCrf      string       `yaml:"burn_subtitles_crf" json:"burn_subtitles_crf"`       // 烧录用 CRF 质量值，默认 18
+	BurnSubtitlesPreset   string       `yaml:"burn_subtitles_preset" json:"burn_subtitles_preset"` // 烧录用编码预设，默认 medium
+	BurnDeleteAss         bool         `yaml:"burn_delete_ass" json:"burn_delete_ass"`             // 烧录后删除 ASS 文件
+	BurnDeleteSource      bool         `yaml:"burn_delete_source" json:"burn_delete_source"`       // 烧录后删除源视频文件
 }
 
 type Log struct {
@@ -239,6 +426,8 @@ type OverridableConfig struct {
 	OnRecordFinished     *OnRecordFinished     `yaml:"on_record_finished,omitempty" json:"on_record_finished,omitempty"`         // 录制完成后的动作
 	TimeoutInUs          *int                  `yaml:"timeout_in_us,omitempty" json:"timeout_in_us,omitempty"`                   // 超时设置(微秒)
 	StreamPreference     *StreamPreference     `yaml:"stream_preference,omitempty" json:"stream_preference,omitempty"`           // 流偏好配置
+	DanmakuEnable        *bool                 `yaml:"danmaku_enable,omitempty" json:"danmaku_enable,omitempty"`                 // 是否录制弹幕（支持哔哩哔哩、抖音）
+	Danmaku              *DanmakuConfig        `yaml:"danmaku,omitempty" json:"danmaku,omitempty"`                               // 弹幕录制参数
 }
 
 // PlatformConfig 包含平台特定的设置
@@ -471,6 +660,11 @@ func firstTrimmedNonEmpty(values ...string) string {
 	return ""
 }
 
+type SoopLiveAuth struct {
+	Username string `yaml:"username,omitempty" json:"username,omitempty"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+}
+
 // Config content all config info.
 type Config struct {
 	// 核心配置
@@ -489,6 +683,8 @@ type Config struct {
 	VideoSplitStrategies VideoSplitStrategies `yaml:"video_split_strategies" json:"video_split_strategies"`
 	OnRecordFinished     OnRecordFinished     `yaml:"on_record_finished" json:"on_record_finished"`
 	TimeoutInUs          int                  `yaml:"timeout_in_us" json:"timeout_in_us"`
+	DanmakuEnable        bool                 `yaml:"danmaku_enable" json:"danmaku_enable"`
+	Danmaku              DanmakuConfig        `yaml:"danmaku" json:"danmaku"`
 
 	// 流偏好配置 - 两套系统并存
 	StreamPreference StreamPreference `yaml:"stream_preference,omitempty" json:"stream_preference,omitempty"` // 新版（渐进迁移中）
@@ -498,6 +694,9 @@ type Config struct {
 
 	// Cookies 配置
 	Cookies map[string]string `yaml:"cookies" json:"cookies"`
+
+	// SoopLive 账号配置
+	SoopLiveAuth SoopLiveAuth `yaml:"sooplive_auth,omitempty" json:"sooplive_auth,omitempty"`
 
 	// 通知服务配置
 	Notify Notify `yaml:"notify" json:"notify"`
@@ -709,7 +908,27 @@ func SetCookie(host, cookie string) (*Config, error) {
 		if c.Cookies == nil {
 			c.Cookies = make(map[string]string)
 		}
+		if strings.TrimSpace(cookie) == "" {
+			delete(c.Cookies, host)
+			return nil
+		}
 		c.Cookies[host] = cookie
+		return nil
+	}, 3, 10*time.Millisecond)
+}
+
+func SetCookies(hostCookies map[string]string) (*Config, error) {
+	return UpdateWithRetry(func(c *Config) error {
+		if c.Cookies == nil {
+			c.Cookies = make(map[string]string)
+		}
+		for host, cookie := range hostCookies {
+			if strings.TrimSpace(cookie) == "" {
+				delete(c.Cookies, host)
+				continue
+			}
+			c.Cookies[host] = cookie
+		}
 		return nil
 	}, 3, 10*time.Millisecond)
 }
@@ -838,9 +1057,16 @@ var defaultConfig = Config{
 			UploadPathTmpl:    "/录播归档/{{ .Platform }}/{{ .HostName }}/{{ .RoomName }}-{{ now | date \"2006-01-02\" }}.{{ .Ext }}",
 			DeleteAfterUpload: false,
 		},
-		UploadTiming: UploadTimingAfterProcess,
+		UploadTiming:        UploadTimingAfterProcess,
+		BurnSubtitles:       false,
+		BurnSubtitlesCodec:  "libx264",
+		BurnSubtitlesCrf:    "18",
+		BurnSubtitlesPreset: "medium",
+		BurnDeleteAss:       false,
+		BurnDeleteSource:    false,
 	},
 	TimeoutInUs: 60000000,
+	Danmaku:     defaultDanmakuConfig,
 	Notify: Notify{
 		SendRecordingSummary: false,
 		Telegram: Telegram{
@@ -996,6 +1222,11 @@ func (c *Config) Verify() error {
 	// 验证平台配置
 	if err := c.ValidatePlatformConfigs(); err != nil {
 		return err
+	}
+
+	// 验证弹幕配置
+	if err := c.Danmaku.Validate(); err != nil {
+		return fmt.Errorf("弹幕配置无效: %w", err)
 	}
 
 	return nil
@@ -1186,6 +1417,8 @@ func (c *Config) ResolveConfigForRoom(room *LiveRoom, platformName string) Resol
 		VideoSplitStrategies: c.VideoSplitStrategies,
 		OnRecordFinished:     c.OnRecordFinished,
 		TimeoutInUs:          c.TimeoutInUs,
+		DanmakuEnable:        c.DanmakuEnable,
+		Danmaku:              c.Danmaku,
 	}
 
 	// 应用平台级覆盖
@@ -1245,6 +1478,8 @@ type ResolvedConfig struct {
 	OnRecordFinished     OnRecordFinished     `json:"on_record_finished"`
 	TimeoutInUs          int                  `json:"timeout_in_us"`
 	StreamPreference     StreamPreference     `json:"stream_preference"`
+	DanmakuEnable        bool                 `json:"danmaku_enable"`
+	Danmaku              DanmakuConfig        `json:"danmaku"`
 }
 
 // applyOverrides 将可覆盖配置中的非空值应用到解析配置中
@@ -1278,6 +1513,12 @@ func (r *ResolvedConfig) applyOverrides(override *OverridableConfig) {
 	}
 	if override.StreamPreference != nil {
 		r.StreamPreference = *MergeStreamPreference(&r.StreamPreference, override.StreamPreference)
+	}
+	if override.DanmakuEnable != nil {
+		r.DanmakuEnable = *override.DanmakuEnable
+	}
+	if override.Danmaku != nil {
+		r.Danmaku = mergeDanmakuConfig(&r.Danmaku, override.Danmaku)
 	}
 }
 
@@ -1313,6 +1554,7 @@ func GetPlatformKeyFromUrl(urlStr string) string {
 		"www.twitch.tv":       "twitch",
 		"egame.qq.com":        "qq",
 		"www.huajiao.com":     "huajiao",
+		"play.sooplive.com":   "sooplive",
 	}
 
 	if platform, exists := domainToPlatformMap[u.Host]; exists {
@@ -1351,6 +1593,13 @@ func (c *Config) ValidatePlatformConfigs() error {
 		if platformConfig.OutPutPath != nil {
 			if _, err := os.Stat(*platformConfig.OutPutPath); os.IsNotExist(err) {
 				return fmt.Errorf("平台 '%s': 输出路径 '%s' 不存在", platformKey, *platformConfig.OutPutPath)
+			}
+		}
+
+		// 验证弹幕配置（如果指定）
+		if platformConfig.Danmaku != nil {
+			if err := platformConfig.Danmaku.Validate(); err != nil {
+				return fmt.Errorf("平台 '%s': 弹幕配置无效: %w", platformKey, err)
 			}
 		}
 	}

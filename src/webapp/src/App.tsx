@@ -11,6 +11,7 @@ import IOStats from './component/io-stats/index';
 import UpdateBanner from './component/update-banner/index';
 import UpdatePage from './component/update-page/index';
 import RecordingsPage from './component/recordings-page/index';
+import DanmakuSettings from './component/danmaku-config/index';
 
 const App: React.FC = () => {
   return (
@@ -23,6 +24,7 @@ const App: React.FC = () => {
           <Route path="/tasks/*" element={<TaskPage />} />
           <Route path="/recordings/*" element={<RecordingsPage />} />
           <Route path="/fileList/*" element={<FileList />} />
+          <Route path="/danmaku" element={<DanmakuSettings />} />
           <Route path="/configInfo/*" element={<ConfigInfo />} />
           <Route path="/liveInfo" element={<LiveInfo />} />
           <Route path="/" element={<LiveList />} />

@@ -25,6 +25,7 @@ test.describe('导航功能测试', () => {
     await expect(page.getByRole('menuitem', { name: /录屏字幕/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /系统状态/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /设置/ })).toBeVisible();
+    await expect(page.getByRole('menuitem', { name: /弹幕/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /文件/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /工具/ })).toBeVisible();
     await expect(page.getByRole('menuitem', { name: /任务队列/ })).toBeVisible();

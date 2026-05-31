@@ -137,6 +137,14 @@ class API {
     }
 
     /**
+     * 批量烧录弹幕字幕到视频文件
+     * @param paths 视频文件路径列表
+     */
+    batchBurnFiles(paths: string[]) {
+        return utils.requestPost(`${BASE_URL}/pipeline/batch-burn`, { paths });
+    }
+
+    /**
      * 获取Cookie列表
      */
     getCookieList() {
@@ -308,6 +316,38 @@ class API {
      */
     verifyBilibiliCookie(cookie: string) {
         return utils.requestPost(`${BASE_URL}/bilibili/cookie/verify`, { cookie });
+    }
+
+    /**
+     * 获取 SoopLive 已保存的账号密码配置
+     */
+    getSoopLiveAuth() {
+        return utils.requestGet(`${BASE_URL}/sooplive/auth`);
+    }
+
+    /**
+     * 清空 SoopLive 已保存的账号密码与 Cookie
+     */
+    clearSoopLiveAuth() {
+        return utils.requestDelete(`${BASE_URL}/sooplive/auth`);
+    }
+
+    /**
+     * 使用账号密码登录 SoopLive 并换取 Cookie
+     */
+    loginSoopLive(username: string, password: string, saveCredentials: boolean = true) {
+        return utils.requestPost(`${BASE_URL}/sooplive/login`, {
+            username,
+            password,
+            save_credentials: saveCredentials,
+        });
+    }
+
+    /**
+     * 验证 SoopLive Cookie
+     */
+    verifySoopLiveCookie(cookie: string) {
+        return utils.requestPost(`${BASE_URL}/sooplive/cookie/verify`, { cookie });
     }
 
     /**

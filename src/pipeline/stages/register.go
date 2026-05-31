@@ -14,6 +14,9 @@ func RegisterBuiltinStages(executor *pipeline.Executor) {
 	// 字幕生成
 	executor.RegisterStage(pipeline.StageNameSubtitleGenerate, NewSubtitleGenerateStage)
 
+	// 弹幕字幕烧录
+	executor.RegisterStage(pipeline.StageNameBurnSubtitles, NewBurnSubtitlesStage)
+
 	// 封面提取
 	executor.RegisterStage(pipeline.StageNameExtractCover, NewExtractCoverStage)
 
@@ -40,6 +43,9 @@ func RegisterBuiltinStagesToManager(manager *pipeline.Manager) {
 
 	// 字幕生成
 	manager.RegisterStage(pipeline.StageNameSubtitleGenerate, NewSubtitleGenerateStage)
+
+	// 弹幕字幕烧录
+	manager.RegisterStage(pipeline.StageNameBurnSubtitles, NewBurnSubtitlesStage)
 
 	// 封面提取
 	manager.RegisterStage(pipeline.StageNameExtractCover, NewExtractCoverStage)

@@ -367,6 +367,14 @@ func (l *Live) GetPlatformCNName() string {
 	return cnName
 }
 
+// GetRealID returns the resolved real room ID, resolving short IDs if necessary.
+func (l *Live) GetRealID() string {
+	if l.realID == "" {
+		l.parseRealId()
+	}
+	return l.realID
+}
+
 func (l *Live) getHeadersForDownloader() map[string]string {
 	agent := biliWebAgent
 	referer := l.GetRawUrl()
