@@ -27,16 +27,19 @@ func TestListRecordsReadsSidecarMetadata(t *testing.T) {
 
 	completedAt := time.Unix(1_763_200_000, 0).UTC()
 	require.NoError(t, SaveMetadata(sidecarPathForVideo(videoPath), Metadata{
-		Status:         StatusCompleted,
-		Provider:       "dashscope",
-		SourcePath:     sourcePath,
-		OutputPath:     videoPath,
-		ASSPath:        assPath,
-		SRTPath:        srtPath,
-		SourceExists:   true,
-		RenderPreset:   "vizard_classic_cn",
-		RendererStatus: StatusCompleted,
-		CompletedAt:    &completedAt,
+		Status:             StatusCompleted,
+		Provider:           "dashscope",
+		ActualProvider:     "remote-mac-mlx",
+		ActualModel:        "large-v3-turbo",
+		ActualBurnProvider: "remote-mac",
+		SourcePath:         sourcePath,
+		OutputPath:         videoPath,
+		ASSPath:            assPath,
+		SRTPath:            srtPath,
+		SourceExists:       true,
+		RenderPreset:       "vizard_classic_cn",
+		RendererStatus:     StatusCompleted,
+		CompletedAt:        &completedAt,
 		RecordMeta: map[string]any{
 			"platform":   "抖音",
 			"host_name":  "主播",
@@ -52,6 +55,9 @@ func TestListRecordsReadsSidecarMetadata(t *testing.T) {
 	assert.Equal(t, filepath.ToSlash("主播/Season 01/主播.S01E0001.2026-03-20 - 标题.mp4"), records[0].RelativePath)
 	assert.Equal(t, StatusCompleted, records[0].Status)
 	assert.Equal(t, "dashscope", records[0].Provider)
+	assert.Equal(t, "remote-mac-mlx", records[0].ActualProvider)
+	assert.Equal(t, "large-v3-turbo", records[0].ActualModel)
+	assert.Equal(t, "remote-mac", records[0].ActualBurnProvider)
 	assert.Equal(t, "抖音", records[0].Platform)
 	assert.Equal(t, assPath, records[0].ASSPath)
 	assert.Equal(t, "vizard_classic_cn", records[0].RenderPreset)

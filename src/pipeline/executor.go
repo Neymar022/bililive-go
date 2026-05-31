@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -23,9 +24,13 @@ type DeferredExecution struct {
 	StageIndex   int
 	StageName    string
 	CurrentFiles []FileInfo
+	Err          error
 }
 
 func (e *DeferredExecution) Error() string {
+	if e.Err != nil {
+		return e.Err.Error()
+	}
 	return fmt.Sprintf("pipeline deferred until %s before stage %s", e.NotBefore.Format(time.RFC3339), e.StageName)
 }
 
@@ -142,6 +147,17 @@ func (e *Executor) Execute(
 
 			if onProgress != nil {
 				onProgress(stageIndex, stageCfg.Name, StageStatusFailed)
+			}
+
+			var retryLater *RetryLaterError
+			if errors.As(err, &retryLater) {
+				return results, &DeferredExecution{
+					NotBefore:    time.Now().UTC().Add(retryLater.Delay),
+					StageIndex:   stageIndex,
+					StageName:    stageCfg.Name,
+					CurrentFiles: append([]FileInfo(nil), files...),
+					Err:          retryLater,
+				}
 			}
 
 			return results, fmt.Errorf("stage %s failed: %w", stageCfg.Name, err)

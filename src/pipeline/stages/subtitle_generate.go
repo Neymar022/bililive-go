@@ -122,6 +122,15 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 
 		response, err := subtitle.ProcessFileWithRetry(cfg.Subtitle.GetWorkerURL(), request, subtitle.DefaultProcessMaxAttempts)
 		if err != nil {
+			if subtitle.IsMacTranscriberUnavailable(err) {
+				metadata.Status = subtitle.StatusQueued
+				metadata.LastError = err.Error()
+				metadata.RendererStatus = subtitle.StatusQueued
+				metadata.RendererError = err.Error()
+				metadata.SourceExists = fileExists(file.Path)
+				_ = subtitle.SaveMetadata(metadataPath, metadata)
+				return nil, pipeline.NewRetryLaterError(err, subtitleRetryLaterDelay())
+			}
 			metadata.Status = subtitle.StatusFailed
 			metadata.LastError = err.Error()
 			metadata.RendererStatus = subtitle.StatusFailed
@@ -135,6 +144,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		metadata.Status = subtitle.StatusCompleted
 		metadata.LastError = ""
 		metadata.RenderPreset = subtitle.ResolveRenderPreset(response.RenderPreset, preset, cfg.Subtitle.BurnStyle)
+		metadata.ActualProvider = response.ActualProvider
+		metadata.ActualModel = response.ActualModel
+		metadata.ActualBurnProvider = response.ActualBurnProvider
 		metadata.RendererStatus = subtitle.StatusCompleted
 		metadata.RendererError = ""
 		if response.ASSPath != "" {
@@ -198,4 +210,16 @@ func (s *SubtitleGenerateStage) GetLogs() string {
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+func subtitleRetryLaterDelay() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("SUBTITLE_RETRY_LATER_DELAY"))
+	if raw == "" {
+		return pipeline.DefaultRetryLaterDelay
+	}
+	delay, err := time.ParseDuration(raw)
+	if err != nil || delay <= 0 {
+		return pipeline.DefaultRetryLaterDelay
+	}
+	return delay
 }
