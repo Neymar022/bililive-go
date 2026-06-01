@@ -29,6 +29,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/listeners"
 	"github.com/bililive-go/bililive-go/src/live"
+	soop "github.com/bililive-go/bililive-go/src/live/sooplive"
 	"github.com/bililive-go/bililive-go/src/livestate"
 	applog "github.com/bililive-go/bililive-go/src/log"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
@@ -1046,13 +1047,25 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 			platformKey = "unknown"
 		}
 
+		// 计算 LiveId（从 URL 生成，与 live/internal/genLiveId 逻辑一致）
+		var liveId string
+		if room.LiveId != "" {
+			liveId = string(room.LiveId)
+		} else if parsedUrl, err := url.Parse(room.Url); err == nil {
+			liveId = string(types.LiveID(utils.GetMd5String([]byte(parsedUrl.Host + parsedUrl.Path))))
+		}
+
 		roomInfo := map[string]interface{}{
 			"url":          room.Url,
 			"is_listening": room.IsListening,
 			"quality":      room.Quality,
 			"audio_only":   room.AudioOnly,
 			"nick_name":    room.NickName,
-			"live_id":      string(room.LiveId),
+			"live_id":      liveId,
+			"room_config": map[string]interface{}{
+				"danmaku_enable": room.DanmakuEnable,
+				"danmaku":        room.Danmaku,
+			},
 		}
 
 		// 从缓存获取直播间信息（不触发网络请求）
@@ -1076,7 +1089,7 @@ func getPlatformStats(writer http.ResponseWriter, r *http.Request) {
 	allKnownPlatforms := []string{
 		"bilibili", "douyin", "douyu", "huya", "kuaishou", "yy", "acfun",
 		"lang", "missevan", "openrec", "weibolive", "xiaohongshu", "yizhibo",
-		"hongdoufm", "zhanqi", "cc", "twitch", "qq", "huajiao",
+		"hongdoufm", "zhanqi", "cc", "twitch", "qq", "huajiao", "sooplive",
 	}
 
 	// 构建平台统计响应
@@ -1399,6 +1412,64 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 	if toolRootFolder, ok := updates["tool_root_folder"].(string); ok {
 		c.ToolRootFolder = toolRootFolder
 	}
+	if danmakuEnable, ok := updates["danmaku_enable"].(bool); ok {
+		c.DanmakuEnable = danmakuEnable
+	}
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if fontSize, ok := danmaku["font_size"].(float64); ok {
+			c.Danmaku.FontSize = int(fontSize)
+		}
+		if fontName, ok := danmaku["font_name"].(string); ok {
+			c.Danmaku.FontName = fontName
+		}
+		if displayMode, ok := danmaku["scroll_area"].(string); ok {
+			c.Danmaku.ScrollArea = displayMode
+		}
+		if scrollTime, ok := danmaku["scroll_time"].(float64); ok {
+			c.Danmaku.ScrollTime = int(scrollTime)
+		}
+		if resolution, ok := danmaku["resolution"].(string); ok {
+			c.Danmaku.Resolution = resolution
+		}
+		if outline, ok := danmaku["outline"].(float64); ok {
+			c.Danmaku.Outline = int(outline)
+		}
+		if opacity, ok := danmaku["opacity"].(float64); ok {
+			c.Danmaku.Opacity = int(opacity)
+		}
+		if recordGift, ok := danmaku["record_gift"].(bool); ok {
+			c.Danmaku.RecordGift = configs.BoolPtr(recordGift)
+		} else if _, exists := danmaku["record_gift"]; exists && danmaku["record_gift"] == nil {
+			c.Danmaku.RecordGift = nil
+		}
+		if recordGuard, ok := danmaku["record_guard"].(bool); ok {
+			c.Danmaku.RecordGuard = configs.BoolPtr(recordGuard)
+		} else if _, exists := danmaku["record_guard"]; exists && danmaku["record_guard"] == nil {
+			c.Danmaku.RecordGuard = nil
+		}
+		if recordSuperChat, ok := danmaku["record_super_chat"].(bool); ok {
+			c.Danmaku.RecordSuperChat = configs.BoolPtr(recordSuperChat)
+		} else if _, exists := danmaku["record_super_chat"]; exists && danmaku["record_super_chat"] == nil {
+			c.Danmaku.RecordSuperChat = nil
+		}
+		if guardPosition, ok := danmaku["guard_position"].(string); ok {
+			c.Danmaku.GuardPosition = guardPosition
+		}
+		if scPosition, ok := danmaku["sc_position"].(string); ok {
+			c.Danmaku.ScPosition = scPosition
+		}
+		if err := c.Danmaku.Validate(); err != nil {
+			return fmt.Errorf("弹幕参数无效: %w", err)
+		}
+	}
+	if soopAuth, ok := updates["sooplive_auth"].(map[string]interface{}); ok {
+		if username, ok := soopAuth["username"].(string); ok {
+			c.SoopLiveAuth.Username = username
+		}
+		if password, ok := soopAuth["password"].(string); ok {
+			c.SoopLiveAuth.Password = password
+		}
+	}
 
 	// 处理日志配置
 	if log, ok := updates["log"].(map[string]interface{}); ok {
@@ -1459,6 +1530,24 @@ func applyConfigUpdates(c *configs.Config, updates map[string]interface{}) error
 		}
 		if fixFlv, ok := orf["fix_flv_at_first"].(bool); ok {
 			c.OnRecordFinished.FixFlvAtFirst = fixFlv
+		}
+		if burnSubtitles, ok := orf["burn_subtitles"].(bool); ok {
+			c.OnRecordFinished.BurnSubtitles = burnSubtitles
+		}
+		if codec, ok := orf["burn_subtitles_codec"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesCodec = codec
+		}
+		if crf, ok := orf["burn_subtitles_crf"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesCrf = crf
+		}
+		if preset, ok := orf["burn_subtitles_preset"].(string); ok {
+			c.OnRecordFinished.BurnSubtitlesPreset = preset
+		}
+		if deleteAss, ok := orf["burn_delete_ass"].(bool); ok {
+			c.OnRecordFinished.BurnDeleteAss = deleteAss
+		}
+		if deleteSource, ok := orf["burn_delete_source"].(bool); ok {
+			c.OnRecordFinished.BurnDeleteSource = deleteSource
 		}
 	}
 
@@ -1626,6 +1715,13 @@ func updatePlatformConfig(writer http.ResponseWriter, r *http.Request) {
 		// 使用助手函数更新可覆盖配置
 		applyOverridableConfigUpdates(&pc.OverridableConfig, updates)
 
+		// 验证弹幕配置有效性
+		if pc.Danmaku != nil {
+			if err := pc.Danmaku.Validate(); err != nil {
+				return fmt.Errorf("弹幕参数无效: %w", err)
+			}
+		}
+
 		c.PlatformConfigs[platformKey] = pc
 		return nil
 	}, 3, 10*time.Millisecond)
@@ -1692,12 +1788,24 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	_, err = configs.UpdateWithRetry(func(c *configs.Config) error {
-		// 查找直播间
+		// 查找直播间（先按 LiveId，回退按 URL 计算的 hash）
 		roomIdx := -1
 		for i, room := range c.LiveRooms {
 			if string(room.LiveId) == liveId {
 				roomIdx = i
 				break
+			}
+		}
+		// LiveId 可能未初始化（yaml:"-"），回退按 URL 计算 hash 匹配
+		if roomIdx == -1 {
+			for i, room := range c.LiveRooms {
+				if parsedUrl, err := url.Parse(room.Url); err == nil {
+					computedId := string(types.LiveID(utils.GetMd5String([]byte(parsedUrl.Host + parsedUrl.Path))))
+					if computedId == liveId {
+						roomIdx = i
+						break
+					}
+				}
 			}
 		}
 
@@ -1726,6 +1834,13 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 
 		// 更新可覆盖配置
 		applyOverridableConfigUpdates(&room.OverridableConfig, updates)
+
+		// 验证弹幕配置有效性
+		if room.Danmaku != nil {
+			if err := room.Danmaku.Validate(); err != nil {
+				return fmt.Errorf("弹幕参数无效: %w", err)
+			}
+		}
 
 		return nil
 	}, 3, 10*time.Millisecond)
@@ -1838,6 +1953,68 @@ func applyOverridableConfigUpdates(oc *configs.OverridableConfig, updates map[st
 			oc.StreamPreference = nil
 		}
 	}
+
+	// 处理 danmaku_enable 配置
+	if danmakuEnable, ok := updates["danmaku_enable"].(bool); ok {
+		oc.DanmakuEnable = &danmakuEnable
+	} else if _, exists := updates["danmaku_enable"]; exists && updates["danmaku_enable"] == nil {
+		// 显式 null → 清除覆盖，恢复继承
+		oc.DanmakuEnable = nil
+	}
+
+	// 处理 danmaku 弹幕参数配置
+	if danmaku, ok := updates["danmaku"].(map[string]interface{}); ok {
+		if oc.Danmaku == nil {
+			// 从全局默认值初始化，避免未设置的字段被覆盖为零值
+			defaultCfg := configs.GetDefaultDanmakuConfig()
+			oc.Danmaku = &defaultCfg
+		}
+		if fontSize, ok := danmaku["font_size"].(float64); ok {
+			oc.Danmaku.FontSize = int(fontSize)
+		}
+		if fontName, ok := danmaku["font_name"].(string); ok {
+			oc.Danmaku.FontName = fontName
+		}
+		if scrollArea, ok := danmaku["scroll_area"].(string); ok {
+			oc.Danmaku.ScrollArea = scrollArea
+		}
+		if scrollTime, ok := danmaku["scroll_time"].(float64); ok {
+			oc.Danmaku.ScrollTime = int(scrollTime)
+		}
+		if resolution, ok := danmaku["resolution"].(string); ok {
+			oc.Danmaku.Resolution = resolution
+		}
+		if outline, ok := danmaku["outline"].(float64); ok {
+			oc.Danmaku.Outline = int(outline)
+		}
+		if opacity, ok := danmaku["opacity"].(float64); ok {
+			oc.Danmaku.Opacity = int(opacity)
+		}
+		if recordGift, ok := danmaku["record_gift"].(bool); ok {
+			oc.Danmaku.RecordGift = configs.BoolPtr(recordGift)
+		} else if _, exists := danmaku["record_gift"]; exists && danmaku["record_gift"] == nil {
+			oc.Danmaku.RecordGift = nil
+		}
+		if recordGuard, ok := danmaku["record_guard"].(bool); ok {
+			oc.Danmaku.RecordGuard = configs.BoolPtr(recordGuard)
+		} else if _, exists := danmaku["record_guard"]; exists && danmaku["record_guard"] == nil {
+			oc.Danmaku.RecordGuard = nil
+		}
+		if recordSuperChat, ok := danmaku["record_super_chat"].(bool); ok {
+			oc.Danmaku.RecordSuperChat = configs.BoolPtr(recordSuperChat)
+		} else if _, exists := danmaku["record_super_chat"]; exists && danmaku["record_super_chat"] == nil {
+			oc.Danmaku.RecordSuperChat = nil
+		}
+		if guardPosition, ok := danmaku["guard_position"].(string); ok {
+			oc.Danmaku.GuardPosition = guardPosition
+		}
+		if scPosition, ok := danmaku["sc_position"].(string); ok {
+			oc.Danmaku.ScPosition = scPosition
+		}
+	} else if _, exists := updates["danmaku"]; exists && updates["danmaku"] == nil {
+		// 显式 null → 清除覆盖，恢复继承
+		oc.Danmaku = nil
+	}
 }
 
 // updateRoomConfig 更新直播间配置
@@ -1889,22 +2066,14 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 		if nickName, ok := updates["nick_name"].(string); ok {
 			room.NickName = nickName
 		}
-		if interval, ok := updates["interval"].(float64); ok {
-			val := int(interval)
-			room.Interval = &val
-		}
-		if outPutPath, ok := updates["out_put_path"].(string); ok {
-			if outPutPath == "" {
-				room.OutPutPath = nil
-			} else {
-				room.OutPutPath = &outPutPath
-			}
-		}
-		if ffmpegPath, ok := updates["ffmpeg_path"].(string); ok {
-			if ffmpegPath == "" {
-				room.FfmpegPath = nil
-			} else {
-				room.FfmpegPath = &ffmpegPath
+
+		// 处理可覆盖配置（弹幕、interval、outPutPath、ffmpegPath 等）
+		applyOverridableConfigUpdates(&room.OverridableConfig, updates)
+
+		// 验证弹幕配置
+		if room.Danmaku != nil {
+			if err := room.Danmaku.Validate(); err != nil {
+				return fmt.Errorf("弹幕配置无效: %w", err)
 			}
 		}
 
@@ -1977,27 +2146,60 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 		Name         string `json:"name"`
 		LastModified int64  `json:"last_modified"`
 		Size         int64  `json:"size"`
+		SubtitleFile string `json:"subtitle_file,omitempty"`
 	}
-	jsonFiles := make([]jsonFile, len(files))
-	json := struct {
-		Files []jsonFile `json:"files"`
-		Path  string     `json:"path"`
-	}{
-		Path: path,
+
+	// First pass: separate ASS files and build base-name -> ASS file map
+	assFiles := make(map[string]string) // baseName (no ext) -> ass filename
+	type fileEntry struct {
+		dir  os.DirEntry
+		info os.FileInfo
 	}
-	for i, file := range files {
+	var validFiles []fileEntry
+	for _, file := range files {
 		info, err := file.Info()
 		if err != nil {
 			continue
 		}
-		jsonFiles[i].IsFolder = file.IsDir()
-		jsonFiles[i].Name = file.Name()
-		jsonFiles[i].LastModified = info.ModTime().Unix()
-		if !file.IsDir() {
-			jsonFiles[i].Size = info.Size()
+		name := file.Name()
+		if !file.IsDir() && strings.HasSuffix(strings.ToLower(name), ".ass") {
+			// Register ASS file by base name (without extension)
+			baseName := name[:len(name)-4]
+			assFiles[baseName] = name
+		} else {
+			validFiles = append(validFiles, fileEntry{dir: file, info: info})
 		}
 	}
-	json.Files = jsonFiles
+
+	// Second pass: build response, attaching subtitle info to video files
+	jsonFiles := make([]jsonFile, 0, len(validFiles))
+	for _, fe := range validFiles {
+		jf := jsonFile{
+			IsFolder:     fe.dir.IsDir(),
+			Name:         fe.dir.Name(),
+			LastModified: fe.info.ModTime().Unix(),
+		}
+		if !fe.dir.IsDir() {
+			jf.Size = fe.info.Size()
+			// Check if this file has an associated ASS subtitle
+			baseName := fe.dir.Name()
+			if idx := strings.LastIndex(baseName, "."); idx > 0 {
+				baseName = baseName[:idx]
+			}
+			if assName, ok := assFiles[baseName]; ok {
+				jf.SubtitleFile = assName
+			}
+		}
+		jsonFiles = append(jsonFiles, jf)
+	}
+
+	json := struct {
+		Files []jsonFile `json:"files"`
+		Path  string     `json:"path"`
+	}{
+		Files: jsonFiles,
+		Path:  path,
+	}
 
 	writeJSON(writer, json)
 }
@@ -2095,6 +2297,17 @@ func renameFile(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 同步重命名关联的 ASS 弹幕文件
+	if !info.IsDir() {
+		oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
+		newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
+		oldAss := oldBase + ".ass"
+		newAss := newBase + ".ass"
+		if _, err := os.Stat(oldAss); err == nil {
+			os.Rename(oldAss, newAss)
+		}
+	}
+
 	writeJSON(writer, commonResp{Data: "OK"})
 }
 
@@ -2112,6 +2325,14 @@ func deleteFile(writer http.ResponseWriter, r *http.Request) {
 	if err != nil || absPath == base {
 		writeJSON(writer, commonResp{ErrNo: 400, ErrMsg: "禁止删除根目录或无效/越权路径"})
 		return
+	}
+
+	// 删除关联的 ASS 弹幕文件
+	if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+		assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
+		if _, err := os.Stat(assPath); err == nil {
+			os.Remove(assPath)
+		}
 	}
 
 	if err := os.RemoveAll(absPath); err != nil {
@@ -2195,6 +2416,16 @@ func batchRenameFiles(writer http.ResponseWriter, r *http.Request) {
 			results = append(results, Result{Path: path, Success: false, Message: translateOSError(err)})
 		} else {
 			results = append(results, Result{Path: path, Success: true, Message: "成功"})
+			// 同步重命名关联的 ASS 弹幕文件
+			if !info.IsDir() {
+				oldBase := strings.TrimSuffix(oldAbsPath, filepath.Ext(oldAbsPath))
+				newBase := strings.TrimSuffix(newAbsPath, filepath.Ext(newAbsPath))
+				oldAss := oldBase + ".ass"
+				newAss := newBase + ".ass"
+				if _, err := os.Stat(oldAss); err == nil {
+					os.Rename(oldAss, newAss)
+				}
+			}
 		}
 	}
 
@@ -2229,6 +2460,14 @@ func batchDeleteFiles(writer http.ResponseWriter, r *http.Request) {
 		if err != nil || absPath == base {
 			results = append(results, Result{Path: path, Success: false, Message: "禁止操作根目录或越权路径"})
 			continue
+		}
+
+		// 删除关联的 ASS 弹幕文件
+		if info, err := os.Stat(absPath); err == nil && !info.IsDir() {
+			assPath := strings.TrimSuffix(absPath, filepath.Ext(absPath)) + ".ass"
+			if _, err := os.Stat(assPath); err == nil {
+				os.Remove(assPath)
+			}
 		}
 
 		if err := os.RemoveAll(absPath); err != nil {
@@ -2270,6 +2509,40 @@ func getLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 	writeJSON(writer, result)
 }
 
+func applyCookiesToLives(ctx context.Context, newCfg *configs.Config, hosts ...string) {
+	inst := instance.GetInstance(ctx)
+	hostSet := make(map[string]struct{}, len(hosts))
+	for _, host := range hosts {
+		hostSet[host] = struct{}{}
+	}
+
+	for _, room := range newCfg.LiveRooms {
+		tmpurl, err := url.Parse(room.Url)
+		if err != nil {
+			continue
+		}
+		if _, ok := hostSet[tmpurl.Host]; !ok {
+			continue
+		}
+
+		liveObj, _ := inst.Lives.Get(room.LiveId)
+		if liveObj == nil {
+			inst.Lives.Range(func(_ types.LiveID, l live.Live) bool {
+				if l.GetRawUrl() == room.Url {
+					liveObj = l
+					return false
+				}
+				return true
+			})
+		}
+		if liveObj == nil {
+			applog.GetLogger().Warn("can't find live by id or url: " + string(room.LiveId) + " " + room.Url)
+			continue
+		}
+		liveObj.UpdateLiveOptionsbyConfig(ctx, &room)
+	}
+}
+
 func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 	b, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -2280,7 +2553,6 @@ func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := r.Context()
-	inst := instance.GetInstance(ctx)
 	data := gjson.ParseBytes(b)
 
 	host := data.Get("Host").Str
@@ -2306,35 +2578,190 @@ func putLiveHostCookie(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	for _, v := range newCfg.LiveRooms {
-		tmpurl, _ := url.Parse(v.Url)
-		if tmpurl.Host != host {
-			continue
-		}
-		liveObj, _ := inst.Lives.Get(v.LiveId)
-		if liveObj == nil {
-			// fallback search by URL
-			inst.Lives.Range(func(_ types.LiveID, l live.Live) bool {
-				if l.GetRawUrl() == v.Url {
-					liveObj = l
-					return false
-				}
-				return true
-			})
-		}
-
-		if liveObj == nil {
-			applog.GetLogger().Warn("can't find live by id or url: " + string(v.LiveId) + " " + v.Url)
-			continue
-		}
-		liveObj.UpdateLiveOptionsbyConfig(ctx, &v)
-	}
+	applyCookiesToLives(ctx, newCfg, host)
 	if err := newCfg.Marshal(); err != nil {
 		applog.GetLogger().Error("failed to persistence config: " + err.Error())
 	}
 	writeJSON(writer, commonResp{
 		Data: "OK",
 	})
+}
+
+// getSoopLiveAuthConfig 返回 Soop 凭证状态和当前已保存的账号字段（仅用户名与是否存在已保存凭证标记），供 WebUI 面板初始化使用。
+// 注意：当前实现不会返回密码等敏感字段，只会返回 username 与 has_saved_credentials，避免将明文密码暴露给前端。
+func getSoopLiveAuthConfig(writer http.ResponseWriter, _ *http.Request) {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "配置未加载",
+		})
+		return
+	}
+
+	var verifyResult *soop.CookieVerifyResult
+	verifyError := ""
+	cookieStatus := "missing"
+	storedCookie := ""
+	if cfg.Cookies != nil {
+		if cookie := strings.TrimSpace(cfg.Cookies["play.sooplive.com"]); cookie != "" {
+			storedCookie = cookie
+		}
+	}
+	if storedCookie != "" {
+		if result, err := soop.VerifyCookieStringCached(storedCookie); err == nil {
+			verifyResult = result
+			if result != nil && result.IsLogin {
+				cookieStatus = "valid"
+			} else {
+				cookieStatus = "invalid"
+				verifyError = "Soop Cookie 校验未通过，当前登录态已失效或权限不足"
+			}
+		} else {
+			cookieStatus = "error"
+			verifyError = err.Error()
+		}
+	}
+	applog.GetLogger().Debugf("Soop auth 状态查询: hasCookie=%v cookieStatus=%s hasSavedCredential=%v verifyError=%v",
+		storedCookie != "", cookieStatus, cfg.SoopLiveAuth.Username != "" || cfg.SoopLiveAuth.Password != "", verifyError != "")
+
+	writeJSON(writer, commonResp{
+		Data: map[string]any{
+			"username":              cfg.SoopLiveAuth.Username,
+			"has_saved_credentials": cfg.SoopLiveAuth.Username != "" || cfg.SoopLiveAuth.Password != "",
+			"cookie_status":         cookieStatus,
+			// verify 为空通常表示：
+			// 1. 当前没有保存 Cookie；
+			// 2. Soop 校验接口请求失败；
+			// 3. 平台暂时不可达。
+			"verify":       verifyResult,
+			"verify_error": verifyError,
+		},
+	})
+}
+
+// clearSoopLiveAuthConfig 清空 Soop 账号密码与持久化 Cookie。
+// 这会让后续 Soop 请求退回到“无登录态”模式。
+func clearSoopLiveAuthConfig(writer http.ResponseWriter, r *http.Request) {
+	applog.GetLogger().Debug("Soop 清空账号密码与 Cookie 请求开始")
+	newCfg, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		c.SoopLiveAuth.Username = ""
+		c.SoopLiveAuth.Password = ""
+		if c.Cookies != nil {
+			delete(c.Cookies, "play.sooplive.com")
+		}
+		return nil
+	}, 3, 10*time.Millisecond)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "清空 Soop 凭证失败: " + err.Error(),
+		})
+		return
+	}
+
+	applyCookiesToLives(r.Context(), newCfg, "play.sooplive.com")
+	applog.GetLogger().Debug("Soop 清空账号密码与 Cookie 请求完成")
+	writeJSON(writer, commonResp{Data: "OK"})
+}
+
+// loginSoopLive 接收前端输入的账号密码，调用 Soop 登录接口换取 Cookie。
+// 登录成功后：
+// 1. 将 Cookie 写入配置文件；
+// 2. 按当前前端选择决定是否保存明文账号密码；
+// 3. 更新当前运行中 Soop 房间的请求选项。
+func loginSoopLive(writer http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		SaveCredentials bool   `json:"save_credentials"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "请求体格式错误，无法解析 Soop 登录参数"})
+		return
+	}
+	if strings.TrimSpace(req.Username) == "" || strings.TrimSpace(req.Password) == "" {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "Soop 账号或密码为空，请完整填写后再登录"})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Web 登录开始: username=%s saveCredentials=%v", req.Username, req.SaveCredentials)
+
+	result, err := soop.LoginAndGetCookie(req.Username, req.Password)
+	if err != nil {
+		applog.GetLogger().WithError(err).Debugf("Soop Web 登录失败: username=%s", req.Username)
+		writeJsonWithStatusCode(writer, http.StatusUnauthorized, commonResp{
+			ErrNo:  http.StatusUnauthorized,
+			ErrMsg: "Soop 登录失败，后端未能完成“账号密码换 Cookie”流程；常见原因包括账号密码错误、平台风控、网络异常或接口已变更: " + err.Error(),
+		})
+		return
+	}
+
+	newCfg, err := configs.UpdateWithRetry(func(c *configs.Config) error {
+		if c.Cookies == nil {
+			c.Cookies = make(map[string]string)
+		}
+		c.Cookies["play.sooplive.com"] = result.Cookie
+		if req.SaveCredentials {
+			c.SoopLiveAuth.Username = req.Username
+			c.SoopLiveAuth.Password = req.Password
+		} else {
+			c.SoopLiveAuth.Username = ""
+			c.SoopLiveAuth.Password = ""
+		}
+		return nil
+	}, 3, 10*time.Millisecond)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "Soop 登录成功，但写入配置失败: " + err.Error(),
+		})
+		return
+	}
+
+	applyCookiesToLives(r.Context(), newCfg, "play.sooplive.com")
+	applog.GetLogger().Debugf("Soop Web 登录成功: username=%s cookieLength=%d loginID=%s", req.Username, len(result.Cookie), result.Verify.LoginID)
+
+	writeJSON(writer, commonResp{
+		Data: map[string]any{
+			"cookie":   result.Cookie,
+			"verify":   result.Verify,
+			"username": result.Username,
+		},
+	})
+}
+
+// verifySoopLiveCookie 验证前端提供的 Soop Cookie 是否有效。
+// 常见失败原因：
+// - Cookie 已过期；
+// - Cookie 不完整；
+// - 账号已在平台侧退出登录；
+// - Soop 校验接口当前不可用。
+func verifySoopLiveCookie(writer http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Cookie string `json:"cookie"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "请求体格式错误，无法解析 Soop Cookie"})
+		return
+	}
+	if strings.TrimSpace(req.Cookie) == "" {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "Soop Cookie 不能为空"})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Cookie 校验开始: cookieLength=%d", len(req.Cookie))
+
+	result, err := soop.VerifyCookieStringCached(req.Cookie)
+	if err != nil {
+		applog.GetLogger().WithError(err).Debug("Soop Cookie 校验失败")
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
+			ErrNo:  http.StatusInternalServerError,
+			ErrMsg: "验证 Soop Cookie 失败；这通常表示校验接口当前不可用、网络异常，或平台返回了当前版本无法识别的响应: " + err.Error(),
+		})
+		return
+	}
+	applog.GetLogger().Debugf("Soop Cookie 校验完成: isLogin=%v loginID=%s", result.IsLogin, result.LoginID)
+
+	writeJSON(writer, commonResp{Data: result})
 }
 
 // getLiveSessionHistory 获取直播间的会话历史记录

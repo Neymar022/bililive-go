@@ -2,8 +2,18 @@
 FROM golang:1.25-bookworm AS builder
 
 ARG NODE_VERSION=22.21.1
+# 中国区构建或网络不稳定时可指定：
+# --build-arg DEBIAN_APT_MIRROR_URL=http://mirrors.tuna.tsinghua.edu.cn
+ARG DEBIAN_APT_MIRROR_URL=http://deb.debian.org
 
 WORKDIR /build
+
+RUN echo 'Acquire::http::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::Retries "3";' > /etc/apt/apt.conf.d/99retries && \
+    if [ "$DEBIAN_APT_MIRROR_URL" != "http://deb.debian.org" ]; then \
+        echo "Switching apt mirror to $DEBIAN_APT_MIRROR_URL"; \
+        sed -i "s|http://deb.debian.org|$DEBIAN_APT_MIRROR_URL|g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+        sed -i "s|http://deb.debian.org|$DEBIAN_APT_MIRROR_URL|g" /etc/apt/sources.list 2>/dev/null || true; \
+    fi
 
 #安装tar解压xz需要的xz-utils和构建web页面所需的yarn
 RUN curl -sS https://dl.yarnpkg.com/debian/pubkey.gpg | apt-key add -  && \
@@ -40,6 +50,9 @@ RUN sh -c "/build/bin/bililive* --version"
 FROM ubuntu:22.04
 
 ARG tag
+# 中国区构建或网络不稳定时可指定：
+# --build-arg UBUNTU_APT_MIRROR_URL=http://mirrors.tuna.tsinghua.edu.cn/ubuntu
+ARG UBUNTU_APT_MIRROR_URL=http://archive.ubuntu.com/ubuntu
 
 ENV WORKDIR="/srv/bililive"
 ENV OUTPUT_DIR="/srv/bililive" \
@@ -50,6 +63,14 @@ ENV PUID=0 PGID=0 UMASK=022
 
 RUN mkdir -p $OUTPUT_DIR && \
     mkdir -p $CONF_DIR && \
+    echo 'Acquire::http::Timeout "30";\nAcquire::http::Pipeline-Depth "0";\nAcquire::Retries "3";' > /etc/apt/apt.conf.d/99retries && \
+    if [ "$UBUNTU_APT_MIRROR_URL" != "http://archive.ubuntu.com/ubuntu" ]; then \
+        echo "Switching apt mirror to $UBUNTU_APT_MIRROR_URL"; \
+        sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR_URL|g" /etc/apt/sources.list 2>/dev/null || true; \
+        sed -i "s|http://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR_URL|g" /etc/apt/sources.list 2>/dev/null || true; \
+        sed -i "s|http://archive.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR_URL|g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+        sed -i "s|http://security.ubuntu.com/ubuntu|$UBUNTU_APT_MIRROR_URL|g" /etc/apt/sources.list.d/*.sources 2>/dev/null || true; \
+    fi && \
     apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     ffmpeg \

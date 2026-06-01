@@ -4,6 +4,7 @@ package recorders
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -22,10 +23,12 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/instance"
+	"github.com/bililive-go/bililive-go/src/listeners"
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/notify"
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
+	"github.com/bililive-go/bililive-go/src/pkg/hlsproxy"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/parser"
 	"github.com/bililive-go/bililive-go/src/pkg/parser/bililive_recorder"
@@ -34,6 +37,7 @@ import (
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/streamprobe"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
+	"github.com/bililive-go/bililive-go/src/recorders/danmaku"
 )
 
 const (
@@ -42,6 +46,8 @@ const (
 	running
 	stopped
 )
+
+const soopRetryWarnInterval = time.Minute
 
 // for test
 var (
@@ -196,6 +202,16 @@ type Recorder interface {
 	SetInitialRecordedFiles(files []notify.RecordingFileDetail)
 }
 
+// danmakuRecorder 弹幕录制器接口，支持不同平台的实现
+type danmakuRecorder interface {
+	Start(ctx context.Context) error
+	Stop()
+	OutputFile() string
+	GetCount() int
+	IsRunning() bool
+	GetStatus() map[string]interface{}
+}
+
 type recorder struct {
 	Live       live.Live
 	ed         events.Dispatcher
@@ -203,6 +219,7 @@ type recorder struct {
 	startTime  time.Time
 	parser     parser.Parser
 	parserLock *sync.RWMutex
+	danmakuRec danmakuRecorder
 
 	stop  chan struct{}
 	state uint32
@@ -232,6 +249,11 @@ type recorder struct {
 	done chan struct{}
 	// suppressSummary 为 true 时，run() 退出不推送摘要（分段重启场景）
 	suppressSummary bool
+
+	retryLogMu              sync.Mutex
+	lastRetryLogKey         string
+	lastRetryLogAt          time.Time
+	suppressedRetryLogCount int
 }
 
 func NewRecorder(ctx context.Context, live live.Live) (Recorder, error) {
@@ -278,7 +300,10 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		}
 	}
 	if err != nil || len(streamInfos) == 0 {
-		r.getLogger().WithError(err).Warn("failed to get stream url, will retry after 5s...")
+		if err != nil && r.stopRetryForExplicitOffline(err) {
+			return
+		}
+		r.logStreamURLRetry(err)
 		// 使用可中断的等待，确保 Ctrl+C 能立即响应
 		select {
 		case <-ctx.Done():
@@ -287,6 +312,7 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		}
 		return
 	}
+	r.resetRetryLogState()
 
 	obj, _ := r.cache.Get(r.Live)
 	info := obj.(*live.Info)
@@ -406,6 +432,35 @@ func (r *recorder) tryRecord(ctx context.Context) {
 			url = probe.LocalURL()
 		}
 	} else if streamprobe.IsStreamHLS(url) {
+		if r.Live.GetPlatformCNName() == "SOOP" {
+			hlsFilterProxy, proxyErr := hlsproxy.New(url, streamInfo.HeadersForDownloader, true)
+			if proxyErr != nil {
+				r.getLogger().WithError(proxyErr).Warn("Soop HLS 过滤代理启动失败，将直接使用上游 m3u8")
+			} else if proxyErr = hlsFilterProxy.Start(ctx); proxyErr != nil {
+				r.getLogger().WithError(proxyErr).Warn("Soop HLS 过滤代理运行失败，将直接使用上游 m3u8")
+			} else {
+				defer hlsFilterProxy.Stop()
+				streamInfo = &live.StreamUrlInfo{
+					Url:                       hlsFilterProxy.LocalURL(),
+					HeadersForDownloader:      nil,
+					Format:                    streamInfo.Format,
+					Quality:                   streamInfo.Quality,
+					Description:               streamInfo.Description,
+					Codec:                     streamInfo.Codec,
+					Width:                     streamInfo.Width,
+					Height:                    streamInfo.Height,
+					Bitrate:                   streamInfo.Bitrate,
+					Vbitrate:                  streamInfo.Vbitrate,
+					FrameRate:                 streamInfo.FrameRate,
+					Name:                      streamInfo.Name,
+					AudioCodec:                streamInfo.AudioCodec,
+					AttributesForStreamSelect: streamInfo.AttributesForStreamSelect,
+				}
+				url = hlsFilterProxy.LocalURL()
+				r.getLogger().Info("Soop HLS 过滤代理已启用，将自动跳过 preloading 分片")
+			}
+		}
+
 		// HLS 流：不使用代理，异步探测第一个 TS 分段的头部信息
 		// 使用 tryRecord 的 ctx，当录制结束/重试时自动取消探测
 		go func(probeCtx context.Context) {
@@ -445,6 +500,65 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	r.setAndCloseParser(p)
 	r.startTime = time.Now()
 
+	// 弹幕录制（支持哔哩哔哩和抖音平台）
+	if resolvedConfig.DanmakuEnable {
+		switch r.Live.GetPlatformCNName() {
+		case "哔哩哔哩":
+			assFile := fileName[:strings.LastIndex(fileName, ".")] + ".ass"
+			roomID := extractRoomIDFromUrl(r.Live.GetRawUrl())
+			cookies := extractCookiesString(r.Live)
+			if roomID > 0 {
+				r.getLogger().Infof("弹幕录制已启用，房间ID: %d, 输出: %s", roomID, assFile)
+				rec := danmaku.NewDanmakuRecorder(roomID, cookies, assFile, resolvedConfig.Danmaku, r.getLogger().Entry)
+				if dmErr := rec.Start(ctx); dmErr != nil {
+					r.getLogger().WithError(dmErr).Warn("弹幕录制启动失败，继续录制视频")
+				} else {
+					// 停止旧的录制器（如果有）
+					r.currentFileLock.Lock()
+					old := r.danmakuRec
+					r.danmakuRec = rec
+					r.currentFileLock.Unlock()
+					if old != nil {
+						old.Stop()
+					}
+				}
+			} else {
+				r.getLogger().Warn("弹幕录制已启用但无法解析房间ID: " + r.Live.GetRawUrl())
+			}
+		case "抖音":
+			assFile := fileName[:strings.LastIndex(fileName, ".")] + ".ass"
+			roomID := extractDouyinRoomID(r.Live)
+			cookies := extractCookiesString(r.Live)
+			if roomID != "" {
+				r.getLogger().Infof("弹幕录制已启用，房间ID: %s, 输出: %s", roomID, assFile)
+				rec := danmaku.NewDouyinDanmakuRecorder(roomID, cookies, assFile, resolvedConfig.Danmaku, r.getLogger().Entry)
+				if dmErr := rec.Start(ctx); dmErr != nil {
+					r.getLogger().WithError(dmErr).Warn("弹幕录制启动失败，继续录制视频")
+				} else {
+					// 停止旧的录制器（如果有）
+					r.currentFileLock.Lock()
+					old := r.danmakuRec
+					r.danmakuRec = rec
+					r.currentFileLock.Unlock()
+					if old != nil {
+						old.Stop()
+					}
+				}
+			} else {
+				r.getLogger().Warn("弹幕录制已启用但无法解析房间ID: " + r.Live.GetRawUrl())
+			}
+		}
+	} else {
+		// 弹幕未启用，清理旧的录制器
+		r.currentFileLock.Lock()
+		old := r.danmakuRec
+		r.danmakuRec = nil
+		r.currentFileLock.Unlock()
+		if old != nil {
+			old.Stop()
+		}
+	}
+
 	// 设置当前录制文件路径
 	r.setCurrentFilePath(fileName)
 
@@ -453,6 +567,17 @@ func (r *recorder) tryRecord(ctx context.Context) {
 
 	// 清除当前录制文件路径
 	r.setCurrentFilePath("")
+
+	// 停止弹幕录制并累积文件
+	r.currentFileLock.RLock()
+	dmRec := r.danmakuRec
+	r.currentFileLock.RUnlock()
+	if dmRec != nil {
+		dmRec.Stop()
+		if fi, dmErr := os.Stat(dmRec.OutputFile()); dmErr == nil && fi.Size() > 0 {
+			r.accumulateRecordedFiles(dmRec.OutputFile())
+		}
+	}
 
 	if err != nil {
 		r.getLogger().WithError(err).Error("failed to parse live stream")
@@ -589,6 +714,17 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	}
 }
 
+// stopRetryForExplicitOffline 在平台已明确给出“已下播”信号时补发一次 LiveEnd，
+// 让 recorder manager 走正常回收流程，避免 recorder 永久停留在“录制准备中”。
+func (r *recorder) stopRetryForExplicitOffline(err error) bool {
+	if !errors.Is(err, live.ErrLiveOffline) {
+		return false
+	}
+	r.getLogger().WithError(err).Info("stream source explicitly reported offline, dispatching LiveEnd")
+	r.ed.DispatchEvent(events.NewEvent(listeners.LiveEnd, r.Live))
+	return true
+}
+
 func (r *recorder) selectPreferredStream(streamInfos []*live.StreamUrlInfo) (ret *live.StreamUrlInfo) {
 	// 如果没有可用流，直接返回 nil
 	if len(streamInfos) == 0 {
@@ -720,6 +856,69 @@ func (r *recorder) sendAccumulatedSummary() {
 	notify.SendRecordingSummary(r.getLogger(), info.HostName, r.Live.GetPlatformCNName(), r.recordedFiles, outputPath)
 }
 
+func (r *recorder) logStreamURLRetry(err error) {
+	if configs.IsDebug() || !strings.EqualFold(r.Live.GetPlatformCNName(), "SOOP") {
+		r.warnStreamURLRetry(err, "failed to get stream url, will retry after 5s...", 0)
+		return
+	}
+
+	key := ""
+	if err != nil {
+		key = err.Error()
+	}
+
+	now := time.Now()
+
+	r.retryLogMu.Lock()
+	if key != r.lastRetryLogKey || r.lastRetryLogAt.IsZero() {
+		r.lastRetryLogKey = key
+		r.lastRetryLogAt = now
+		r.suppressedRetryLogCount = 0
+		r.retryLogMu.Unlock()
+		r.warnStreamURLRetry(err, "failed to get stream url, will retry after 5s...", 0)
+		return
+	}
+
+	if now.Sub(r.lastRetryLogAt) >= soopRetryWarnInterval {
+		suppressed := r.suppressedRetryLogCount
+		r.lastRetryLogAt = now
+		r.suppressedRetryLogCount = 0
+		r.retryLogMu.Unlock()
+		r.warnStreamURLRetry(err, "failed to get stream url, still retrying every 5s...", suppressed)
+		return
+	}
+
+	r.suppressedRetryLogCount++
+	r.retryLogMu.Unlock()
+}
+
+func (r *recorder) warnStreamURLRetry(err error, msg string, suppressed int) {
+	logger := r.getLogger()
+	if suppressed > 0 {
+		entry := logger.WithField("suppressed", suppressed)
+		if err != nil {
+			entry = entry.WithError(err)
+		}
+		entry.Warn(msg)
+		return
+	}
+
+	if err != nil {
+		logger.WithError(err).Warn(msg)
+		return
+	}
+	logger.Warn(msg)
+}
+
+func (r *recorder) resetRetryLogState() {
+	r.retryLogMu.Lock()
+	defer r.retryLogMu.Unlock()
+
+	r.lastRetryLogKey = ""
+	r.lastRetryLogAt = time.Time{}
+	r.suppressedRetryLogCount = 0
+}
+
 func (r *recorder) getParser() parser.Parser {
 	r.parserLock.RLock()
 	defer r.parserLock.RUnlock()
@@ -777,12 +976,21 @@ func (r *recorder) Close() {
 			r.getLogger().WithError(err).Warn("failed to end recorder")
 		}
 	}
+	// 停止弹幕录制器
+	r.currentFileLock.RLock()
+	dmRec := r.danmakuRec
+	r.currentFileLock.RUnlock()
+	if dmRec != nil {
+		dmRec.Stop()
+	}
 	r.getLogger().Info("Record End")
 	r.ed.DispatchEvent(events.NewEvent(RecorderStop, r.Live))
 }
 
 func (r *recorder) CloseForRestart() []notify.RecordingFileDetail {
+	r.recordedFilesMu.Lock()
 	r.suppressSummary = true
+	r.recordedFilesMu.Unlock()
 	r.Close()
 	<-r.done // 等待 run() 完全退出，确保最后一个文件已累积
 	r.recordedFilesMu.Lock()
@@ -916,6 +1124,12 @@ func (r *recorder) GetStatus() (map[string]interface{}, error) {
 	}
 	if len(r.currentStreamHeaders) > 0 {
 		status["stream_headers"] = sanitizeHeaders(r.currentStreamHeaders)
+	}
+	// 弹幕录制状态（与 currentFileLock 同步保护 danmakuRec 的并发访问）
+	if r.danmakuRec != nil {
+		for k, v := range r.danmakuRec.GetStatus() {
+			status[k] = v
+		}
 	}
 	r.currentFileLock.RUnlock()
 
@@ -1167,4 +1381,61 @@ func maskValue(v string) string {
 		return v[:4] + "***"
 	}
 	return v[:4] + "***" + v[len(v)-4:]
+}
+
+// extractRoomIDFromUrl extracts the numeric room ID from a Bilibili live URL path.
+// Returns 0 if the URL doesn't contain a valid room ID.
+func extractRoomIDFromUrl(rawUrl string) int {
+	u, err := url.Parse(rawUrl)
+	if err != nil {
+		return 0
+	}
+	paths := strings.Split(u.Path, "/")
+	if len(paths) < 2 {
+		return 0
+	}
+	id, err := strconv.Atoi(paths[1])
+	if err != nil {
+		return 0
+	}
+	return id
+}
+
+// extractCookiesString extracts cookies from the Live's cookie jar as a semicolon-separated string.
+func extractCookiesString(l live.Live) string {
+	opts := l.GetOptions()
+	if opts == nil || opts.Cookies == nil {
+		return ""
+	}
+	u, err := url.Parse(l.GetRawUrl())
+	if err != nil {
+		return ""
+	}
+	cookies := opts.Cookies.Cookies(u)
+	if len(cookies) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(cookies))
+	for _, c := range cookies {
+		parts = append(parts, c.Name+"="+c.Value)
+	}
+	return strings.Join(parts, "; ")
+}
+
+// extractDouyinRoomID 从抖音直播 URL 中提取房间号（字符串）。
+// 抖音房间号是数字字符串，直接从 URL 路径中提取。
+func extractDouyinRoomID(l live.Live) string {
+	u, err := url.Parse(l.GetRawUrl())
+	if err != nil {
+		return ""
+	}
+	paths := strings.Split(strings.Trim(u.Path, "/"), "/")
+	if len(paths) < 1 {
+		return ""
+	}
+	roomID := paths[0]
+	if roomID == "" {
+		return ""
+	}
+	return roomID
 }

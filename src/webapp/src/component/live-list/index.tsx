@@ -1655,6 +1655,30 @@ class LiveList extends React.Component<Props, IState> {
                                     <span style={configLabelStyle}>录制开始</span>
                                     <span>{detail.last_record_time || (detail.recording ? '获取中...' : '未在录制')}</span>
                                 </div>
+                                {detail.recorder_status?.danmaku_running !== undefined && (
+                                    <>
+                                        <div style={configRowStyle}>
+                                            <span style={configLabelStyle}>弹幕录制</span>
+                                            <Tag color={detail.recorder_status.danmaku_running ? 'cyan' : 'default'}>
+                                                {detail.recorder_status.danmaku_running ? '连接中' : '已停止'}
+                                            </Tag>
+                                        </div>
+                                        <div style={configRowStyle}>
+                                            <span style={configLabelStyle}>弹幕数量</span>
+                                            <span>{detail.recorder_status.danmaku_count ?? 0} 条</span>
+                                        </div>
+                                        {detail.recorder_status.danmaku_output && (
+                                            <div style={{ ...configRowStyle, borderBottom: 'none' }}>
+                                                <span style={configLabelStyle}>弹幕文件</span>
+                                                <Tooltip title={detail.recorder_status.danmaku_output}>
+                                                    <span style={{ maxWidth: 300, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'inline-block', verticalAlign: 'bottom' }}>
+                                                        {detail.recorder_status.danmaku_output.split(/[/\\]/).pop()}
+                                                    </span>
+                                                </Tooltip>
+                                            </div>
+                                        )}
+                                    </>
+                                )}
                             </div>
 
                             <Divider style={{ margin: '8px 0' }}>平台访问频率控制</Divider>

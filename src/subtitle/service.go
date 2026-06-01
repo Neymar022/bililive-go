@@ -39,6 +39,9 @@ type Metadata struct {
 	KeepSource             bool           `json:"keep_source"`
 	SourceExists           bool           `json:"source_exists"`
 	LastError              string         `json:"last_error,omitempty"`
+	ActualProvider         string         `json:"actual_provider,omitempty"`
+	ActualModel            string         `json:"actual_model,omitempty"`
+	ActualBurnProvider     string         `json:"actual_burn_provider,omitempty"`
 	RenderPreset           string         `json:"render_preset,omitempty"`
 	RendererStatus         Status         `json:"renderer_status,omitempty"`
 	RendererError          string         `json:"renderer_error,omitempty"`

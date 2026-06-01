@@ -41,6 +41,36 @@ func DecorateConfigNode(node *yaml.Node) {
 #  来判断是否需要删除原始 flv 文件。
 #  以下是一个在录制结束后将 flv 视频转换为同名 mp4 视频的示例：
 #  custom_commandline: '{{ .Ffmpeg }} -hide_banner -i "{{ .FileName }}" -c copy "{{ .FileName | trimSuffix (.FileName | ext)}}.mp4"'`, "")
+
+		setFieldComment(finishNode, "burn_subtitles",
+			`# 是否将 ASS 弹幕字幕硬编码（烧录）到视频中
+# 开启后会使用 FFmpeg 重编码视频，将字幕叠加到画面上
+# 需要同时开启弹幕录制（danmaku_enable）才有 ASS 文件可烧录`, "")
+
+		setFieldComment(finishNode, "burn_subtitles_codec",
+			`# 烧录字幕时使用的视频编码器
+# 默认 libx264（H.264），兼容性最好
+# 可选 libx265（H.265，压缩率更高但编码更慢）`, "")
+
+		setFieldComment(finishNode, "burn_subtitles_crf",
+			`# 烧录字幕时的 CRF（恒定速率因子）质量值
+# 范围 0-51，数值越小画质越好，文件越大
+# 默认 18（视觉无损），推荐范围 15-23`, "")
+
+		setFieldComment(finishNode, "burn_subtitles_preset",
+			`# 烧录字幕时的编码预设
+# 影响编码速度和压缩率的平衡
+# 可选: ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+# 默认 medium，越慢画质越好但耗时越长`, "")
+
+		setFieldComment(finishNode, "burn_delete_ass",
+			`# 烧录完成后是否删除原始 ASS 字幕文件
+# 默认 false（保留 ASS 文件）`, "")
+
+		setFieldComment(finishNode, "burn_delete_source",
+			`# 烧录完成后是否删除源视频文件（如 MP4/FLV）
+# 默认 false（保留源文件，同时存在源文件和烧录后的 MKV）
+# 开启后仅保留烧录完成的 MKV 文件`, "")
 	}
 
 	setFieldHeadComment(root, "notify", "# 通知服务配置")

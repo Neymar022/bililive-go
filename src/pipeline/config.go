@@ -9,6 +9,7 @@ const (
 	StageNameFixFlv           = "fix_flv"
 	StageNameConvertMp4       = "convert_mp4"
 	StageNameSubtitleGenerate = "subtitle_generate"
+	StageNameBurnSubtitles    = "burn_subtitles"
 	StageNameExtractCover     = "extract_cover"
 	StageNameCloudUpload      = "cloud_upload"
 	StageNameCustomCmd        = "custom_command"
@@ -30,6 +31,16 @@ const (
 	OptionFileTypes = "file_types"
 	// OptionSubtitleScheduled 标记自动录播生成的字幕阶段，可被字幕定时队列延后。
 	OptionSubtitleScheduled = "scheduled"
+	// OptionCodec 视频编码器
+	OptionCodec = "codec"
+	// OptionCrf CRF 质量值
+	OptionCrf = "crf"
+	// OptionPreset 编码预设
+	OptionPreset = "preset"
+	// OptionBurnDeleteAss 烧录后是否删除 ASS 文件
+	OptionBurnDeleteAss = "burn_delete_ass"
+	// OptionBurnDeleteSource 烧录后是否删除源视频文件
+	OptionBurnDeleteSource = "burn_delete_source"
 )
 
 // OnRecordFinishedPipeline 扩展版的录制完成后配置
@@ -43,6 +54,12 @@ type OnRecordFinishedPipeline struct {
 	SaveCover             bool                 `yaml:"save_cover,omitempty" json:"save_cover,omitempty"`
 	CloudUpload           configs.CloudUpload  `yaml:"cloud_upload,omitempty" json:"cloud_upload,omitempty"`
 	UploadTiming          configs.UploadTiming `yaml:"upload_timing,omitempty" json:"upload_timing,omitempty"`
+	BurnSubtitles         bool                 `yaml:"burn_subtitles,omitempty" json:"burn_subtitles,omitempty"`
+	BurnSubtitlesCodec    string               `yaml:"burn_subtitles_codec,omitempty" json:"burn_subtitles_codec,omitempty"`
+	BurnSubtitlesCrf      string               `yaml:"burn_subtitles_crf,omitempty" json:"burn_subtitles_crf,omitempty"`
+	BurnSubtitlesPreset   string               `yaml:"burn_subtitles_preset,omitempty" json:"burn_subtitles_preset,omitempty"`
+	BurnDeleteAss         bool                 `yaml:"burn_delete_ass,omitempty" json:"burn_delete_ass,omitempty"`
+	BurnDeleteSource      bool                 `yaml:"burn_delete_source,omitempty" json:"burn_delete_source,omitempty"`
 
 	// 新格式字段
 	Pipeline *PipelineConfig `yaml:"pipeline,omitempty" json:"pipeline,omitempty"`
@@ -83,14 +100,28 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 		})
 	}
 
-	// 3. 封面提取
+	// 3. 弹幕字幕烧录（在 MP4 转换和自动字幕生成之后，封面提取之前）
+	if legacy.BurnSubtitles {
+		stages = append(stages, StageConfig{
+			Name: StageNameBurnSubtitles,
+			Options: map[string]any{
+				OptionCodec:            legacy.BurnSubtitlesCodec,
+				OptionCrf:              legacy.BurnSubtitlesCrf,
+				OptionPreset:           legacy.BurnSubtitlesPreset,
+				OptionBurnDeleteAss:    legacy.BurnDeleteAss,
+				OptionBurnDeleteSource: legacy.BurnDeleteSource,
+			},
+		})
+	}
+
+	// 4. 封面提取
 	if legacy.SaveCover {
 		stages = append(stages, StageConfig{
 			Name: StageNameExtractCover,
 		})
 	}
 
-	// 4. 云上传
+	// 5. 云上传
 	if legacy.CloudUpload.Enable && legacy.CloudUpload.StorageName != "" {
 		stages = append(stages, StageConfig{
 			Name: StageNameCloudUpload,
@@ -102,7 +133,7 @@ func ConvertLegacyConfig(legacy *configs.OnRecordFinished) *PipelineConfig {
 		})
 	}
 
-	// 5. 自定义命令（在最后执行）
+	// 6. 自定义命令（在最后执行）
 	if legacy.CustomCommandline != "" {
 		stages = append(stages, StageConfig{
 			Name: StageNameCustomCmd,

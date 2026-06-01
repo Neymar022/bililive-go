@@ -81,6 +81,15 @@ interface EffectiveConfig {
   };
   timeout_in_us: number;
   timeout_in_seconds: number;
+  danmaku_enable: boolean;
+  danmaku: {
+    font_size: number;
+    font_name: string;
+    scroll_time: number;
+    resolution: string;
+    outline: number;
+    opacity: number;
+  };
   notify: {
     send_recording_summary: boolean;
     telegram: {
@@ -825,6 +834,11 @@ const GlobalSettings: React.FC<{
           <ConfigField label="自定义命令" description="录制完成后执行的自定义命令，设置后会忽略转换MP4设置">
             <Form.Item name={['on_record_finished', 'custom_commandline']} noStyle>
               <TextArea rows={3} placeholder="留空则不执行自定义命令" style={{ width: 500 }} />
+            </Form.Item>
+          </ConfigField>
+          <ConfigField label="烧录弹幕字幕" description="将 ASS 弹幕字幕硬编码到视频中（需要开启弹幕录制）">
+            <Form.Item name={['on_record_finished', 'burn_subtitles']} valuePropName="checked" noStyle>
+              <Switch />
             </Form.Item>
           </ConfigField>
         </Card>

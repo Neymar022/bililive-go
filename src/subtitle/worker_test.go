@@ -61,13 +61,59 @@ func TestProcessFilePreservesFinalizeFailureDetail(t *testing.T) {
 	assert.Contains(t, err.Error(), "publish burned output")
 }
 
+func TestProcessFileParsesRetryLaterWorkerCode(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(writer).Encode(map[string]string{
+			"code":   "mac_transcriber_unavailable",
+			"detail": "Mac 转写服务不可用，等待恢复后重试",
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := ProcessFile(server.URL, ProcessRequest{})
+
+	require.Error(t, err)
+	var httpErr *WorkerHTTPError
+	require.ErrorAs(t, err, &httpErr)
+	assert.Equal(t, http.StatusServiceUnavailable, httpErr.StatusCode)
+	assert.Equal(t, "mac_transcriber_unavailable", httpErr.Code)
+	assert.True(t, IsMacTranscriberUnavailable(err))
+}
+
+func TestProcessFileWithRetryDoesNotRetryMacTranscriberUnavailable(t *testing.T) {
+	t.Setenv("SUBTITLE_WORKER_TIMEOUT", "5s")
+
+	var hits int
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		hits++
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusServiceUnavailable)
+		require.NoError(t, json.NewEncoder(writer).Encode(map[string]string{
+			"code":   "mac_transcriber_unavailable",
+			"detail": "Mac 转写服务不可用，等待恢复后重试",
+		}))
+	}))
+	t.Cleanup(server.Close)
+
+	_, err := ProcessFileWithRetry(server.URL, ProcessRequest{}, 3)
+
+	require.Error(t, err)
+	assert.True(t, IsMacTranscriberUnavailable(err))
+	assert.Equal(t, 1, hits, "Mac 不可用应交给 pipeline 重排，不应在一次执行里快速重试三次")
+}
+
 func TestProcessFileSendsEffectiveRenderPreset(t *testing.T) {
 	var request ProcessRequest
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, req *http.Request) {
 		require.NoError(t, json.NewDecoder(req.Body).Decode(&request))
 		writer.Header().Set("Content-Type", "application/json")
 		require.NoError(t, json.NewEncoder(writer).Encode(ProcessResponse{
-			ASSPath: "/tmp/video.ass",
+			ASSPath:            "/tmp/video.ass",
+			ActualProvider:     "remote-mac-mlx",
+			ActualModel:        "large-v3-turbo",
+			ActualBurnProvider: "remote-mac",
 		}))
 	}))
 	t.Cleanup(server.Close)
@@ -81,6 +127,9 @@ func TestProcessFileSendsEffectiveRenderPreset(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "vizard_classic_cn", request.BurnStyle.Preset)
 	assert.Equal(t, "/tmp/video.ass", response.ASSPath)
+	assert.Equal(t, "remote-mac-mlx", response.ActualProvider)
+	assert.Equal(t, "large-v3-turbo", response.ActualModel)
+	assert.Equal(t, "remote-mac", response.ActualBurnProvider)
 }
 
 func TestNewWorkerHTTPClientUsesLongerDefaultTimeout(t *testing.T) {

@@ -241,6 +241,9 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 		var deferred *DeferredExecution
 		if errors.As(err, &deferred) {
 			task.MarkDeferred(deferred.NotBefore, deferred.StageIndex, deferred.CurrentFiles)
+			if deferred.Err != nil {
+				task.ErrorMessage = deferred.Err.Error()
+			}
 			logrus.WithFields(logrus.Fields{
 				"task_id":    task.ID,
 				"stage":      deferred.StageName,

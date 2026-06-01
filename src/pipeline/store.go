@@ -311,23 +311,28 @@ func (s *SQLiteStore) GetPendingTasks(ctx context.Context, limit int) ([]*Pipeli
 			error_message, can_retry
 		FROM pipeline_tasks
 		WHERE status = ?
-		  AND (not_before IS NULL OR not_before <= ?)
 		ORDER BY created_at ASC
-		LIMIT ?
-	`, PipelineStatusPending, time.Now(), limit)
+	`, PipelineStatusPending)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	var tasks []*PipelineTask
+	now := time.Now()
 	for rows.Next() {
 		task, err := scanTaskFromRows(rows)
 		if err != nil {
 			logrus.WithError(err).Warn("failed to scan pending pipeline task")
 			continue
 		}
+		if task.NotBefore != nil && task.NotBefore.After(now) {
+			continue
+		}
 		tasks = append(tasks, task)
+		if limit > 0 && len(tasks) >= limit {
+			break
+		}
 	}
 
 	return tasks, rows.Err()
