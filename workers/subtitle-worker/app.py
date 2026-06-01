@@ -5,7 +5,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
-from worker_core import WorkerSafeError, transcribe_and_burn
+from worker_core import WorkerRetryLater, WorkerSafeError, transcribe_and_burn
 
 _logger = logging.getLogger("subtitle_worker")
 
@@ -64,6 +64,18 @@ def _parse_burn_chain() -> list[str]:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _parse_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    normalized = raw.strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
 @app.post("/api/v1/process")
 def process(req: ProcessRequest) -> dict[str, Any]:
     try:
@@ -83,8 +95,10 @@ def process(req: ProcessRequest) -> dict[str, Any]:
             dashscope_model=os.getenv("SUBTITLE_DASHSCOPE_MODEL", "qwen3-asr-flash-filetrans"),
             local_model=os.getenv("SUBTITLE_LOCAL_MODEL", "small"),
             local_compute_type=os.getenv("SUBTITLE_LOCAL_COMPUTE_TYPE", "int8"),
+            allow_cloud_asr=_parse_bool_env("SUBTITLE_ALLOW_CLOUD_ASR", True),
             mac_transcriber_url=os.getenv("SUBTITLE_MAC_TRANSCRIBER_URL"),
             mac_transcriber_token=os.getenv("SUBTITLE_MAC_TRANSCRIBER_TOKEN"),
+            mac_transcriber_model=os.getenv("SUBTITLE_MAC_TRANSCRIBER_MODEL", "large-v3-turbo"),
             mac_transcriber_timeout_seconds=float(os.getenv("SUBTITLE_MAC_TRANSCRIBER_TIMEOUT", "3600")),
             video_encoder=os.getenv("SUBTITLE_VIDEO_ENCODER", "software"),
             vaapi_device=os.getenv("SUBTITLE_VAAPI_DEVICE", "/dev/dri/renderD128"),
@@ -101,6 +115,11 @@ def process(req: ProcessRequest) -> dict[str, Any]:
             # DEFAULT_FFMPEG_TIMEOUT_SECONDS 三层对齐。
             mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "18000")),
         )
+    except WorkerRetryLater as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": exc.code, "message": str(exc)},
+        ) from exc
     except WorkerSafeError as exc:
         # message 已被 worker_core 标记为安全暴露：参数缺失/不支持的 provider 等。
         raise HTTPException(status_code=500, detail=str(exc)) from exc

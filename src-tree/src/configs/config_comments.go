@@ -133,7 +133,8 @@ func DecorateConfigNode(node *yaml.Node) {
 		setFieldHeadComment(root, "subtitle", "# 字幕增强配置")
 		setFieldComment(subtitleNode, "default_provider",
 			`# 默认字幕 provider
-# 可选值：dashscope、local-whisper`, "")
+# 可选值：auto、remote-mac-mlx、dashscope、local-whisper
+# 生产推荐 default_provider: auto + SUBTITLE_PROVIDER_CHAIN=remote-mac-mlx + SUBTITLE_ALLOW_CLOUD_ASR=false`, "")
 		setFieldComment(subtitleNode, "public_url_base",
 			`# DashScope 文件转写所需的外部可访问 /files 根地址
 # 仅使用 local-whisper 时可以留空`, "")

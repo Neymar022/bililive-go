@@ -136,7 +136,8 @@ subtitle:
   enabled: false
   auto_generate: true
   # 默认字幕 provider
-  # 可选值：dashscope、local-whisper
+  # 可选值：auto、remote-mac-mlx、dashscope、local-whisper
+  # 生产推荐 default_provider: auto + SUBTITLE_PROVIDER_CHAIN=remote-mac-mlx + SUBTITLE_ALLOW_CLOUD_ASR=false
   default_provider: dashscope
   retention_days: 7
   delete_source_on_completion: false

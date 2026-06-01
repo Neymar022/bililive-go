@@ -240,6 +240,7 @@ type PipelineTask struct {
 	CreatedAt      time.Time       `json:"created_at"`
 	StartedAt      *time.Time      `json:"started_at,omitempty"`
 	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
+	NotBefore      *time.Time      `json:"not_before,omitempty"`
 	ErrorMessage   string          `json:"error_message,omitempty"`
 	CanRetry       bool            `json:"can_retry"` // 是否可以重试
 }
@@ -283,6 +284,8 @@ func (pt *PipelineTask) MarkStarted() {
 	now := time.Now()
 	pt.Status = PipelineStatusRunning
 	pt.StartedAt = &now
+	pt.CompletedAt = nil
+	pt.NotBefore = nil
 }
 
 // MarkCompleted 标记任务完成
@@ -291,6 +294,22 @@ func (pt *PipelineTask) MarkCompleted() {
 	pt.Status = PipelineStatusCompleted
 	pt.CompletedAt = &now
 	pt.Progress = 100
+}
+
+// MarkRetryLater 标记任务等待外部依赖恢复后自动重试。
+func (pt *PipelineTask) MarkRetryLater(err error, delay time.Duration) {
+	if delay <= 0 {
+		delay = DefaultRetryLaterDelay
+	}
+	notBefore := time.Now().UTC().Add(delay)
+	pt.Status = PipelineStatusPending
+	pt.StartedAt = nil
+	pt.CompletedAt = nil
+	pt.NotBefore = &notBefore
+	pt.CanRetry = true
+	if err != nil {
+		pt.ErrorMessage = err.Error()
+	}
 }
 
 // MarkFailed 标记任务失败

@@ -28,6 +28,9 @@ type Record struct {
 	RetentionDeadline      *time.Time `json:"retention_deadline,omitempty"`
 	RecordedAt             *time.Time `json:"recorded_at,omitempty"`
 	LastError              string     `json:"last_error,omitempty"`
+	ActualProvider         string     `json:"actual_provider,omitempty"`
+	ActualModel            string     `json:"actual_model,omitempty"`
+	ActualBurnProvider     string     `json:"actual_burn_provider,omitempty"`
 	Segments               []Segment  `json:"segments,omitempty"`
 	KnowledgeSyncStatus    Status     `json:"knowledge_sync_status,omitempty"`
 	KnowledgeSyncTaskID    string     `json:"knowledge_sync_task_id,omitempty"`
@@ -171,6 +174,9 @@ func buildRecord(videoPath, libraryRoot, sourceRoot string, retentionDays int) (
 		record.KeepSource = metadata.KeepSource
 		record.SourceExists = metadata.SourceExists
 		record.LastError = metadata.LastError
+		record.ActualProvider = metadata.ActualProvider
+		record.ActualModel = metadata.ActualModel
+		record.ActualBurnProvider = metadata.ActualBurnProvider
 		record.Segments = metadata.Segments
 		record.KnowledgeSyncStatus = metadata.KnowledgeSyncStatus
 		record.KnowledgeSyncTaskID = metadata.KnowledgeSyncTaskID

@@ -20,6 +20,7 @@ import (
 type WorkerHTTPError struct {
 	StatusCode int
 	Body       string
+	Code       string
 }
 
 func (e *WorkerHTTPError) Error() string {
@@ -40,10 +41,15 @@ type ProcessRequest struct {
 }
 
 type ProcessResponse struct {
-	Segments     []Segment `json:"segments,omitempty"`
-	ASSPath      string    `json:"ass_path,omitempty"`
-	RenderPreset string    `json:"render_preset,omitempty"`
+	Segments           []Segment `json:"segments,omitempty"`
+	ASSPath            string    `json:"ass_path,omitempty"`
+	RenderPreset       string    `json:"render_preset,omitempty"`
+	ActualProvider     string    `json:"actual_provider,omitempty"`
+	ActualModel        string    `json:"actual_model,omitempty"`
+	ActualBurnProvider string    `json:"actual_burn_provider,omitempty"`
 }
+
+const macTranscriberUnavailableCode = "mac_transcriber_unavailable"
 
 const defaultSubtitleWorkerTimeout = 4 * time.Hour
 
@@ -135,11 +141,28 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if IsMacTranscriberUnavailable(err) {
+		return false
+	}
 	var httpErr *WorkerHTTPError
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode >= 500
 	}
 	return true
+}
+
+func IsMacTranscriberUnavailable(err error) bool {
+	if err == nil {
+		return false
+	}
+	var httpErr *WorkerHTTPError
+	if errors.As(err, &httpErr) {
+		if httpErr.Code == macTranscriberUnavailableCode {
+			return true
+		}
+		return strings.Contains(httpErr.Body, macTranscriberUnavailableCode)
+	}
+	return strings.Contains(err.Error(), macTranscriberUnavailableCode)
 }
 
 // retryBackoff 返回第 attempt 次失败后的等待时长（attempt 从 1 计）。
@@ -177,15 +200,11 @@ func postToWorker[T any](workerURL string, path string, req any) (T, error) {
 			body = body[len(body)-workerErrorTailBytes:]
 		}
 		message := strings.TrimSpace(string(body))
+		code := ""
 		if message != "" {
-			var payload struct {
-				Detail string `json:"detail"`
-			}
-			if err := json.Unmarshal(body, &payload); err == nil && payload.Detail != "" {
-				message = payload.Detail
-			}
+			code, message = parseWorkerErrorBody(body, message)
 		}
-		return response, &WorkerHTTPError{StatusCode: httpResp.StatusCode, Body: message}
+		return response, &WorkerHTTPError{StatusCode: httpResp.StatusCode, Body: message, Code: code}
 	}
 
 	if err := json.NewDecoder(httpResp.Body).Decode(&response); err != nil {
@@ -193,6 +212,43 @@ func postToWorker[T any](workerURL string, path string, req any) (T, error) {
 	}
 
 	return response, nil
+}
+
+func parseWorkerErrorBody(body []byte, fallback string) (string, string) {
+	var payload struct {
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Detail  json.RawMessage `json:"detail"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return "", fallback
+	}
+
+	code := payload.Code
+	message := payload.Message
+	if len(payload.Detail) > 0 && string(payload.Detail) != "null" {
+		var detailString string
+		if err := json.Unmarshal(payload.Detail, &detailString); err == nil {
+			message = detailString
+		} else {
+			var detailObject struct {
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal(payload.Detail, &detailObject); err == nil {
+				if detailObject.Code != "" {
+					code = detailObject.Code
+				}
+				if detailObject.Message != "" {
+					message = detailObject.Message
+				}
+			}
+		}
+	}
+	if message == "" {
+		message = fallback
+	}
+	return code, message
 }
 
 func newWorkerHTTPClient() *http.Client {

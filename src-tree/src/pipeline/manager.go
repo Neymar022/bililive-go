@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -226,8 +227,20 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 			task.MarkCancelled()
 			logrus.WithField("task_id", task.ID).Info("pipeline task cancelled")
 		} else {
-			task.MarkFailed(err)
-			logrus.WithError(err).WithField("task_id", task.ID).Error("pipeline task failed")
+			var retryLater *RetryLaterError
+			if errors.As(err, &retryLater) {
+				if currentFiles, ok := lastCompletedStageOutput(results); ok {
+					task.CurrentFiles = currentFiles
+				}
+				task.MarkRetryLater(err, retryLater.Delay)
+				logrus.WithError(err).WithFields(logrus.Fields{
+					"task_id":    task.ID,
+					"not_before": task.NotBefore,
+				}).Warn("pipeline task paused until dependency recovers")
+			} else {
+				task.MarkFailed(err)
+				logrus.WithError(err).WithField("task_id", task.ID).Error("pipeline task failed")
+			}
 		}
 	} else {
 		task.MarkCompleted()
@@ -246,6 +259,16 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 
 	// 广播任务状态变化
 	m.broadcastTaskUpdate(task)
+}
+
+func lastCompletedStageOutput(results []StageResult) ([]FileInfo, bool) {
+	for i := len(results) - 1; i >= 0; i-- {
+		result := results[i]
+		if result.Status == StageStatusCompleted && len(result.OutputFiles) > 0 {
+			return append([]FileInfo(nil), result.OutputFiles...), true
+		}
+	}
+	return nil, false
 }
 
 // broadcastTaskUpdate 广播任务更新事件
@@ -341,6 +364,7 @@ func (m *Manager) RetryTask(taskID int64) error {
 	task.Status = PipelineStatusPending
 	task.StartedAt = nil
 	task.CompletedAt = nil
+	task.NotBefore = nil
 	task.ErrorMessage = ""
 	task.CurrentStage = 0
 	task.StageResults = nil
