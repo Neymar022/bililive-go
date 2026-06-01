@@ -10,10 +10,15 @@ on:
         description: Git ref to build and publish
         required: false
         default: master
+      platforms:
+        description: Docker platforms to publish
+        required: false
+        default: linux/amd64
 
 env:
   APP_IMAGE: neymar022/bililive-go-app
   WORKER_IMAGE: neymar022/bililive-go-subtitle-worker
+  PUBLISH_PLATFORMS: linux/amd64
 
 jobs:
   publish-images:
@@ -25,6 +30,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.ref || github.ref_name }}
+
+      - name: Resolve source metadata
+        id: source-meta
+        shell: bash
+        run: |
+          source_sha="$(git rev-parse HEAD)"
+          echo "sha=${source_sha}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${source_sha:0:7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -45,14 +58,16 @@ jobs:
           images: ${{ env.APP_IMAGE }}
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.source-meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source-meta.outputs.sha }}
 
       - name: Build and push app image
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ./Dockerfile.build-and-run
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event.inputs.platforms || env.PUBLISH_PLATFORMS }}
           push: true
           tags: ${{ steps.app-meta.outputs.tags }}
           labels: ${{ steps.app-meta.outputs.labels }}
@@ -82,7 +97,9 @@ jobs:
           images: ${{ env.WORKER_IMAGE }}
           tags: |
             type=raw,value=latest
-            type=sha,prefix=sha-
+            type=raw,value=sha-${{ steps.source-meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ steps.source-meta.outputs.sha }}
 
       - name: Build and push subtitle worker image
         if: steps.worker-context.outputs.exists == 'true'
@@ -90,7 +107,7 @@ jobs:
         with:
           context: ${{ steps.worker-context.outputs.context }}
           file: ${{ steps.worker-context.outputs.file }}
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ github.event.inputs.platforms || env.PUBLISH_PLATFORMS }}
           push: true
           tags: ${{ steps.worker-meta.outputs.tags }}
           labels: ${{ steps.worker-meta.outputs.labels }}
