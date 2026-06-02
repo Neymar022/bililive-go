@@ -171,10 +171,15 @@ interface SubtitleSettingsState {
     library_root?: string;
     public_url_base?: string;
     retention_days?: number;
+    min_library_video_duration_seconds?: number;
     language?: string;
     schedule?: {
       enabled?: boolean;
       run_at?: string;
+    };
+    knowledge_sync?: {
+      min_video_duration_seconds?: number;
+      [key: string]: any;
     };
     local?: Record<string, any>;
     cloud?: Record<string, any>;
@@ -283,6 +288,39 @@ export const SubtitleSettingsPanel: React.FC = () => {
     });
   };
 
+  const updateMinLibraryVideoDuration = (value: number | null) => {
+    setSettings(prev => {
+      if (!prev?.subtitle) {
+        return prev;
+      }
+      return {
+        ...prev,
+        subtitle: {
+          ...prev.subtitle,
+          min_library_video_duration_seconds: value ?? 0,
+        },
+      };
+    });
+  };
+
+  const updateKnowledgeSyncMinVideoDuration = (value: number | null) => {
+    setSettings(prev => {
+      if (!prev?.subtitle) {
+        return prev;
+      }
+      return {
+        ...prev,
+        subtitle: {
+          ...prev.subtitle,
+          knowledge_sync: {
+            ...prev.subtitle.knowledge_sync,
+            min_video_duration_seconds: value ?? 0,
+          },
+        },
+      };
+    });
+  };
+
   if (loading && !settings) {
     return <Spin />;
   }
@@ -305,6 +343,32 @@ export const SubtitleSettingsPanel: React.FC = () => {
             </div>
           </Space>
           <Select value={preset} onChange={setPreset} options={SUBTITLE_PRESET_OPTIONS} style={{ width: 280 }} />
+          <Space direction="vertical" size={4}>
+            <div>媒体库发布最小时长（秒）</div>
+            <div style={{ color: '#666' }}>
+              小于等于该时长的视频不会发布到展示目录，也不会占用 UGREEN S01E 编号；0 表示不限制。
+            </div>
+            <InputNumber
+              min={0}
+              max={3600}
+              value={settings?.subtitle?.min_library_video_duration_seconds ?? 0}
+              onChange={updateMinLibraryVideoDuration}
+              style={{ width: 200 }}
+            />
+          </Space>
+          <Space direction="vertical" size={4}>
+            <div>BiliNote 同步最小时长（秒）</div>
+            <div style={{ color: '#666' }}>
+              小于等于该时长的字幕结果会标记为 skipped，不再触发 BiliNote 生成短视频笔记；0 表示不限制。
+            </div>
+            <InputNumber
+              min={0}
+              max={3600}
+              value={settings?.subtitle?.knowledge_sync?.min_video_duration_seconds ?? 0}
+              onChange={updateKnowledgeSyncMinVideoDuration}
+              style={{ width: 200 }}
+            />
+          </Space>
           <Space>
             <Button type="primary" icon={<SaveOutlined />} onClick={saveSubtitleSettings} loading={saving}>
               保存字幕设置

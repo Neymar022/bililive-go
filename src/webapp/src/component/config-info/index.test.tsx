@@ -190,6 +190,10 @@ describe('SubtitleSettingsPanel', () => {
                 enabled: false,
                 run_at: '02:00',
               },
+              min_library_video_duration_seconds: 600,
+              knowledge_sync: {
+                min_video_duration_seconds: 600,
+              },
               burn_style: {
                 preset: 'vizard_classic_cn',
               },
@@ -212,6 +216,8 @@ describe('SubtitleSettingsPanel', () => {
 
     expect(await view.findByText('字幕渲染预设')).toBeInTheDocument();
     expect(view.getByText('自动字幕凌晨队列')).toBeInTheDocument();
+    expect(view.getByText('媒体库发布最小时长（秒）')).toBeInTheDocument();
+    expect(view.getByText('BiliNote 同步最小时长（秒）')).toBeInTheDocument();
     const presetSelect = view.getByDisplayValue('vizard_classic_cn') as HTMLSelectElement;
     expect(presetSelect).toBeInTheDocument();
 
@@ -237,5 +243,7 @@ describe('SubtitleSettingsPanel', () => {
       enabled: true,
       run_at: '02:00',
     });
+    expect(requestBody.subtitle.min_library_video_duration_seconds).toBe(600);
+    expect(requestBody.subtitle.knowledge_sync.min_video_duration_seconds).toBe(600);
   });
 });

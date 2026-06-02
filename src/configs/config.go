@@ -457,6 +457,7 @@ type Bark struct {
 const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
 const DefaultSubtitleRenderPreset = "vizard_classic_cn"
 const DefaultSubtitleKnowledgeSyncTimeoutSeconds = 30
+const DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds = 3
 const DefaultSubtitleScheduleRunAt = "02:00"
 
 type SubtitleLocalConfig struct {
@@ -470,22 +471,23 @@ type SubtitleCloudConfig struct {
 }
 
 type SubtitleKnowledgeSyncConfig struct {
-	Enabled            bool     `yaml:"enabled" json:"enabled"`
-	Endpoint           string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Token              string   `yaml:"token,omitempty" json:"token,omitempty"`
-	ProviderID         string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
-	ModelName          string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
-	GenerateNote       bool     `yaml:"generate_note" json:"generate_note"`
-	NonBlocking        bool     `yaml:"non_blocking" json:"non_blocking"`
-	Format             []string `yaml:"format,omitempty" json:"format,omitempty"`
-	Link               *bool    `yaml:"link,omitempty" json:"link,omitempty"`
-	Screenshot         *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
-	Style              string   `yaml:"style,omitempty" json:"style,omitempty"`
-	Extras             string   `yaml:"extras,omitempty" json:"extras,omitempty"`
-	VideoUnderstanding *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
-	VideoInterval      int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
-	GridSize           []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
-	TimeoutSeconds     int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	Enabled                 bool     `yaml:"enabled" json:"enabled"`
+	Endpoint                string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token                   string   `yaml:"token,omitempty" json:"token,omitempty"`
+	ProviderID              string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
+	ModelName               string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
+	GenerateNote            bool     `yaml:"generate_note" json:"generate_note"`
+	NonBlocking             bool     `yaml:"non_blocking" json:"non_blocking"`
+	Format                  []string `yaml:"format,omitempty" json:"format,omitempty"`
+	Link                    *bool    `yaml:"link,omitempty" json:"link,omitempty"`
+	Screenshot              *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
+	Style                   string   `yaml:"style,omitempty" json:"style,omitempty"`
+	Extras                  string   `yaml:"extras,omitempty" json:"extras,omitempty"`
+	VideoUnderstanding      *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
+	VideoInterval           int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
+	GridSize                []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
+	TimeoutSeconds          int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	MinVideoDurationSeconds int      `yaml:"min_video_duration_seconds" json:"min_video_duration_seconds"`
 }
 
 func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
@@ -513,6 +515,13 @@ func (s SubtitleKnowledgeSyncConfig) GetTimeout() time.Duration {
 		return time.Duration(DefaultSubtitleKnowledgeSyncTimeoutSeconds) * time.Second
 	}
 	return time.Duration(s.TimeoutSeconds) * time.Second
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetMinVideoDuration() time.Duration {
+	if s.MinVideoDurationSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(s.MinVideoDurationSeconds) * time.Second
 }
 
 type SubtitleScheduleConfig struct {
@@ -584,14 +593,15 @@ type SubtitleConfig struct {
 	// - retention_days=N 走后台定期清理（covers KeepSource=false 但 immediate 失败时的兜底）
 	// 默认 false 保守——升级镜像不会破坏现有部署存量数据。运维显式启用后才删。
 	// per-record KeepSource=true 仍优先生效（"这条特别保留"）。
-	DeleteSourceOnCompletion bool                        `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
-	Language                 string                      `yaml:"language" json:"language"`
-	Local                    SubtitleLocalConfig         `yaml:"local" json:"local"`
-	Cloud                    SubtitleCloudConfig         `yaml:"cloud" json:"cloud"`
-	Schedule                 SubtitleScheduleConfig      `yaml:"schedule" json:"schedule"`
-	KnowledgeSync            SubtitleKnowledgeSyncConfig `yaml:"knowledge_sync" json:"knowledge_sync"`
-	BurnStyle                SubtitleBurnStyle           `yaml:"burn_style" json:"burn_style"`
-	UpdatedAt                time.Time                   `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
+	DeleteSourceOnCompletion       bool                        `yaml:"delete_source_on_completion" json:"delete_source_on_completion"`
+	MinLibraryVideoDurationSeconds int                         `yaml:"min_library_video_duration_seconds" json:"min_library_video_duration_seconds"`
+	Language                       string                      `yaml:"language" json:"language"`
+	Local                          SubtitleLocalConfig         `yaml:"local" json:"local"`
+	Cloud                          SubtitleCloudConfig         `yaml:"cloud" json:"cloud"`
+	Schedule                       SubtitleScheduleConfig      `yaml:"schedule" json:"schedule"`
+	KnowledgeSync                  SubtitleKnowledgeSyncConfig `yaml:"knowledge_sync" json:"knowledge_sync"`
+	BurnStyle                      SubtitleBurnStyle           `yaml:"burn_style" json:"burn_style"`
+	UpdatedAt                      time.Time                   `yaml:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 func (s SubtitleConfig) GetEffectiveSourceRoot(outPutPath string) string {
@@ -606,6 +616,13 @@ func (s SubtitleConfig) GetEffectiveLibraryRoot(outPutPath string) string {
 		return s.LibraryRoot
 	}
 	return outPutPath
+}
+
+func (s SubtitleConfig) GetMinLibraryVideoDuration() time.Duration {
+	if s.MinLibraryVideoDurationSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(s.MinLibraryVideoDurationSeconds) * time.Second
 }
 
 func (s SubtitleConfig) GetWorkerURL() string {
@@ -1118,10 +1135,11 @@ var defaultConfig = Config{
 			Model:  "qwen3-asr-flash-filetrans",
 		},
 		KnowledgeSync: SubtitleKnowledgeSyncConfig{
-			Enabled:        false,
-			GenerateNote:   true,
-			NonBlocking:    true,
-			TimeoutSeconds: DefaultSubtitleKnowledgeSyncTimeoutSeconds,
+			Enabled:                 false,
+			GenerateNote:            true,
+			NonBlocking:             true,
+			TimeoutSeconds:          DefaultSubtitleKnowledgeSyncTimeoutSeconds,
+			MinVideoDurationSeconds: DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds,
 		},
 		Schedule: SubtitleScheduleConfig{
 			Enabled: false,
