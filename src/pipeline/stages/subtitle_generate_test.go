@@ -356,6 +356,154 @@ func TestSubtitleGenerateSkipsKnowledgeSyncForTooShortTranscript(t *testing.T) {
 	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
 }
 
+func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "建筑师 linkai - 2026-06-01 19-10-00 - 设计师还在加班画图吗？进来看看！.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "建筑师 linkai", "Season 01", "建筑师 linkai.S01E0020.2026-06-01 - 设计师还在加班画图吗？进来看看！.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request subtitle.ProcessRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, os.WriteFile(request.OutputVideoPath, []byte("burned"), 0o644))
+		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:03,000\n同场续段\n"), 0o644))
+		assPath := strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass"
+		require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
+			ASSPath: assPath,
+			Segments: []subtitle.Segment{
+				{Index: 1, Start: "00:00:00,000", End: "00:00:03,000", Text: "同场续段"},
+			},
+		}))
+	}))
+	defer worker.Close()
+
+	knowledgeCalls := 0
+	var capturedPayload struct {
+		SourceID      string `json:"source_id"`
+		LiveSessionID string `json:"live_session_id"`
+		ModelName     string `json:"model_name"`
+		Style         string `json:"style"`
+		SourceVideos  []struct {
+			TaskID          string `json:"task_id"`
+			SourceVideoPath string `json:"source_video_path"`
+			SubtitlePath    string `json:"subtitle_path"`
+		} `json:"source_videos"`
+	}
+	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		knowledgeCalls++
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&capturedPayload))
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true}))
+	}))
+	defer knowledge.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	cfg.Subtitle.KnowledgeSync.ModelName = "qwen3.7-plus"
+	cfg.Subtitle.KnowledgeSync.Style = "教程"
+	cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds = 600
+	cfg.Subtitle.KnowledgeSync.LiveSessionQuietWindowSeconds = 0
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		TaskID: 620,
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform:      "哔哩哔哩",
+			HostName:      "建筑师 linkai",
+			RoomName:      "设计师还在加班画图吗？进来看看！",
+			LiveSessionID: "session-20260601-linkai",
+		},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+	require.NoError(t, err)
+	require.Len(t, output, 3)
+	assert.Equal(t, 1, knowledgeCalls, "同场直播续段不能因为自身时长低于阈值而跳过 BiliNote ingest")
+	assert.Equal(t, "live-session:session-20260601-linkai", capturedPayload.SourceID)
+	assert.Equal(t, "session-20260601-linkai", capturedPayload.LiveSessionID)
+	assert.Equal(t, "qwen3.7-plus", capturedPayload.ModelName)
+	assert.Equal(t, "教程", capturedPayload.Style)
+	require.Len(t, capturedPayload.SourceVideos, 1)
+	assert.Equal(t, "bililive-go-620", capturedPayload.SourceVideos[0].TaskID)
+	assert.Equal(t, libraryPath, capturedPayload.SourceVideos[0].SourceVideoPath)
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusQueued, metadata.KnowledgeSyncStatus)
+	assert.Equal(t, "bililive-go-620", metadata.KnowledgeSyncTaskID)
+}
+
+func TestSubtitleGenerateUsesCompletedSidecarWhenKnowledgeAggregationRetries(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	libraryPath, metadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "同场续段")
+
+	workerCalls := 0
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerCalls++
+		http.Error(w, "worker should not be called for completed subtitle sidecar", http.StatusInternalServerError)
+	}))
+	defer worker.Close()
+
+	knowledgeCalls := 0
+	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		knowledgeCalls++
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true}))
+	}))
+	defer knowledge.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	cfg.Subtitle.KnowledgeSync.LiveSessionQuietWindowSeconds = 0
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		TaskID: 620,
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform:      "哔哩哔哩",
+			HostName:      "建筑师 linkai",
+			RoomName:      "设计师还在加班画图吗？进来看看！",
+			LiveSessionID: "session-20260601-linkai",
+		},
+	}, []pipeline.FileInfo{
+		{Path: libraryPath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, output, 3)
+	assert.Equal(t, 0, workerCalls, "RetryLater 恢复时不应重复调用字幕 worker")
+	assert.Equal(t, 1, knowledgeCalls)
+
+	metadata, err := subtitle.LoadMetadata(metadataPath)
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusQueued, metadata.KnowledgeSyncStatus)
+	assert.Equal(t, "live-session:session-20260601-linkai", metadata.KnowledgeSyncSourceID)
+}
+
 func TestSubtitleGenerateSkipsLibraryPublishForTooShortVideo(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
@@ -390,6 +538,27 @@ func TestSubtitleGenerateSkipsLibraryPublishForTooShortVideo(t *testing.T) {
 
 	_, statErr := os.Stat(sourcePath)
 	assert.NoError(t, statErr, "跳过媒体库发布时默认保留源文件，便于人工复核")
+}
+
+func TestSubtitleGenerateDoesNotSkipLibraryPublishForSameLiveSessionShard(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "建筑师 linkai - 2026-06-01 23-31-11 - 设计师还在加班画图吗？进来看看！.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("short same-live source"), 0o644))
+
+	cfg := configs.NewConfig()
+	cfg.Subtitle.MinLibraryVideoDurationSeconds = 600
+	stage := &SubtitleGenerateStage{}
+
+	skipped, _, _ := stage.shouldSkipLibraryPublish(&pipeline.PipelineContext{
+		FFmpegPath: fakeFFmpegForDuration(t, "00:01:00.00"),
+		RecordInfo: pipeline.RecordInfo{
+			HostName:      "建筑师 linkai",
+			LiveSessionID: "session-20260601-linkai",
+		},
+	}, cfg.Subtitle, sourcePath, libraryRoot)
+
+	assert.False(t, skipped, "同场直播分段不应按自身时长过滤，否则无法参与最终聚合")
 }
 
 func TestSubtitleGenerateRemovesExistingLibraryLinkForTooShortVideo(t *testing.T) {

@@ -169,8 +169,9 @@ func DecorateConfigNode(node *yaml.Node) {
 # 仅使用 local-whisper 时可以留空`, "")
 		setFieldComment(subtitleNode, "min_library_video_duration_seconds",
 			`# 媒体库发布最小时长（秒）
-# 录制片段小于等于该值时，不发布到 library_root，也不占用 UGREEN 可见 S01E 编号
-# 0 表示不限制；生产可设 600 以只保留 10 分钟以上长视频`, "")
+# 仅用于过滤无法归属到同场直播 session 的独立短片段
+# 已识别为同场直播的分段不会按自身时长过滤，避免遗漏后续聚合
+# 0 表示不限制`, "")
 		scheduleNode := findNode(subtitleNode, "schedule")
 		if scheduleNode != nil {
 			setFieldComment(scheduleNode, "enabled",
@@ -202,8 +203,13 @@ func DecorateConfigNode(node *yaml.Node) {
 			setFieldComment(knowledgeSyncNode, "timeout_seconds", "# Bililive-go 等待 BiliNote 接收请求的超时时间", "")
 			setFieldComment(knowledgeSyncNode, "min_video_duration_seconds",
 				`# BiliNote 同步最小时长（秒）
-# 字幕内容小于等于该值时标记为 skipped，不触发 BiliNote 文档生成
-# 0 表示不限制；生产可设 600 以避免短片段生成笔记`, "")
+# 仅用于过滤无法归属到同场直播 session 的独立短字幕
+# 已识别为同场直播的分段不会按自身时长跳过，而会等待 session 聚合后统一提交
+# 0 表示不限制`, "")
+			setFieldComment(knowledgeSyncNode, "live_session_quiet_window_seconds",
+				`# 同场直播知识同步静默窗口（秒）
+# 新分段登记后等待该窗口无新增分段，再向 BiliNote 提交一次聚合 payload
+# 设为 0 表示不等待，通常仅用于测试或手动立即验证`, "")
 		}
 		burnStyleNode := findNode(subtitleNode, "burn_style")
 		if burnStyleNode != nil {

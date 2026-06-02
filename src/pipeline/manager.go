@@ -336,7 +336,14 @@ func (m *Manager) EnqueueRecordingTask(
 	}
 
 	// 创建任务
-	task := NewPipelineTask(NewRecordInfo(info), pipelineConfig, files)
+	recordInfo := NewRecordInfo(info)
+	if inst := instance.GetInstance(m.ctx); inst != nil {
+		recordInfo.LiveSessionID = liveSessionIDFromValue(m.ctx, inst.LiveStateStore, string(info.Live.GetLiveId()))
+		if recordInfo.LiveSessionID == "" {
+			recordInfo.LiveSessionID = liveSessionIDFromValue(m.ctx, inst.LiveStateManager, string(info.Live.GetLiveId()))
+		}
+	}
+	task := NewPipelineTask(recordInfo, pipelineConfig, files)
 
 	return m.EnqueueTask(task)
 }

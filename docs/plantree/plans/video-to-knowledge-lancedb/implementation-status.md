@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-05-28
+更新时间：2026-06-02
 
 ## State Ownership
 
@@ -36,6 +36,8 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
 
 ## Current Work
+
+2026-06-02 same-live session aggregation 已在隔离 worktree `worktrees/same-live-session-aggregation` / branch `codex/same-live-session-aggregation` 完成代码实现和本地测试，尚未提交、PR、构建镜像或部署 NAS。核心变更：`RecordInfo` 持久化 `live_session_id`；字幕完成后按 `live-session:<id>` 写入 `library_root/.knowledge_sessions/*.json` manifest；同场直播分段在 `knowledge_sync.live_session_quiet_window_seconds` 静默窗口内返回 `RetryLater`，窗口稳定后只向 BiliNote POST 一次聚合 payload；manifest 记录 `posted_content_hash` 防止未变化 session 重复 POST；RetryLater 恢复时若 `.subtitle.json` 已完成则跳过字幕 worker，只继续知识聚合；`min_library_video_duration_seconds` 和 `knowledge_sync.min_video_duration_seconds` 仅过滤无 live session 的独立短片段，不再按分段自身时长排除同场直播内容。最终验证：`GOCACHE=/tmp/bililive-go-build-cache go test ./src/... -count=1` 通过；`PATH=/Users/jansonhan/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH GOCACHE=/tmp/bililive-go-build-cache make build-web test` 通过；`PATH=/Users/jansonhan/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin:$PATH GOCACHE=/tmp/bililive-go-build-cache make bililive` 通过；`GOCACHE=/tmp/bililive-go-build-cache make check-agents` 通过；`git diff --check` 通过。注意：本机默认 Node `23.11.0` 与依赖 engine 不兼容，最终 CI 等价验证使用 Codex bundled Node `v24.14.0`。剩余验收：提交/PR；CI 通过后合并；master 发布 `latest` 后由 NAS 拉取验证。若后续做临时镜像 NAS 验证，必须恢复 compose/image tag 到 `latest`；Chrome 验收必须使用用户本地 Chrome + Computer Use，不使用沙箱 Chromium。
 
 已完成 BiliNote NAS backend 运行态 env 门禁修复。2026-05-28 16:51 +08 通过本机 Chrome/Dockge `.env` 编辑态恢复 backend 可读取的 machine ingest env 和 remote vector env，未在命令输出或 plan-tree 中写入真实 token；重新部署后 `GET /api/knowledge/runtime/machine` 返回 PR #40 build `sha=8b4b401c58b451169eadb782ef8a56f22893896c`，ingest token/user/user_exists 为 true，vector index active 为 remote `http://192.168.1.17:8495`。有效 `non_blocking=true` dry-run、非法 `non_blocking={"invalid": true}` schema 探针和 LanceDB `/healthz` 均已通过。执行层面曾停止在真实样本 payload 构建：2026-05-28 16:58 +08 已通过 Bililive-go HTTP API 找到已完成样本路径，但当时只能拿到任务元数据和最终 `.mp4/.srt/.ass` 路径。2026-05-28 17:21 +08 使用用户提供的 NAS SSH 凭据走只读路径取得 task `473` 最终 `.srt`，构建 1623 segment 的真实 payload；dry-run 返回 `drafts_count=15`、`accepted_count=15`。真实 `generate_note=true` + `non_blocking=true` ingest 立即返回 queued，证明请求非阻塞；后台生成了可见 note markdown，但知识入库失败于 `knowledge_items.id` 唯一约束冲突，未生成 `knowledge_sources/items`，LanceDB 只验证到 `/healthz` 可用。当时不再卡在字幕读取，而是卡在 BiliNote 文档优先知识入库的同批次 item id/dedupe 问题。
 
