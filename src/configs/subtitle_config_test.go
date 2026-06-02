@@ -21,6 +21,7 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Equal(t, "aliyun", cfg.Subtitle.Cloud.Vendor)
 	assert.Equal(t, "qwen3-asr-flash-filetrans", cfg.Subtitle.Cloud.Model)
 	assert.Equal(t, "zh", cfg.Subtitle.Language)
+	assert.Zero(t, cfg.Subtitle.MinLibraryVideoDurationSeconds)
 	assert.False(t, cfg.Subtitle.Schedule.Enabled)
 	assert.Equal(t, "02:00", cfg.Subtitle.Schedule.RunAt)
 	assert.False(t, cfg.Subtitle.KnowledgeSync.Enabled)
@@ -33,6 +34,7 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Zero(t, cfg.Subtitle.KnowledgeSync.VideoInterval)
 	assert.Empty(t, cfg.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, DefaultSubtitleKnowledgeSyncTimeoutSeconds, cfg.Subtitle.KnowledgeSync.TimeoutSeconds)
+	assert.Equal(t, DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds, cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
 	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
 	assert.Equal(t, 1018, cfg.Subtitle.BurnStyle.CardWidth)
@@ -135,6 +137,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = filepath.Join(cfg.OutPutPath, "video")
 	cfg.Subtitle.RetentionDays = 14
+	cfg.Subtitle.MinLibraryVideoDurationSeconds = 60
 	cfg.Subtitle.Schedule.Enabled = true
 	cfg.Subtitle.Schedule.RunAt = "02:00"
 	cfg.Subtitle.BurnStyle.FontSize = 28
@@ -158,6 +161,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.KnowledgeSync.VideoInterval = 4
 	cfg.Subtitle.KnowledgeSync.GridSize = []int{3, 3}
 	cfg.Subtitle.KnowledgeSync.TimeoutSeconds = 45
+	cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds = 6
 	cfg.Subtitle.UpdatedAt = time.Unix(1_763_200_000, 0).UTC()
 
 	blob, err := os.ReadFile("../../config.yml")
@@ -175,6 +179,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, roundTripped.Subtitle.Enabled)
 	assert.Equal(t, 14, roundTripped.Subtitle.RetentionDays)
+	assert.Equal(t, 60, roundTripped.Subtitle.MinLibraryVideoDurationSeconds)
 	assert.True(t, roundTripped.Subtitle.Schedule.Enabled)
 	assert.Equal(t, "02:00", roundTripped.Subtitle.Schedule.RunAt)
 	assert.Equal(t, 28, roundTripped.Subtitle.BurnStyle.FontSize)
@@ -204,6 +209,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, 4, roundTripped.Subtitle.KnowledgeSync.VideoInterval)
 	assert.Equal(t, []int{3, 3}, roundTripped.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, 45, roundTripped.Subtitle.KnowledgeSync.TimeoutSeconds)
+	assert.Equal(t, 6, roundTripped.Subtitle.KnowledgeSync.MinVideoDurationSeconds)
 }
 
 func boolValue(value bool) *bool {

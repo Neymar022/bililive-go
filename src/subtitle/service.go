@@ -19,6 +19,7 @@ const (
 	StatusRunning   Status = "running"
 	StatusCompleted Status = "completed"
 	StatusFailed    Status = "failed"
+	StatusSkipped   Status = "skipped"
 )
 
 type Segment struct {

@@ -64,10 +64,32 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 	if !cfg.Enabled {
 		return
 	}
-	s.commands = append(s.commands, "POST BiliNote /api/knowledge/ingest (non-blocking)")
 
 	taskID := knowledgeTaskID(ctx)
 	sourceID := knowledgeSourceID(libraryRoot, libraryPath)
+
+	if skipped, durationSeconds, minDuration := shouldSkipKnowledgeSyncForDuration(cfg, metadata); skipped {
+		now := time.Now().UTC()
+		metadata.KnowledgeSyncStatus = subtitle.StatusSkipped
+		metadata.KnowledgeSyncTaskID = taskID
+		metadata.KnowledgeSyncSourceID = sourceID
+		metadata.KnowledgeSyncError = fmt.Sprintf("skipped: video duration %.2fs at or below minimum %.0fs", durationSeconds, minDuration.Seconds())
+		metadata.KnowledgeSyncUpdatedAt = &now
+		if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
+			logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync skipped status")
+		}
+		logrus.WithFields(logrus.Fields{
+			"task_id":          taskID,
+			"source_id":        sourceID,
+			"duration_seconds": durationSeconds,
+			"minimum_seconds":  minDuration.Seconds(),
+		}).Info("subtitle_generate: skipped BiliNote knowledge sync for short video")
+		s.logs += fmt.Sprintf("知识同步已跳过（视频过短 %.2fs <= %.0fs）: %s\n", durationSeconds, minDuration.Seconds(), filepath.Base(libraryPath))
+		return
+	}
+
+	s.commands = append(s.commands, "POST BiliNote /api/knowledge/ingest (non-blocking)")
+
 	now := time.Now().UTC()
 	metadata.KnowledgeSyncStatus = subtitle.StatusRunning
 	metadata.KnowledgeSyncTaskID = taskID
@@ -227,6 +249,41 @@ func buildKnowledgeSegments(segments []subtitle.Segment) ([]knowledgeSegmentPayl
 		result = append(result, knowledgeSegmentPayload{Start: start, End: end, Text: text})
 	}
 	return result, nil
+}
+
+func shouldSkipKnowledgeSyncForDuration(cfg configs.SubtitleKnowledgeSyncConfig, metadata *subtitle.Metadata) (bool, float64, time.Duration) {
+	minDuration := cfg.GetMinVideoDuration()
+	if minDuration <= 0 || metadata == nil {
+		return false, 0, minDuration
+	}
+	durationSeconds, err := knowledgeTranscriptDurationSeconds(metadata.Segments)
+	if err != nil {
+		logrus.WithError(err).Warn("subtitle_generate: cannot evaluate transcript duration for knowledge sync skip")
+		return false, 0, minDuration
+	}
+	return durationSeconds <= minDuration.Seconds(), durationSeconds, minDuration
+}
+
+func knowledgeTranscriptDurationSeconds(segments []subtitle.Segment) (float64, error) {
+	var maxEnd float64
+	hasText := false
+	for _, segment := range segments {
+		if strings.TrimSpace(segment.Text) == "" {
+			continue
+		}
+		end, err := parseSubtitleTimestampSeconds(segment.End)
+		if err != nil {
+			return 0, fmt.Errorf("invalid subtitle segment end %q: %w", segment.End, err)
+		}
+		if end > maxEnd {
+			maxEnd = end
+		}
+		hasText = true
+	}
+	if !hasText {
+		return 0, nil
+	}
+	return maxEnd, nil
 }
 
 func parseSubtitleTimestampSeconds(value string) (float64, error) {

@@ -2,6 +2,7 @@ package stages
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -283,6 +284,150 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
 }
 
+func TestSubtitleGenerateSkipsKnowledgeSyncForTooShortTranscript(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "小燕子出口退税 - 2026-05-31 20-13-56 - 出口退税实操直播.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "小燕子出口退税", "Season 01", "小燕子出口退税.S01E0013.2026-05-31 - 出口退税实操直播.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request subtitle.ProcessRequest
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, os.WriteFile(request.OutputVideoPath, []byte("burned"), 0o644))
+		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:03,000\n短片段\n"), 0o644))
+		assPath := strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass"
+		require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
+			ASSPath: assPath,
+			Segments: []subtitle.Segment{
+				{Index: 1, Start: "00:00:00,000", End: "00:00:03,000", Text: "短片段"},
+			},
+		}))
+	}))
+	defer worker.Close()
+
+	knowledgeCalls := 0
+	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		knowledgeCalls++
+		require.NoError(t, json.NewEncoder(w).Encode(map[string]any{"ok": true}))
+	}))
+	defer knowledge.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.KnowledgeSync.Enabled = true
+	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
+	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds = 3
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		TaskID: 582,
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform: "哔哩哔哩",
+			HostName: "小燕子出口退税",
+			RoomName: "出口退税实操直播",
+		},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+	require.NoError(t, err)
+	require.Len(t, output, 3)
+	assert.Equal(t, 0, knowledgeCalls, "小于等于阈值的视频不应触发 BiliNote ingest")
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
+	assert.Equal(t, subtitle.StatusSkipped, metadata.KnowledgeSyncStatus)
+	assert.Equal(t, "bililive-go-582", metadata.KnowledgeSyncTaskID)
+	assert.Contains(t, metadata.KnowledgeSyncError, "at or below minimum")
+	assert.Equal(t, 0, metadata.KnowledgeSyncAttempts)
+	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
+}
+
+func TestSubtitleGenerateSkipsLibraryPublishForTooShortVideo(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "建筑师 linkai - 2026-06-01 23-31-11 - 设计师还在加班画图吗？进来看看！.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("short source"), 0o644))
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.MinLibraryVideoDurationSeconds = 60
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", "http://127.0.0.1:1")
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		FFmpegPath: fakeFFmpegForDuration(t, "00:01:00.00"),
+		Logger:     livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{HostName: "建筑师 linkai"},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, output, "小于等于阈值的视频不应继续进入字幕 worker 或媒体库输出")
+
+	matches, globErr := filepath.Glob(filepath.Join(libraryRoot, "建筑师 linkai", "Season 01", "*.mp4"))
+	require.NoError(t, globErr)
+	assert.Empty(t, matches, "过短视频不应创建 UGREEN 可见的 S01E 媒体库条目")
+
+	_, statErr := os.Stat(sourcePath)
+	assert.NoError(t, statErr, "跳过媒体库发布时默认保留源文件，便于人工复核")
+}
+
+func TestSubtitleGenerateRemovesExistingLibraryLinkForTooShortVideo(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("short source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.MinLibraryVideoDurationSeconds = 60
+	configs.SetCurrentConfig(cfg)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		FFmpegPath: fakeFFmpegForDuration(t, "00:01:00.00"),
+		Logger:     livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{HostName: "主播"},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.NoError(t, err)
+	assert.Empty(t, output)
+	_, libraryErr := os.Stat(libraryPath)
+	assert.True(t, os.IsNotExist(libraryErr), "已存在的短片段硬链接应从媒体库移除，避免占用 S01E 编号")
+	_, sourceErr := os.Stat(sourcePath)
+	assert.NoError(t, sourceErr, "移除媒体库硬链接不能删除源文件")
+}
+
 func TestBuildKnowledgePayloadPassesOptionalNoteOverrides(t *testing.T) {
 	link := true
 	screenshot := true
@@ -369,6 +514,7 @@ func TestSubtitleGenerateDoesNotFailWhenKnowledgeSyncFails(t *testing.T) {
 	cfg.Subtitle.KnowledgeSync.Enabled = true
 	cfg.Subtitle.KnowledgeSync.Endpoint = knowledge.URL + "/api/knowledge/ingest"
 	cfg.Subtitle.KnowledgeSync.Token = "test-token"
+	cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds = 0
 	configs.SetCurrentConfig(cfg)
 	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
 
@@ -663,4 +809,12 @@ func TestSubtitleGenerateAutoDeleteSurvivesMissingSource(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
 	assert.False(t, metadata.SourceExists, "外部已删，metadata.SourceExists 应反映现实")
+}
+
+func fakeFFmpegForDuration(t *testing.T, duration string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	script := fmt.Sprintf("#!/bin/sh\necho 'Duration: %s, start: 0.000000, bitrate: 0 kb/s' >&2\nexit 0\n", duration)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
 }
