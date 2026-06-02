@@ -11,6 +11,7 @@
 - Bililive-go/task `476` 自动样本已跑通：NAS app 运行验证 tag `sha-97c3f27`，字幕/烧录完成后自动非阻塞 POST BiliNote，`.subtitle.json` 写入 `knowledge_sync_status=queued` 和 `task_id=bililive-go-476`，BiliNote note `SUCCESS`，1 个 source 和 19 个 document-first item 成功落库，19 个 item 全部 `indexed`，远程 LanceDB `/search` 可命中该样本 item。
 - 连续自动样本已跑通：task `474`、`475`、`477`、`478` 均 pipeline completed 且 sidecar 写入 `knowledge_sync_status=queued`；BiliNote note/source 均成功，其中 `474/475/477` 共产生 7 个 indexed item 并被远程 LanceDB `/search` 命中，`478` 是 1 段字幕退化样本，source 成功但 item_count 为 0。
 - 当前运行态排队证据显示本批次 task 已在 21:33-22:39 +08 启动，`task_queue.max_concurrent=3`，没有发现仍在阻止本批次运行的 02:00-only 烧录 gate；观察到的等待更符合 pipeline/远端 burn 串行排队。
+- 同场直播分段聚合的本地实现已完成：Bililive-go 持久化 `live_session_id`，字幕完成后用 `.knowledge_sessions` manifest 聚合同一直播分段，静默窗口稳定后只 POST 一次 session-level BiliNote payload；RetryLater 恢复不重复调用字幕 worker；媒体库/知识同步最小时长仅过滤无 session 的独立短片段。最终验证已通过 `go test ./src/... -count=1`、`make build-web test`、`make bililive`、`make check-agents` 和 `git diff --check`。
 
 ## In Progress
 
@@ -21,10 +22,13 @@
   - LanceDB 不可达时降级。
 - 文档优先 + 字幕证据 + 非阻塞同步 + 可重建索引的跨仓库验证。
   - BiliNote 手动样本、Bililive-go 单样本和连续自动样本均已验证；剩余工作是发布治理、失败 smoke 和回填策略。
+- 同场直播聚合发布治理。
+  - 代码已本地验证，下一步为提交、PR、CI 和合并；master 发布 `latest` 后再做 NAS 拉取验证。
 
 ## Next
 
 - 决定 BiliNote `branch-vtok-473-b5544ce` 与 Bililive-go `sha-97c3f27` 的开 PR、合并、稳定 tag 或 NAS pin 策略；两个验证提交当前都尚未进入各自 `origin/master`。
+- 为 same-live session aggregation 创建 PR 前复查 diff；之后走临时镜像 NAS 验证，确认同一直播多分段只产生一条 BiliNote 笔记，且测试后 compose/image tag 恢复 `latest`。
 - 如需更强生产验收，执行受控失败 smoke：BiliNote 不可达或 bad endpoint 时只记录 `knowledge_sync_status=failed`，不影响 pipeline completed。
 - 小批量 backfill 前先确认发布 tag、失败 smoke、限流、失败恢复和 LanceDB rebuild 路径。
 - 建立 golden queries：`部署`、`Claude Code`、`字幕`、以及一个无关词。

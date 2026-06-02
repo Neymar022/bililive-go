@@ -458,6 +458,7 @@ const DefaultSubtitleWorkerURL = "http://subtitle-worker:8091"
 const DefaultSubtitleRenderPreset = "vizard_classic_cn"
 const DefaultSubtitleKnowledgeSyncTimeoutSeconds = 30
 const DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds = 3
+const DefaultSubtitleKnowledgeSyncLiveSessionQuietWindowSeconds = 300
 const DefaultSubtitleScheduleRunAt = "02:00"
 
 type SubtitleLocalConfig struct {
@@ -471,23 +472,24 @@ type SubtitleCloudConfig struct {
 }
 
 type SubtitleKnowledgeSyncConfig struct {
-	Enabled                 bool     `yaml:"enabled" json:"enabled"`
-	Endpoint                string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
-	Token                   string   `yaml:"token,omitempty" json:"token,omitempty"`
-	ProviderID              string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
-	ModelName               string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
-	GenerateNote            bool     `yaml:"generate_note" json:"generate_note"`
-	NonBlocking             bool     `yaml:"non_blocking" json:"non_blocking"`
-	Format                  []string `yaml:"format,omitempty" json:"format,omitempty"`
-	Link                    *bool    `yaml:"link,omitempty" json:"link,omitempty"`
-	Screenshot              *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
-	Style                   string   `yaml:"style,omitempty" json:"style,omitempty"`
-	Extras                  string   `yaml:"extras,omitempty" json:"extras,omitempty"`
-	VideoUnderstanding      *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
-	VideoInterval           int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
-	GridSize                []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
-	TimeoutSeconds          int      `yaml:"timeout_seconds" json:"timeout_seconds"`
-	MinVideoDurationSeconds int      `yaml:"min_video_duration_seconds" json:"min_video_duration_seconds"`
+	Enabled                       bool     `yaml:"enabled" json:"enabled"`
+	Endpoint                      string   `yaml:"endpoint,omitempty" json:"endpoint,omitempty"`
+	Token                         string   `yaml:"token,omitempty" json:"token,omitempty"`
+	ProviderID                    string   `yaml:"provider_id,omitempty" json:"provider_id,omitempty"`
+	ModelName                     string   `yaml:"model_name,omitempty" json:"model_name,omitempty"`
+	GenerateNote                  bool     `yaml:"generate_note" json:"generate_note"`
+	NonBlocking                   bool     `yaml:"non_blocking" json:"non_blocking"`
+	Format                        []string `yaml:"format,omitempty" json:"format,omitempty"`
+	Link                          *bool    `yaml:"link,omitempty" json:"link,omitempty"`
+	Screenshot                    *bool    `yaml:"screenshot,omitempty" json:"screenshot,omitempty"`
+	Style                         string   `yaml:"style,omitempty" json:"style,omitempty"`
+	Extras                        string   `yaml:"extras,omitempty" json:"extras,omitempty"`
+	VideoUnderstanding            *bool    `yaml:"video_understanding,omitempty" json:"video_understanding,omitempty"`
+	VideoInterval                 int      `yaml:"video_interval,omitempty" json:"video_interval,omitempty"`
+	GridSize                      []int    `yaml:"grid_size,omitempty" json:"grid_size,omitempty"`
+	TimeoutSeconds                int      `yaml:"timeout_seconds" json:"timeout_seconds"`
+	MinVideoDurationSeconds       int      `yaml:"min_video_duration_seconds" json:"min_video_duration_seconds"`
+	LiveSessionQuietWindowSeconds int      `yaml:"live_session_quiet_window_seconds" json:"live_session_quiet_window_seconds"`
 }
 
 func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
@@ -522,6 +524,13 @@ func (s SubtitleKnowledgeSyncConfig) GetMinVideoDuration() time.Duration {
 		return 0
 	}
 	return time.Duration(s.MinVideoDurationSeconds) * time.Second
+}
+
+func (s SubtitleKnowledgeSyncConfig) GetLiveSessionQuietWindow() time.Duration {
+	if s.LiveSessionQuietWindowSeconds <= 0 {
+		return 0
+	}
+	return time.Duration(s.LiveSessionQuietWindowSeconds) * time.Second
 }
 
 type SubtitleScheduleConfig struct {
@@ -1135,11 +1144,12 @@ var defaultConfig = Config{
 			Model:  "qwen3-asr-flash-filetrans",
 		},
 		KnowledgeSync: SubtitleKnowledgeSyncConfig{
-			Enabled:                 false,
-			GenerateNote:            true,
-			NonBlocking:             true,
-			TimeoutSeconds:          DefaultSubtitleKnowledgeSyncTimeoutSeconds,
-			MinVideoDurationSeconds: DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds,
+			Enabled:                       false,
+			GenerateNote:                  true,
+			NonBlocking:                   true,
+			TimeoutSeconds:                DefaultSubtitleKnowledgeSyncTimeoutSeconds,
+			MinVideoDurationSeconds:       DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds,
+			LiveSessionQuietWindowSeconds: DefaultSubtitleKnowledgeSyncLiveSessionQuietWindowSeconds,
 		},
 		Schedule: SubtitleScheduleConfig{
 			Enabled: false,

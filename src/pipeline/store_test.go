@@ -83,3 +83,26 @@ func TestSQLiteStorePendingTasksHonorsNotBefore(t *testing.T) {
 	assert.Equal(t, dueTask.ID, tasks[0].ID)
 	assert.Equal(t, pendingTask.ID, tasks[1].ID)
 }
+
+func TestSQLiteStorePreservesRecordInfoLiveSessionID(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "pipeline.db"))
+	require.NoError(t, err)
+	defer store.Close()
+
+	ctx := context.Background()
+	task := NewPipelineTask(
+		RecordInfo{
+			HostName:      "建筑师 linkai",
+			RoomName:      "设计师还在加班画图吗？进来看看！",
+			LiveSessionID: "session-20260601-linkai",
+		},
+		&PipelineConfig{Stages: []StageConfig{{Name: "passthrough"}}},
+		[]FileInfo{NewVideoFileInfo("/tmp/linkai.mp4")},
+	)
+
+	require.NoError(t, store.CreateTask(ctx, task))
+
+	stored, err := store.GetTask(ctx, task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "session-20260601-linkai", stored.RecordInfo.LiveSessionID)
+}

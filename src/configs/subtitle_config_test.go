@@ -35,6 +35,7 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.Empty(t, cfg.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, DefaultSubtitleKnowledgeSyncTimeoutSeconds, cfg.Subtitle.KnowledgeSync.TimeoutSeconds)
 	assert.Equal(t, DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds, cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds)
+	assert.Equal(t, DefaultSubtitleKnowledgeSyncLiveSessionQuietWindowSeconds, cfg.Subtitle.KnowledgeSync.LiveSessionQuietWindowSeconds)
 	assert.Equal(t, "vizard_classic_cn", cfg.Subtitle.BurnStyle.Preset)
 	assert.Equal(t, 50, cfg.Subtitle.BurnStyle.FontSize)
 	assert.Equal(t, 1018, cfg.Subtitle.BurnStyle.CardWidth)
@@ -162,6 +163,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	cfg.Subtitle.KnowledgeSync.GridSize = []int{3, 3}
 	cfg.Subtitle.KnowledgeSync.TimeoutSeconds = 45
 	cfg.Subtitle.KnowledgeSync.MinVideoDurationSeconds = 6
+	cfg.Subtitle.KnowledgeSync.LiveSessionQuietWindowSeconds = 120
 	cfg.Subtitle.UpdatedAt = time.Unix(1_763_200_000, 0).UTC()
 
 	blob, err := os.ReadFile("../../config.yml")
@@ -210,6 +212,7 @@ func TestSubtitleConfigMarshalRoundTrip(t *testing.T) {
 	assert.Equal(t, []int{3, 3}, roundTripped.Subtitle.KnowledgeSync.GridSize)
 	assert.Equal(t, 45, roundTripped.Subtitle.KnowledgeSync.TimeoutSeconds)
 	assert.Equal(t, 6, roundTripped.Subtitle.KnowledgeSync.MinVideoDurationSeconds)
+	assert.Equal(t, 120, roundTripped.Subtitle.KnowledgeSync.LiveSessionQuietWindowSeconds)
 }
 
 func boolValue(value bool) *bool {

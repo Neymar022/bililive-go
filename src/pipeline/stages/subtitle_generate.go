@@ -103,6 +103,31 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
 		metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"
 
+		if metadata, ok := loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath); ok {
+			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
+				return nil, err
+			}
+			s.logs += fmt.Sprintf("字幕结果已存在，跳过转写: %s\n", filepath.Base(libraryPath))
+			output = append(output,
+				pipeline.FileInfo{
+					Path:       libraryPath,
+					Type:       pipeline.FileTypeVideo,
+					SourcePath: file.Path,
+				},
+				pipeline.FileInfo{
+					Path:       metadata.SRTPath,
+					Type:       pipeline.FileTypeOther,
+					SourcePath: file.Path,
+				},
+				pipeline.FileInfo{
+					Path:       metadata.ASSPath,
+					Type:       pipeline.FileTypeOther,
+					SourcePath: file.Path,
+				},
+			)
+			continue
+		}
+
 		recordMeta := map[string]any{
 			"platform":   ctx.RecordInfo.Platform,
 			"host_name":  ctx.RecordInfo.HostName,
@@ -178,7 +203,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, err
 		}
 
-		s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata)
+		if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
+			return nil, err
+		}
 
 		// P11: 完成后立即删除源文件（节省存储空间）
 		// 触发条件：cfg.Subtitle.DeleteSourceOnCompletion=true + KeepSource=false +
@@ -218,6 +245,32 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 	return output, nil
 }
 
+func loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath string) (subtitle.Metadata, bool) {
+	metadata, err := subtitle.LoadMetadata(metadataPath)
+	if err != nil {
+		return subtitle.Metadata{}, false
+	}
+	if metadata.Status != subtitle.StatusCompleted || len(metadata.Segments) == 0 {
+		return subtitle.Metadata{}, false
+	}
+	if metadata.OutputPath == "" {
+		metadata.OutputPath = libraryPath
+	}
+	if metadata.SRTPath == "" {
+		metadata.SRTPath = srtPath
+	}
+	if metadata.ASSPath == "" {
+		metadata.ASSPath = assPath
+	}
+	if !fileExists(metadata.OutputPath) || !fileExists(metadata.SRTPath) || !fileExists(metadata.ASSPath) {
+		return subtitle.Metadata{}, false
+	}
+	if metadata.SourcePath != "" {
+		metadata.SourceExists = fileExists(metadata.SourcePath)
+	}
+	return metadata, true
+}
+
 func (s *SubtitleGenerateStage) GetCommands() []string {
 	return s.commands
 }
@@ -229,6 +282,9 @@ func (s *SubtitleGenerateStage) GetLogs() string {
 func (s *SubtitleGenerateStage) shouldSkipLibraryPublish(ctx *pipeline.PipelineContext, cfg configs.SubtitleConfig, filePath, libraryRoot string) (bool, float64, time.Duration) {
 	minDuration := cfg.GetMinLibraryVideoDuration()
 	if minDuration <= 0 {
+		return false, 0, minDuration
+	}
+	if ctx != nil && strings.TrimSpace(ctx.RecordInfo.LiveSessionID) != "" {
 		return false, 0, minDuration
 	}
 	durationSeconds, err := s.probeVideoDuration(ctx, filePath)

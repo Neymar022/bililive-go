@@ -54,11 +54,12 @@ func NewCoverFileInfo(path, sourcePath string) FileInfo {
 
 // RecordInfo 录制信息
 type RecordInfo struct {
-	LiveID    types.LiveID `json:"live_id"`
-	Platform  string       `json:"platform"`
-	HostName  string       `json:"host_name"`
-	RoomName  string       `json:"room_name"`
-	StartTime time.Time    `json:"start_time"`
+	LiveID        types.LiveID `json:"live_id"`
+	LiveSessionID string       `json:"live_session_id,omitempty"`
+	Platform      string       `json:"platform"`
+	HostName      string       `json:"host_name"`
+	RoomName      string       `json:"room_name"`
+	StartTime     time.Time    `json:"start_time"`
 }
 
 // NewRecordInfo 从 live.Info 创建录制信息

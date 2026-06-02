@@ -24,10 +24,12 @@ type knowledgeIngestPayload struct {
 	SourceID           string                    `json:"source_id"`
 	SourceType         string                    `json:"source_type"`
 	TaskID             string                    `json:"task_id,omitempty"`
+	LiveSessionID      string                    `json:"live_session_id,omitempty"`
 	Host               string                    `json:"host,omitempty"`
 	Title              string                    `json:"title"`
 	Topic              string                    `json:"topic,omitempty"`
 	SourceVideoPath    string                    `json:"source_video_path,omitempty"`
+	SourceVideos       []knowledgeSourcePayload  `json:"source_videos,omitempty"`
 	SourceURL          string                    `json:"source_url,omitempty"`
 	SubtitlePath       string                    `json:"subtitle_path,omitempty"`
 	Language           string                    `json:"language,omitempty"`
@@ -48,9 +50,30 @@ type knowledgeIngestPayload struct {
 }
 
 type knowledgeSegmentPayload struct {
-	Start float64 `json:"start"`
-	End   float64 `json:"end"`
-	Text  string  `json:"text"`
+	Start           float64 `json:"start"`
+	End             float64 `json:"end"`
+	Text            string  `json:"text"`
+	SourceIndex     int     `json:"source_index,omitempty"`
+	SourceVideoPath string  `json:"source_video_path,omitempty"`
+	SubtitlePath    string  `json:"subtitle_path,omitempty"`
+	LocalStart      float64 `json:"local_start,omitempty"`
+	LocalEnd        float64 `json:"local_end,omitempty"`
+}
+
+type knowledgeSourcePayload struct {
+	TaskID          string  `json:"task_id,omitempty"`
+	SourceID        string  `json:"source_id"`
+	SourceVideoPath string  `json:"source_video_path"`
+	SubtitlePath    string  `json:"subtitle_path,omitempty"`
+	Title           string  `json:"title,omitempty"`
+	Offset          float64 `json:"offset"`
+}
+
+type knowledgeSessionPayloadInput struct {
+	TaskID       string
+	LibraryPath  string
+	MetadataPath string
+	Metadata     *subtitle.Metadata
 }
 
 func (s *SubtitleGenerateStage) syncKnowledge(
@@ -60,15 +83,31 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 	libraryPath string,
 	metadataPath string,
 	metadata *subtitle.Metadata,
-) {
+) error {
+	return s.syncKnowledgeAt(ctx, cfg, libraryRoot, libraryPath, metadataPath, metadata, time.Now().UTC())
+}
+
+func (s *SubtitleGenerateStage) syncKnowledgeAt(
+	ctx *pipeline.PipelineContext,
+	cfg configs.SubtitleKnowledgeSyncConfig,
+	libraryRoot string,
+	libraryPath string,
+	metadataPath string,
+	metadata *subtitle.Metadata,
+	now time.Time,
+) error {
 	if !cfg.Enabled {
-		return
+		return nil
 	}
 
 	taskID := knowledgeTaskID(ctx)
 	sourceID := knowledgeSourceID(libraryRoot, libraryPath)
+	hasLiveSession := ctx != nil && strings.TrimSpace(ctx.RecordInfo.LiveSessionID) != ""
+	if hasLiveSession {
+		sourceID = "live-session:" + strings.TrimSpace(ctx.RecordInfo.LiveSessionID)
+	}
 
-	if skipped, durationSeconds, minDuration := shouldSkipKnowledgeSyncForDuration(cfg, metadata); skipped {
+	if skipped, durationSeconds, minDuration := shouldSkipKnowledgeSyncForDuration(cfg, metadata, hasLiveSession); skipped {
 		now := time.Now().UTC()
 		metadata.KnowledgeSyncStatus = subtitle.StatusSkipped
 		metadata.KnowledgeSyncTaskID = taskID
@@ -85,12 +124,16 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 			"minimum_seconds":  minDuration.Seconds(),
 		}).Info("subtitle_generate: skipped BiliNote knowledge sync for short video")
 		s.logs += fmt.Sprintf("知识同步已跳过（视频过短 %.2fs <= %.0fs）: %s\n", durationSeconds, minDuration.Seconds(), filepath.Base(libraryPath))
-		return
+		return nil
+	}
+
+	if hasLiveSession {
+		return s.syncLiveSessionKnowledgeAt(ctx, cfg, libraryRoot, libraryPath, metadataPath, metadata, now)
 	}
 
 	s.commands = append(s.commands, "POST BiliNote /api/knowledge/ingest (non-blocking)")
 
-	now := time.Now().UTC()
+	now = time.Now().UTC()
 	metadata.KnowledgeSyncStatus = subtitle.StatusRunning
 	metadata.KnowledgeSyncTaskID = taskID
 	metadata.KnowledgeSyncSourceID = sourceID
@@ -101,7 +144,9 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 		logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync running status")
 	}
 
-	payload, err := buildKnowledgeIngestPayload(ctx, cfg, libraryRoot, libraryPath, metadata)
+	var payload knowledgeIngestPayload
+	var err error
+	payload, err = buildKnowledgeIngestPayload(ctx, cfg, libraryRoot, libraryPath, metadata)
 	if err == nil {
 		err = postKnowledgeIngest(ctx, cfg, payload)
 	}
@@ -119,7 +164,7 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 			"source_id": sourceID,
 		}).Warn("subtitle_generate: BiliNote knowledge sync failed")
 		s.logs += fmt.Sprintf("知识同步失败（不阻塞）: %s\n", filepath.Base(libraryPath))
-		return
+		return nil
 	}
 
 	metadata.KnowledgeSyncStatus = subtitle.StatusQueued
@@ -128,6 +173,140 @@ func (s *SubtitleGenerateStage) syncKnowledge(
 		logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync queued status")
 	}
 	s.logs += fmt.Sprintf("知识同步已提交: %s\n", filepath.Base(libraryPath))
+	return nil
+}
+
+func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
+	ctx *pipeline.PipelineContext,
+	cfg configs.SubtitleKnowledgeSyncConfig,
+	libraryRoot string,
+	libraryPath string,
+	metadataPath string,
+	metadata *subtitle.Metadata,
+	now time.Time,
+) error {
+	sessionID := strings.TrimSpace(ctx.RecordInfo.LiveSessionID)
+	sourceID := "live-session:" + sessionID
+	taskID := knowledgeTaskID(ctx)
+	manifestPath := knowledgeSessionManifestPath(libraryRoot, sessionID)
+
+	knowledgeSessionManifestMu.Lock()
+	defer knowledgeSessionManifestMu.Unlock()
+
+	manifest, err := loadOrCreateKnowledgeSessionManifest(manifestPath, sessionID)
+	if err != nil {
+		return err
+	}
+	changed, err := registerKnowledgeSessionSource(&manifest, libraryRoot, knowledgeSessionPayloadInput{
+		TaskID:       taskID,
+		LibraryPath:  libraryPath,
+		MetadataPath: metadataPath,
+		Metadata:     metadata,
+	}, now)
+	if err != nil {
+		return err
+	}
+	if changed {
+		if err := saveKnowledgeSessionManifest(manifestPath, manifest); err != nil {
+			return err
+		}
+	}
+
+	quietWindow := cfg.GetLiveSessionQuietWindow()
+	if quietWindow > 0 {
+		readyAt := manifest.UpdatedAt.Add(quietWindow)
+		if now.Before(readyAt) {
+			delay := readyAt.Sub(now)
+			metadata.KnowledgeSyncStatus = subtitle.StatusQueued
+			metadata.KnowledgeSyncTaskID = taskID
+			metadata.KnowledgeSyncSourceID = sourceID
+			metadata.KnowledgeSyncError = fmt.Sprintf("waiting for same live session aggregation until %s", readyAt.Format(time.RFC3339))
+			metadata.KnowledgeSyncUpdatedAt = &now
+			if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
+				logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync wait status")
+			}
+			s.logs += fmt.Sprintf("知识同步等待同场直播聚合: %s\n", filepath.Base(libraryPath))
+			return pipeline.NewRetryLaterError(fmt.Errorf("waiting for same live session aggregation"), delay)
+		}
+	}
+
+	contentHash := knowledgeSessionManifestContentHash(manifest)
+	if manifest.PostedContentHash == contentHash && contentHash != "" {
+		metadata.KnowledgeSyncStatus = subtitle.StatusQueued
+		metadata.KnowledgeSyncTaskID = taskID
+		metadata.KnowledgeSyncSourceID = sourceID
+		metadata.KnowledgeSyncError = ""
+		metadata.KnowledgeSyncUpdatedAt = &now
+		if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
+			logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync queued status")
+		}
+		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", filepath.Base(libraryPath))
+		return nil
+	}
+
+	inputs, err := knowledgeSessionInputsFromManifest(manifest)
+	if err != nil {
+		return err
+	}
+	payload, err := buildKnowledgeSessionIngestPayload(ctx, cfg, libraryRoot, inputs)
+	if err != nil {
+		return err
+	}
+
+	s.commands = append(s.commands, "POST BiliNote /api/knowledge/ingest (same-live aggregation, non-blocking)")
+	markKnowledgeSessionSources(manifest, subtitle.StatusRunning, sourceID, "", now, true)
+	err = postKnowledgeIngest(ctx, cfg, payload)
+	if err != nil {
+		errorMessage := sanitizeKnowledgeSyncError(err)
+		markKnowledgeSessionSources(manifest, subtitle.StatusFailed, sourceID, errorMessage, now, false)
+		logrus.WithError(err).WithFields(logrus.Fields{
+			"task_id":         taskID,
+			"source_id":       sourceID,
+			"live_session_id": sessionID,
+		}).Warn("subtitle_generate: BiliNote same-live knowledge sync failed")
+		s.logs += fmt.Sprintf("同场直播知识同步失败（不阻塞）: %s\n", filepath.Base(libraryPath))
+		return nil
+	}
+
+	manifest.PostedContentHash = contentHash
+	manifest.PostedAt = &now
+	for index := range manifest.Sources {
+		manifest.Sources[index].LastSubmittedAt = &now
+	}
+	if err := saveKnowledgeSessionManifest(manifestPath, manifest); err != nil {
+		return err
+	}
+	markKnowledgeSessionSources(manifest, subtitle.StatusQueued, sourceID, "", now, false)
+	s.logs += fmt.Sprintf("同场直播知识同步已提交: %s\n", filepath.Base(libraryPath))
+	return nil
+}
+
+func markKnowledgeSessionSources(
+	manifest knowledgeSessionManifest,
+	status subtitle.Status,
+	sourceID string,
+	errorMessage string,
+	now time.Time,
+	incrementAttempts bool,
+) {
+	for _, source := range manifest.Sources {
+		metadata, err := subtitle.LoadMetadata(source.MetadataPath)
+		if err != nil {
+			logrus.WithError(err).WithField("metadata", source.MetadataPath).Warn("subtitle_generate: failed to load session metadata for knowledge status")
+			continue
+		}
+		metadata.KnowledgeSyncStatus = status
+		metadata.KnowledgeSyncTaskID = source.TaskID
+		metadata.KnowledgeSyncSourceID = sourceID
+		metadata.KnowledgeSyncError = errorMessage
+		metadata.KnowledgeSyncUpdatedAt = &now
+		if incrementAttempts {
+			metadata.KnowledgeSyncAttempts++
+		}
+		if err := subtitle.SaveMetadata(source.MetadataPath, metadata); err != nil {
+			logrus.WithError(err).WithField("metadata", source.MetadataPath).Warn("subtitle_generate: failed to save session knowledge status")
+		}
+	}
 }
 
 func buildKnowledgeIngestPayload(
@@ -179,6 +358,107 @@ func buildKnowledgeIngestPayload(
 		VideoInterval:      cfg.VideoInterval,
 		GridSize:           append([]int(nil), cfg.GridSize...),
 	}
+	return payload, nil
+}
+
+func buildKnowledgeSessionIngestPayload(
+	ctx *pipeline.PipelineContext,
+	cfg configs.SubtitleKnowledgeSyncConfig,
+	libraryRoot string,
+	inputs []knowledgeSessionPayloadInput,
+) (knowledgeIngestPayload, error) {
+	if len(inputs) == 0 {
+		return knowledgeIngestPayload{}, fmt.Errorf("knowledge session sync has no segment inputs")
+	}
+	sessionID := ""
+	host := ""
+	topic := ""
+	if ctx != nil {
+		sessionID = strings.TrimSpace(ctx.RecordInfo.LiveSessionID)
+		host = ctx.RecordInfo.HostName
+		topic = ctx.RecordInfo.RoomName
+	}
+	if sessionID == "" {
+		return knowledgeIngestPayload{}, fmt.Errorf("knowledge session sync requires live_session_id")
+	}
+
+	sourceID := "live-session:" + sessionID
+	title := strings.TrimSuffix(filepath.Base(inputs[0].LibraryPath), filepath.Ext(inputs[0].LibraryPath))
+	payload := knowledgeIngestPayload{
+		SourceID:           sourceID,
+		SourceType:         "bililive-go",
+		TaskID:             knowledgeTaskID(ctx),
+		LiveSessionID:      sessionID,
+		Host:               host,
+		Title:              title,
+		Topic:              topic,
+		SourceVideoPath:    inputs[0].LibraryPath,
+		GenerateNote:       cfg.GenerateNote,
+		NonBlocking:        cfg.NonBlocking,
+		ModelName:          cfg.GetModelName(),
+		ProviderID:         cfg.GetProviderID(),
+		Format:             append([]string(nil), cfg.Format...),
+		Link:               cfg.Link,
+		Screenshot:         cfg.Screenshot,
+		Style:              cfg.Style,
+		Extras:             cfg.Extras,
+		VideoUnderstanding: cfg.VideoUnderstanding,
+		VideoInterval:      cfg.VideoInterval,
+		GridSize:           append([]int(nil), cfg.GridSize...),
+	}
+
+	var offset float64
+	var allSegments []subtitle.Segment
+	language := ""
+	for sourceIndex, input := range inputs {
+		if input.Metadata == nil {
+			return knowledgeIngestPayload{}, fmt.Errorf("knowledge session input %d has no metadata", sourceIndex)
+		}
+		sourceID := knowledgeSourceID(libraryRoot, input.LibraryPath)
+		sourcePayload := knowledgeSourcePayload{
+			TaskID:          input.TaskID,
+			SourceID:        sourceID,
+			SourceVideoPath: input.LibraryPath,
+			SubtitlePath:    input.Metadata.SRTPath,
+			Title:           strings.TrimSuffix(filepath.Base(input.LibraryPath), filepath.Ext(input.LibraryPath)),
+			Offset:          offset,
+		}
+		payload.SourceVideos = append(payload.SourceVideos, sourcePayload)
+		if payload.SubtitlePath == "" {
+			payload.SubtitlePath = input.Metadata.SRTPath
+		}
+		if language == "" {
+			language = input.Metadata.Language
+		}
+
+		segments, err := buildKnowledgeSegments(input.Metadata.Segments)
+		if err != nil {
+			return knowledgeIngestPayload{}, err
+		}
+		var maxEnd float64
+		for _, segment := range segments {
+			localStart := segment.Start
+			localEnd := segment.End
+			if localEnd > maxEnd {
+				maxEnd = localEnd
+			}
+			segment.Start = offset + localStart
+			segment.End = offset + localEnd
+			segment.SourceIndex = sourceIndex
+			segment.SourceVideoPath = input.LibraryPath
+			segment.SubtitlePath = input.Metadata.SRTPath
+			segment.LocalStart = localStart
+			segment.LocalEnd = localEnd
+			payload.Segments = append(payload.Segments, segment)
+		}
+		allSegments = append(allSegments, input.Metadata.Segments...)
+		offset += maxEnd
+	}
+	if len(payload.Segments) == 0 {
+		return knowledgeIngestPayload{}, fmt.Errorf("knowledge session sync has no transcript segments")
+	}
+	payload.Language = language
+	payload.ContentHash = knowledgeContentHash(sourceID, language, allSegments)
 	return payload, nil
 }
 
@@ -251,7 +531,7 @@ func buildKnowledgeSegments(segments []subtitle.Segment) ([]knowledgeSegmentPayl
 	return result, nil
 }
 
-func shouldSkipKnowledgeSyncForDuration(cfg configs.SubtitleKnowledgeSyncConfig, metadata *subtitle.Metadata) (bool, float64, time.Duration) {
+func shouldSkipKnowledgeSyncForDuration(cfg configs.SubtitleKnowledgeSyncConfig, metadata *subtitle.Metadata, hasLiveSession bool) (bool, float64, time.Duration) {
 	minDuration := cfg.GetMinVideoDuration()
 	if minDuration <= 0 || metadata == nil {
 		return false, 0, minDuration
@@ -261,7 +541,7 @@ func shouldSkipKnowledgeSyncForDuration(cfg configs.SubtitleKnowledgeSyncConfig,
 		logrus.WithError(err).Warn("subtitle_generate: cannot evaluate transcript duration for knowledge sync skip")
 		return false, 0, minDuration
 	}
-	return durationSeconds <= minDuration.Seconds(), durationSeconds, minDuration
+	return shouldSkipStandaloneKnowledgeArtifact(durationSeconds, hasLiveSession, minDuration), durationSeconds, minDuration
 }
 
 func knowledgeTranscriptDurationSeconds(segments []subtitle.Segment) (float64, error) {
