@@ -30,6 +30,7 @@ type knowledgeIngestPayload struct {
 	Topic              string                    `json:"topic,omitempty"`
 	SourceVideoPath    string                    `json:"source_video_path,omitempty"`
 	SourceVideos       []knowledgeSourcePayload  `json:"source_videos,omitempty"`
+	MediaSegments      []knowledgeSourcePayload  `json:"media_segments,omitempty"`
 	SourceURL          string                    `json:"source_url,omitempty"`
 	SubtitlePath       string                    `json:"subtitle_path,omitempty"`
 	Language           string                    `json:"language,omitempty"`
@@ -424,6 +425,7 @@ func buildKnowledgeSessionIngestPayload(
 			Offset:          offset,
 		}
 		payload.SourceVideos = append(payload.SourceVideos, sourcePayload)
+		payload.MediaSegments = append(payload.MediaSegments, sourcePayload)
 		if payload.SubtitlePath == "" {
 			payload.SubtitlePath = input.Metadata.SRTPath
 		}

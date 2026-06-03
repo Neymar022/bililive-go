@@ -60,6 +60,8 @@ func TestBuildKnowledgeSessionIngestPayloadKeepsPerSegmentSourceEvidence(t *test
 	require.Len(t, payload.SourceVideos, 2)
 	assert.Equal(t, "bililive-go-619", payload.SourceVideos[0].TaskID)
 	assert.Equal(t, "bililive-go-620", payload.SourceVideos[1].TaskID)
+	require.Len(t, payload.MediaSegments, 2)
+	assert.Equal(t, payload.SourceVideos, payload.MediaSegments)
 	require.Len(t, payload.Segments, 2)
 	assert.Equal(t, 0, payload.Segments[0].SourceIndex)
 	assert.Equal(t, 1, payload.Segments[1].SourceIndex)
