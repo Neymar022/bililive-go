@@ -393,6 +393,11 @@ func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(
 			SourceVideoPath string `json:"source_video_path"`
 			SubtitlePath    string `json:"subtitle_path"`
 		} `json:"source_videos"`
+		MediaSegments []struct {
+			TaskID          string `json:"task_id"`
+			SourceVideoPath string `json:"source_video_path"`
+			SubtitlePath    string `json:"subtitle_path"`
+		} `json:"media_segments"`
 	}
 	knowledge := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		knowledgeCalls++
@@ -440,6 +445,8 @@ func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(
 	require.Len(t, capturedPayload.SourceVideos, 1)
 	assert.Equal(t, "bililive-go-620", capturedPayload.SourceVideos[0].TaskID)
 	assert.Equal(t, libraryPath, capturedPayload.SourceVideos[0].SourceVideoPath)
+	require.Len(t, capturedPayload.MediaSegments, 1)
+	assert.Equal(t, capturedPayload.SourceVideos, capturedPayload.MediaSegments)
 
 	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
 	require.NoError(t, err)
