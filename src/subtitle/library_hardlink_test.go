@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -62,6 +63,14 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	assert.Contains(t, string(nfoText), "<episode>1</episode>")
 	assert.Contains(t, string(nfoText), "<studio>哔哩哔哩</studio>")
 	require.FileExists(t, filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.jpg"))
+
+	showNFOText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	require.NoError(t, err)
+	assert.Contains(t, string(showNFOText), "<tvshow>")
+	assert.Contains(t, string(showNFOText), "<title>主播</title>")
+	assert.Contains(t, string(showNFOText), "<showtitle>主播</showtitle>")
+	assert.Contains(t, string(showNFOText), "<year>2026</year>")
+	assert.Contains(t, string(showNFOText), "<studio>哔哩哔哩</studio>")
 }
 
 // TestEnsureLibraryHardlink_IdempotentSameInode verifies that calling
@@ -252,6 +261,67 @@ func TestEnsureLibraryHardlink_RepairsMissingSidecarsForExistingHardlink(t *test
 	assert.Equal(t, targetPath, returnedPath)
 	require.FileExists(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.nfo"))
 	require.FileExists(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.jpg"))
+}
+
+func TestEnsureLibraryHardlink_RepairsIncompleteEpisodeNFOTitle(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 正确标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	targetPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 正确标题.mp4")
+	require.NoError(t, os.Link(sourcePath, targetPath))
+	nfoPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 正确标题.nfo")
+	require.NoError(t, os.WriteFile(nfoPath, []byte(strings.Join([]string{
+		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+		"<episodedetails>",
+		"  <showtitle>主播</showtitle>",
+		"  <episode>1</episode>",
+		"</episodedetails>",
+		"",
+	}, "\n")), 0o644))
+
+	returnedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
+	require.NoError(t, err)
+
+	assert.Equal(t, targetPath, returnedPath)
+	nfoText, err := os.ReadFile(nfoPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(nfoText), "<title>2026-03-20 - 正确标题</title>")
+	assert.Contains(t, string(nfoText), "<season>1</season>")
+	assert.Contains(t, string(nfoText), "<studio>bililive-go</studio>")
+}
+
+func TestEnsureLibraryHardlink_RepairsShowNFO(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	showDir := filepath.Join(libraryRoot, "主播")
+	seasonDir := filepath.Join(showDir, "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(showDir, "tvshow.nfo"), []byte(strings.Join([]string{
+		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+		"<tvshow>",
+		"  <title>主播</title>",
+		"</tvshow>",
+		"",
+	}, "\n")), 0o644))
+
+	_, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
+	require.NoError(t, err)
+
+	showNFOText, err := os.ReadFile(filepath.Join(showDir, "tvshow.nfo"))
+	require.NoError(t, err)
+	assert.Contains(t, string(showNFOText), "<title>主播</title>")
+	assert.Contains(t, string(showNFOText), "<showtitle>主播</showtitle>")
+	assert.Contains(t, string(showNFOText), "<year>2026</year>")
+	assert.Contains(t, string(showNFOText), "<studio>bililive-go</studio>")
 }
 
 // TestBuildEpisodeFilename_Basic checks the filename builder directly.
