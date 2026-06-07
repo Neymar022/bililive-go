@@ -69,8 +69,8 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			// Create the Plex-style hardlink in-process so the pipeline never fails
 			// due to a missing library entry.  P17: eliminate race condition.
 			libraryPath, err = subtitle.EnsureLibraryHardlink(
-				file.Path, libraryRoot,
-				ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime,
+				ctx.Ctx, file.Path, libraryRoot,
+				ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime, ctx.RecordInfo.Platform,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("subtitle_generate: failed to ensure library hardlink: %w", err)

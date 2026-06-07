@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime
@@ -29,7 +30,7 @@ DEFAULT_REPORT_DIR = "/volume2/docker/bililive-go/reports"
 PREFERRED_EXTENSIONS = [".mp4", ".mkv", ".mov", ".m4v", ".webm", ".avi", ".ts", ".flv"]
 PREFERRED_EXTENSION_RANK = {extension: index for index, extension in enumerate(PREFERRED_EXTENSIONS)}
 SHOW_MARKER_FILENAME = ".bililive-show"
-EPISODE_SIDECAR_SUFFIXES = (".nfo", ".srt", ".ass", ".subtitle.json")
+EPISODE_SIDECAR_SUFFIXES = (".nfo", ".jpg", ".srt", ".ass", ".subtitle.json")
 PROTECTED_SUBTITLE_STATUSES = {"queued", "running", "completed"}
 RAW_VIDEO_EXTENSIONS = {".flv"}
 EPISODE_TARGET_PATTERN = re.compile(
@@ -186,6 +187,62 @@ def ensure_text_file(path: Path, text: str, dry_run: bool) -> bool:
     return True
 
 
+def extract_episode_cover(source_path: Path, cover_path: Path, timeout_seconds: int = 60) -> bool:
+    ffmpeg = os.environ.get("FFMPEG", "ffmpeg")
+    temp_path = cover_path.with_name(f".{cover_path.stem}.tmp{cover_path.suffix}")
+    cover_path.parent.mkdir(parents=True, exist_ok=True)
+    if temp_path.exists():
+        temp_path.unlink()
+
+    for seek_at in ("00:00:01", "00:00:00"):
+        try:
+            result = subprocess.run(
+                [
+                    ffmpeg,
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-ss",
+                    seek_at,
+                    "-i",
+                    str(source_path),
+                    "-frames:v",
+                    "1",
+                    "-q:v",
+                    "2",
+                    "-y",
+                    str(temp_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            if temp_path.exists():
+                temp_path.unlink()
+            continue
+
+        if result.returncode == 0 and temp_path.exists() and temp_path.stat().st_size > 0:
+            temp_path.replace(cover_path)
+            return True
+
+        if temp_path.exists():
+            temp_path.unlink()
+    return False
+
+
+def ensure_episode_cover(source_path: Path, target_path: Path, dry_run: bool) -> Tuple[bool, bool]:
+    cover_path = target_path.with_suffix(".jpg")
+    if cover_path.exists() and cover_path.stat().st_size > 0:
+        return False, False
+    if dry_run:
+        return True, False
+    if extract_episode_cover(source_path=source_path, cover_path=cover_path):
+        return True, False
+    return False, True
+
+
 def ensure_subtitle_metadata(source_path: Path, target_path: Path, dry_run: bool) -> bool:
     metadata_path = target_path.with_suffix(".subtitle.json")
     metadata = {}
@@ -332,6 +389,68 @@ def episode_nfo_matches_identity(nfo_path: Path, alias_name: str, episode_number
     )
 
 
+def episode_number_from_episode_family_path(path: Path) -> Optional[int]:
+    name = path.name
+    if name.endswith(".subtitle.json"):
+        stem = name[: -len(".subtitle.json")]
+    elif path.suffix.lower() in set(PREFERRED_EXTENSIONS) | {".nfo", ".jpg", ".srt", ".ass"}:
+        stem = path.with_suffix("").name
+    else:
+        return None
+
+    match = EPISODE_TARGET_PATTERN.match(stem)
+    if not match or int(match.group("season")) != 1:
+        return None
+    return int(match.group("episode"))
+
+
+def episode_family_stem_path(path: Path) -> Optional[Path]:
+    name = path.name
+    if name.endswith(".subtitle.json"):
+        return path.with_name(name[: -len(".subtitle.json")])
+    if path.suffix.lower() in set(PREFERRED_EXTENSIONS) | {".nfo", ".jpg", ".srt", ".ass"}:
+        return path.with_suffix("")
+    return None
+
+
+def collect_existing_episode_targets(season_dir: Path) -> Dict[int, Set[Path]]:
+    if not season_dir.exists():
+        return {}
+    targets: Dict[int, Set[Path]] = defaultdict(set)
+    for path in season_dir.iterdir():
+        if not path.is_file():
+            continue
+        episode_number = episode_number_from_episode_family_path(path)
+        if episode_number is not None:
+            stem = episode_family_stem_path(path)
+            if stem is not None:
+                targets[episode_number].add(stem)
+    return targets
+
+
+def is_protected_episode_target(target_path: Path) -> bool:
+    metadata_path = target_path.with_suffix(".subtitle.json")
+    if not metadata_path.exists():
+        return False
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    return is_protected_subtitle_metadata(metadata)
+
+
+def can_reuse_existing_episode_target(target_path: Path, existing_episode_targets: Dict[int, Set[Path]]) -> bool:
+    episode_number = episode_number_from_episode_family_path(target_path)
+    if episode_number is None:
+        return True
+    if is_protected_episode_target(target_path):
+        return True
+
+    stem = target_path.with_suffix("")
+    existing_targets = existing_episode_targets.get(episode_number, set())
+    return not existing_targets or existing_targets == {stem}
+
+
 def repair_expected_episode_nfos(
     output_root: Path,
     expected_show_files: Dict[str, Set[Path]],
@@ -362,6 +481,28 @@ def repair_expected_episode_nfos(
     return updated_nfos
 
 
+def repair_expected_episode_covers(
+    output_root: Path,
+    expected_show_files: Dict[str, Set[Path]],
+    dry_run: bool,
+) -> Tuple[int, int]:
+    updated_covers = 0
+    cover_errors = 0
+    for expected_paths in expected_show_files.values():
+        for target_path in sorted(expected_paths):
+            if not target_path.exists() or not target_path.is_file():
+                continue
+            metadata = parse_episode_target_metadata(target_path, output_root=output_root)
+            if metadata is None:
+                continue
+            updated, failed = ensure_episode_cover(source_path=target_path, target_path=target_path, dry_run=dry_run)
+            if updated:
+                updated_covers += 1
+            if failed:
+                cover_errors += 1
+    return updated_covers, cover_errors
+
+
 def add_episode_family(expected_paths: Set[Path], episode_path: Path) -> None:
     expected_paths.add(episode_path)
     for suffix in EPISODE_SIDECAR_SUFFIXES:
@@ -381,6 +522,7 @@ def choose_episode_target_path(
     title: str,
     extension: str,
     allocated_episode_numbers: Set[int],
+    existing_episode_targets: Dict[int, Set[Path]],
 ) -> Tuple[int, Path]:
     while True:
         target_name = build_episode_filename(
@@ -391,15 +533,19 @@ def choose_episode_target_path(
             extension=extension,
         )
         target_path = season_dir / target_name
+        if target_path.exists():
+            try:
+                if source_path.stat().st_ino == target_path.stat().st_ino and can_reuse_existing_episode_target(
+                    target_path,
+                    existing_episode_targets,
+                ):
+                    return episode_number, target_path
+            except FileNotFoundError:
+                pass
         if episode_number in allocated_episode_numbers:
             episode_number += 1
             continue
         if target_path.exists():
-            try:
-                if source_path.stat().st_ino == target_path.stat().st_ino:
-                    return episode_number, target_path
-            except FileNotFoundError:
-                pass
             if should_preserve_rendered_video(source_path, target_path):
                 episode_number += 1
                 continue
@@ -523,6 +669,8 @@ def build_tv_library(
         "episodes": 0,
         "updated_links": 0,
         "updated_nfos": 0,
+        "updated_covers": 0,
+        "cover_errors": 0,
         "removed_files": 0,
         "removed_dirs": 0,
     }
@@ -550,7 +698,8 @@ def build_tv_library(
         if ensure_text_file(show_dir / "tvshow.nfo", tvshow_nfo, dry_run=dry_run):
             summary["updated_nfos"] += 1
 
-        allocated_episode_numbers: Set[int] = set()
+        existing_episode_targets = collect_existing_episode_targets(season_dir)
+        allocated_episode_numbers: Set[int] = set(existing_episode_targets)
         for index, item in enumerate(items, start=1):
             episode_number, target_path = choose_episode_target_path(
                 source_path=item.source_path,
@@ -561,8 +710,10 @@ def build_tv_library(
                 title=item.title,
                 extension=item.source_path.suffix,
                 allocated_episode_numbers=allocated_episode_numbers,
+                existing_episode_targets=existing_episode_targets,
             )
             allocated_episode_numbers.add(episode_number)
+            existing_episode_targets.setdefault(episode_number, set()).add(target_path.with_suffix(""))
             expected_show_files[alias_name].add(target_path)
             for suffix in EPISODE_SIDECAR_SUFFIXES:
                 expected_show_files[alias_name].add(target_path.with_suffix(suffix))
@@ -573,10 +724,19 @@ def build_tv_library(
                 recorded_at=item.recorded_at,
                 episode_number=episode_number,
             )
-            if ensure_hardlink(item.source_path, target_path, dry_run=dry_run):
-                summary["updated_links"] += 1
             if ensure_text_file(target_path.with_suffix(".nfo"), episode_nfo, dry_run=dry_run):
                 summary["updated_nfos"] += 1
+            updated_cover, cover_failed = ensure_episode_cover(
+                source_path=item.source_path,
+                target_path=target_path,
+                dry_run=dry_run,
+            )
+            if updated_cover:
+                summary["updated_covers"] += 1
+            if cover_failed:
+                summary["cover_errors"] += 1
+            if ensure_hardlink(item.source_path, target_path, dry_run=dry_run):
+                summary["updated_links"] += 1
             ensure_subtitle_metadata(item.source_path, target_path, dry_run=dry_run)
 
     summary["updated_nfos"] += repair_expected_episode_nfos(
@@ -584,6 +744,13 @@ def build_tv_library(
         expected_show_files=expected_show_files,
         dry_run=dry_run,
     )
+    repaired_covers, cover_errors = repair_expected_episode_covers(
+        output_root=output_root,
+        expected_show_files=expected_show_files,
+        dry_run=dry_run,
+    )
+    summary["updated_covers"] += repaired_covers
+    summary["cover_errors"] += cover_errors
     cleanup_summary = cleanup_managed_show_dirs(output_root=output_root, expected_show_files=expected_show_files, dry_run=dry_run)
     summary["removed_files"] += cleanup_summary["removed_files"]
     summary["removed_dirs"] += cleanup_summary["removed_dirs"]
