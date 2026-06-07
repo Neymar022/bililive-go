@@ -123,6 +123,37 @@ func buildEpisodeNFO(aliasName string, episodeNumber int, recordedAt time.Time, 
 	}, "\n")
 }
 
+func buildShowNFO(aliasName string, recordedAt time.Time, platform string) string {
+	aliasName = sanitizeComponent(aliasName)
+	if aliasName == "" {
+		aliasName = "未分类主播"
+	}
+	platform = sanitizeComponent(platform)
+	if platform == "" {
+		platform = "bililive-go"
+	}
+
+	aired := recordedAt.Format("2006-01-02")
+	plot := fmt.Sprintf("%s 的直播录屏剧集库。来源平台: %s。", aliasName, platform)
+
+	return strings.Join([]string{
+		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+		"<tvshow>",
+		fmt.Sprintf("  <title>%s</title>", xmlEscape(aliasName)),
+		fmt.Sprintf("  <showtitle>%s</showtitle>", xmlEscape(aliasName)),
+		fmt.Sprintf("  <sorttitle>%s</sorttitle>", xmlEscape(aliasName)),
+		fmt.Sprintf("  <year>%d</year>", recordedAt.Year()),
+		fmt.Sprintf("  <plot>%s</plot>", xmlEscape(plot)),
+		fmt.Sprintf("  <studio>%s</studio>", xmlEscape(platform)),
+		"  <genre>直播录屏</genre>",
+		"  <tag>直播录屏</tag>",
+		fmt.Sprintf("  <premiered>%s</premiered>", aired),
+		fmt.Sprintf("  <dateadded>%s</dateadded>", recordedAt.Format("2006-01-02 15:04:05")),
+		"</tvshow>",
+		"",
+	}, "\n")
+}
+
 func xmlEscape(s string) string {
 	replacer := strings.NewReplacer(
 		"&", "&amp;",
@@ -283,14 +314,58 @@ func ensureTextFile(path, text string) error {
 	return os.WriteFile(path, []byte(text), 0o644)
 }
 
-func episodeNFOHasIdentity(path, aliasName string, episodeNumber int) bool {
+func episodeNFOIsComplete(path, aliasName string, episodeNumber int, recordedAt time.Time, title, platform string) bool {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return false
 	}
 	text := string(content)
-	return strings.Contains(text, fmt.Sprintf("<showtitle>%s</showtitle>", xmlEscape(aliasName))) &&
-		strings.Contains(text, fmt.Sprintf("<episode>%d</episode>", episodeNumber))
+	title = sanitizeComponent(title)
+	if title == "" {
+		title = "未命名直播"
+	}
+	platform = sanitizeComponent(platform)
+	if platform == "" {
+		platform = "bililive-go"
+	}
+	displayTitle := fmt.Sprintf("%s - %s", recordedAt.Format("2006-01-02"), title)
+	return strings.Contains(text, fmt.Sprintf("<title>%s</title>", xmlEscape(displayTitle))) &&
+		strings.Contains(text, fmt.Sprintf("<showtitle>%s</showtitle>", xmlEscape(aliasName))) &&
+		strings.Contains(text, "<season>1</season>") &&
+		strings.Contains(text, fmt.Sprintf("<episode>%d</episode>", episodeNumber)) &&
+		strings.Contains(text, fmt.Sprintf("<studio>%s</studio>", xmlEscape(platform)))
+}
+
+func showNFOIsComplete(path, aliasName string, recordedAt time.Time, platform string) bool {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	text := string(content)
+	platform = sanitizeComponent(platform)
+	if platform == "" {
+		platform = "bililive-go"
+	}
+	return strings.Contains(text, "<tvshow>") &&
+		strings.Contains(text, fmt.Sprintf("<title>%s</title>", xmlEscape(aliasName))) &&
+		strings.Contains(text, fmt.Sprintf("<showtitle>%s</showtitle>", xmlEscape(aliasName))) &&
+		strings.Contains(text, fmt.Sprintf("<year>%d</year>", recordedAt.Year())) &&
+		strings.Contains(text, fmt.Sprintf("<studio>%s</studio>", xmlEscape(platform)))
+}
+
+func ensureLibraryShowNFO(showDir string, meta sourceFileMeta, platform string) error {
+	if err := os.MkdirAll(showDir, 0o755); err != nil {
+		return err
+	}
+	nfoPath := filepath.Join(showDir, "tvshow.nfo")
+	if showNFOIsComplete(nfoPath, meta.aliasName, meta.recordedAt, platform) {
+		return nil
+	}
+	nfo := buildShowNFO(meta.aliasName, meta.recordedAt, platform)
+	if err := ensureTextFile(nfoPath, nfo); err != nil {
+		return fmt.Errorf("EnsureLibraryHardlink: write show NFO %s: %w", nfoPath, err)
+	}
+	return nil
 }
 
 func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath string, meta sourceFileMeta, platform string) error {
@@ -300,12 +375,17 @@ func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath st
 	}
 
 	stem := sidecarStem(targetPath)
-	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+	seasonDir := filepath.Dir(targetPath)
+	showDir := filepath.Dir(seasonDir)
+	if err := ensureLibraryShowNFO(showDir, meta, platform); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(seasonDir, 0o755); err != nil {
 		return err
 	}
 
 	nfoPath := stem + ".nfo"
-	if !episodeNFOHasIdentity(nfoPath, meta.aliasName, episodeNumber) {
+	if !episodeNFOIsComplete(nfoPath, meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform) {
 		nfo := buildEpisodeNFO(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform)
 		if err := ensureTextFile(nfoPath, nfo); err != nil {
 			return fmt.Errorf("EnsureLibraryHardlink: write NFO %s: %w", nfoPath, err)
