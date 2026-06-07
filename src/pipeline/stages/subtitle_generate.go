@@ -104,6 +104,7 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"
 
 		if metadata, ok := loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath); ok {
+			s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
 			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
 				return nil, err
 			}
@@ -203,22 +204,10 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, err
 		}
 
+		s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
+
 		if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
 			return nil, err
-		}
-
-		// P11: 完成后立即删除源文件（节省存储空间）
-		// 触发条件：cfg.Subtitle.DeleteSourceOnCompletion=true + KeepSource=false +
-		// 源文件还存在。失败不让 pipeline 失败——只 log warning，retention_days 后台
-		// cleanup ticker 会兜底重试。
-		if cfg.Subtitle.DeleteSourceOnCompletion && !metadata.KeepSource && metadata.SourceExists {
-			if err := subtitle.DeleteSourceFile(libraryPath, sourceRoot); err != nil {
-				logrus.WithError(err).WithField("source", file.Path).
-					Warn("字幕完成后删除源文件失败（不阻塞 pipeline，retention 后台兜底）")
-				s.logs += fmt.Sprintf("源文件删除失败（已记入日志）: %s\n", filepath.Base(file.Path))
-			} else {
-				s.logs += fmt.Sprintf("源文件已删除（节省存储）: %s\n", filepath.Base(file.Path))
-			}
 		}
 
 		s.logs += fmt.Sprintf("字幕生成完成: %s\n", filepath.Base(libraryPath))
@@ -269,6 +258,35 @@ func loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath s
 		metadata.SourceExists = fileExists(metadata.SourcePath)
 	}
 	return metadata, true
+}
+
+func (s *SubtitleGenerateStage) deleteSourceAfterCompletion(
+	cfg configs.SubtitleConfig,
+	libraryPath string,
+	sourceRoot string,
+	metadataPath string,
+	metadata *subtitle.Metadata,
+) {
+	// P11: 完成后立即删除源文件（节省存储空间）
+	// 触发条件：delete_source_on_completion=true + KeepSource=false + 源文件还存在。
+	// 删除是非主路径：失败不让 pipeline 失败，retention_days 后台 cleanup 继续兜底。
+	if !cfg.DeleteSourceOnCompletion || metadata.KeepSource || !metadata.SourceExists {
+		return
+	}
+	sourcePath := metadata.SourcePath
+	if sourcePath == "" {
+		sourcePath = libraryPath
+	}
+	if err := subtitle.DeleteSourceFile(libraryPath, sourceRoot); err != nil {
+		logrus.WithError(err).WithField("source", sourcePath).
+			Warn("字幕完成后删除源文件失败（不阻塞 pipeline，retention 后台兜底）")
+		s.logs += fmt.Sprintf("源文件删除失败（已记入日志）: %s\n", filepath.Base(sourcePath))
+		return
+	}
+	if refreshed, err := subtitle.LoadMetadata(metadataPath); err == nil {
+		*metadata = refreshed
+	}
+	s.logs += fmt.Sprintf("源文件已删除（节省存储）: %s\n", filepath.Base(sourcePath))
 }
 
 func (s *SubtitleGenerateStage) GetCommands() []string {

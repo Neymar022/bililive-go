@@ -181,6 +181,31 @@ func findExistingHardlinkInDir(sourcePath, dir string) (string, error) {
 	return "", nil
 }
 
+func findExistingMetadataOutputInDir(sourcePath, dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".subtitle.json") {
+			continue
+		}
+		metadataPath := filepath.Join(dir, e.Name())
+		metadata, err := LoadMetadata(metadataPath)
+		if err != nil || metadata.SourcePath != sourcePath {
+			continue
+		}
+		outputPath := metadata.OutputPath
+		if outputPath == "" {
+			outputPath = strings.TrimSuffix(metadataPath, ".subtitle.json") + filepath.Ext(sourcePath)
+		}
+		if _, err := os.Stat(outputPath); err == nil {
+			return outputPath
+		}
+	}
+	return ""
+}
+
 // EnsureLibraryHardlink creates a Plex-style hard-link for sourcePath inside
 // libraryRoot when the normal host-side organizer cron hasn't run yet.
 //
@@ -201,6 +226,13 @@ func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbac
 	meta := parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
 
 	seasonDir := filepath.Join(libraryRoot, meta.aliasName, "Season 01")
+
+	// Step 0: if a completed subtitle sidecar already records this source path,
+	// prefer its rendered output. Burning usually replaces the hardlink inode, so
+	// inode-only idempotency would otherwise publish the leftover source again.
+	if existingOutput := findExistingMetadataOutputInDir(sourcePath, seasonDir); existingOutput != "" {
+		return existingOutput, nil
+	}
 
 	// Step 1: check if this source is ALREADY hardlinked somewhere in the season dir.
 	existingLink, err := findExistingHardlinkInDir(sourcePath, seasonDir)

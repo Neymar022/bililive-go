@@ -161,6 +161,50 @@ func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "old sidecar slot must not receive the new video")
 }
 
+func TestEnsureLibraryHardlink_UsesCompletedMetadataSourcePath(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("raw source"), 0o644))
+
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	libraryPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	srtPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.srt")
+	assPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.ass")
+	require.NoError(t, os.WriteFile(libraryPath, []byte("burned output"), 0o644))
+	require.NoError(t, os.WriteFile(srtPath, []byte("1\n"), 0o644))
+	require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+	completedAt := time.Date(2026, 3, 20, 11, 0, 0, 0, time.UTC)
+	require.NoError(t, SaveMetadata(sidecarPathForVideo(libraryPath), Metadata{
+		Status:         StatusCompleted,
+		SourcePath:     sourcePath,
+		OutputPath:     libraryPath,
+		SRTPath:        srtPath,
+		ASSPath:        assPath,
+		SourceExists:   true,
+		RendererStatus: StatusCompleted,
+		Segments: []Segment{
+			{Index: 1, Start: "00:00:00,000", End: "00:00:01,000", Text: "测试"},
+		},
+		CompletedAt: &completedAt,
+	}))
+
+	returnedPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	require.NoError(t, err)
+
+	assert.Equal(t, libraryPath, returnedPath, "completed sidecar source_path should win even after burned output replaced the hardlink")
+	entries, err := os.ReadDir(seasonDir)
+	require.NoError(t, err)
+	mp4Count := 0
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".mp4" {
+			mp4Count++
+		}
+	}
+	assert.Equal(t, 1, mp4Count, "must not publish the same source as a second raw episode")
+}
+
 // TestBuildEpisodeFilename_Basic checks the filename builder directly.
 func TestBuildEpisodeFilename_Basic(t *testing.T) {
 	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local)
