@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/bililive-go/bililive-go/src/tools"
 	"github.com/sirupsen/logrus"
 )
 
@@ -26,6 +28,8 @@ var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})\.`)
 
 // invalidFilenameChars mirrors INVALID_FILENAME_CHARS in bililive_media_organizer.py.
 var invalidFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
+
+var extractCoverTo = tools.ExtractCoverTo
 
 // sanitizeComponent replaces invalid filename characters with spaces, collapses
 // multiple whitespace, and trims leading/trailing spaces and dots.
@@ -80,6 +84,56 @@ func buildEpisodeFilename(aliasName string, episodeNumber int, recordedAt time.T
 	return prefix + displayTitle + extension
 }
 
+func buildEpisodeNFO(aliasName string, episodeNumber int, recordedAt time.Time, title, platform string) string {
+	aliasName = sanitizeComponent(aliasName)
+	if aliasName == "" {
+		aliasName = "未分类主播"
+	}
+	title = sanitizeComponent(title)
+	if title == "" {
+		title = "未命名直播"
+	}
+	platform = sanitizeComponent(platform)
+	if platform == "" {
+		platform = "bililive-go"
+	}
+
+	aired := recordedAt.Format("2006-01-02")
+	recordedAtText := recordedAt.Format("2006-01-02 15-04-05")
+	displayTitle := fmt.Sprintf("%s - %s", aired, title)
+	sortTitle := fmt.Sprintf("%s - %s", aliasName, recordedAtText)
+	plot := fmt.Sprintf("%s | 主播: %s | 标题: %s | 录制时间: %s", platform, aliasName, title, recordedAtText)
+
+	return strings.Join([]string{
+		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
+		"<episodedetails>",
+		fmt.Sprintf("  <title>%s</title>", xmlEscape(displayTitle)),
+		fmt.Sprintf("  <showtitle>%s</showtitle>", xmlEscape(aliasName)),
+		fmt.Sprintf("  <sorttitle>%s</sorttitle>", xmlEscape(sortTitle)),
+		"  <season>1</season>",
+		fmt.Sprintf("  <episode>%d</episode>", episodeNumber),
+		fmt.Sprintf("  <plot>%s</plot>", xmlEscape(plot)),
+		fmt.Sprintf("  <studio>%s</studio>", xmlEscape(platform)),
+		"  <genre>直播录屏</genre>",
+		"  <tag>直播录屏</tag>",
+		fmt.Sprintf("  <aired>%s</aired>", aired),
+		fmt.Sprintf("  <dateadded>%s</dateadded>", recordedAt.Format("2006-01-02 15:04:05")),
+		"</episodedetails>",
+		"",
+	}, "\n")
+}
+
+func xmlEscape(s string) string {
+	replacer := strings.NewReplacer(
+		"&", "&amp;",
+		"<", "&lt;",
+		">", "&gt;",
+		`"`, "&quot;",
+		"'", "&apos;",
+	)
+	return replacer.Replace(s)
+}
+
 // nextAvailableEpisodeNumber returns the first S01E slot not already used by
 // any file in the season directory. Sidecars reserve slots too, because a stale
 // .srt/.ass/.subtitle.json without an mp4 must not be matched to a new source.
@@ -108,6 +162,18 @@ func nextAvailableEpisodeNumber(dir string) int {
 			return episodeNumber
 		}
 	}
+}
+
+func episodeNumberFromLibraryPath(path string) int {
+	match := libraryEpisodeSlotPattern.FindStringSubmatch(filepath.Base(path))
+	if match == nil {
+		return 0
+	}
+	episodeNumber, err := strconv.Atoi(match[1])
+	if err != nil {
+		return 0
+	}
+	return episodeNumber
 }
 
 // parseSourceFileMeta extracts aliasName, recordedAt, and title from a source
@@ -206,6 +272,60 @@ func findExistingMetadataOutputInDir(sourcePath, dir string) string {
 	return ""
 }
 
+func sidecarStem(path string) string {
+	return strings.TrimSuffix(path, filepath.Ext(path))
+}
+
+func ensureTextFile(path, text string) error {
+	if current, err := os.ReadFile(path); err == nil && string(current) == text {
+		return nil
+	}
+	return os.WriteFile(path, []byte(text), 0o644)
+}
+
+func episodeNFOHasIdentity(path, aliasName string, episodeNumber int) bool {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	text := string(content)
+	return strings.Contains(text, fmt.Sprintf("<showtitle>%s</showtitle>", xmlEscape(aliasName))) &&
+		strings.Contains(text, fmt.Sprintf("<episode>%d</episode>", episodeNumber))
+}
+
+func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath string, meta sourceFileMeta, platform string) error {
+	episodeNumber := episodeNumberFromLibraryPath(targetPath)
+	if episodeNumber <= 0 {
+		return nil
+	}
+
+	stem := sidecarStem(targetPath)
+	if err := os.MkdirAll(filepath.Dir(targetPath), 0o755); err != nil {
+		return err
+	}
+
+	nfoPath := stem + ".nfo"
+	if !episodeNFOHasIdentity(nfoPath, meta.aliasName, episodeNumber) {
+		nfo := buildEpisodeNFO(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform)
+		if err := ensureTextFile(nfoPath, nfo); err != nil {
+			return fmt.Errorf("EnsureLibraryHardlink: write NFO %s: %w", nfoPath, err)
+		}
+	}
+
+	coverPath := stem + ".jpg"
+	if info, err := os.Stat(coverPath); err == nil && info.Size() > 0 {
+		return nil
+	}
+	if _, err := extractCoverTo(ctx, sourcePath, coverPath); err != nil {
+		logrus.WithFields(logrus.Fields{
+			"source": sourcePath,
+			"cover":  coverPath,
+			"error":  err,
+		}).Warn("EnsureLibraryHardlink: failed to extract episode cover")
+	}
+	return nil
+}
+
 // EnsureLibraryHardlink creates a Plex-style hard-link for sourcePath inside
 // libraryRoot when the normal host-side organizer cron hasn't run yet.
 //
@@ -221,7 +341,11 @@ func findExistingMetadataOutputInDir(sourcePath, dir string) string {
 // Race-safe: a concurrent call will either find the same-inode entry in the
 // scan above, or will race on os.Link which returns EEXIST and then retry the
 // next free slot after checking whether our source already appeared.
-func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbackTime time.Time) (string, error) {
+func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbackHost string, fallbackTime time.Time, platform string) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	ext := filepath.Ext(sourcePath)
 	meta := parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
 
@@ -231,12 +355,18 @@ func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbac
 	// prefer its rendered output. Burning usually replaces the hardlink inode, so
 	// inode-only idempotency would otherwise publish the leftover source again.
 	if existingOutput := findExistingMetadataOutputInDir(sourcePath, seasonDir); existingOutput != "" {
+		if err := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingOutput, meta, platform); err != nil {
+			return "", err
+		}
 		return existingOutput, nil
 	}
 
 	// Step 1: check if this source is ALREADY hardlinked somewhere in the season dir.
 	existingLink, err := findExistingHardlinkInDir(sourcePath, seasonDir)
 	if err == nil && existingLink != "" {
+		if err := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingLink, meta, platform); err != nil {
+			return "", err
+		}
 		// Idempotent — already linked.
 		return existingLink, nil
 	}
@@ -251,6 +381,19 @@ func EnsureLibraryHardlink(sourcePath, libraryRoot, fallbackHost string, fallbac
 	for {
 		targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
 		targetPath := filepath.Join(seasonDir, targetName)
+
+		if _, statErr := os.Stat(targetPath); statErr == nil {
+			// The exact slot is already occupied by a different inode. Try the
+			// next episode number without touching its sidecars.
+			episodeNumber++
+			continue
+		} else if !os.IsNotExist(statErr) {
+			return "", fmt.Errorf("EnsureLibraryHardlink: stat %s: %w", targetPath, statErr)
+		}
+
+		if err := ensureLibraryEpisodeSidecars(ctx, sourcePath, targetPath, meta, platform); err != nil {
+			return "", err
+		}
 
 		// Step 3: create hard-link without overwriting any occupied slot.
 		err := os.Link(sourcePath, targetPath)
