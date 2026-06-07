@@ -73,6 +73,25 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	assert.Contains(t, string(showNFOText), "<studio>哔哩哔哩</studio>")
 }
 
+func TestEnsureLibraryHardlink_NormalizesInvisibleShowNameCharacters(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主\u200b播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, err)
+
+	expectedPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	assert.Equal(t, expectedPath, targetPath)
+	require.NoDirExists(t, filepath.Join(libraryRoot, "主\u200b播"))
+
+	showNFOText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	require.NoError(t, err)
+	assert.Contains(t, string(showNFOText), "<title>主播</title>")
+}
+
 // TestEnsureLibraryHardlink_IdempotentSameInode verifies that calling
 // EnsureLibraryHardlink a second time when the target already exists with the
 // same inode returns the path without error and without creating a duplicate.
