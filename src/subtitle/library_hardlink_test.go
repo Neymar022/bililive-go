@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,15 +14,30 @@ import (
 // referenceTime is a stable timestamp used across the hardlink tests.
 var referenceTime = time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local)
 
+func stubCoverExtraction(t *testing.T) {
+	t.Helper()
+	original := extractCoverTo
+	extractCoverTo = func(_ context.Context, _, coverPath string) (string, error) {
+		if err := os.WriteFile(coverPath, []byte("cover"), 0o644); err != nil {
+			return "", err
+		}
+		return coverPath, nil
+	}
+	t.Cleanup(func() {
+		extractCoverTo = original
+	})
+}
+
 // TestEnsureLibraryHardlink_CreatesNewLink verifies that a hardlink is created
 // with the correct Plex-style path when the Season 01 directory is empty.
 func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
 
-	targetPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
 	require.NoError(t, err)
 
 	// Target path must follow the Plex naming convention.
@@ -38,23 +54,32 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	dstInfo, err := os.Stat(targetPath)
 	require.NoError(t, err)
 	assert.True(t, os.SameFile(srcInfo, dstInfo), "source and target must be the same inode")
+
+	nfoText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.nfo"))
+	require.NoError(t, err)
+	assert.Contains(t, string(nfoText), "<title>2026-03-20 - 测试标题</title>")
+	assert.Contains(t, string(nfoText), "<showtitle>主播</showtitle>")
+	assert.Contains(t, string(nfoText), "<episode>1</episode>")
+	assert.Contains(t, string(nfoText), "<studio>哔哩哔哩</studio>")
+	require.FileExists(t, filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.jpg"))
 }
 
 // TestEnsureLibraryHardlink_IdempotentSameInode verifies that calling
 // EnsureLibraryHardlink a second time when the target already exists with the
 // same inode returns the path without error and without creating a duplicate.
 func TestEnsureLibraryHardlink_IdempotentSameInode(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
 
 	// First call — creates the link.
-	targetPath1, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	targetPath1, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
 	// Second call — must return same path without error.
-	targetPath2, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	targetPath2, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 	assert.Equal(t, targetPath1, targetPath2, "second call must return same path")
 
@@ -81,6 +106,7 @@ func TestEnsureLibraryHardlink_IdempotentSameInode(t *testing.T) {
 // never call EnsureLibraryHardlink.  This test guards against edge cases where
 // an unrelated file happens to occupy the slot.
 func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试.mp4")
@@ -92,7 +118,7 @@ func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
 	unrelatedPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-19 - 其他.mp4")
 	require.NoError(t, os.WriteFile(unrelatedPath, []byte("unrelated"), 0o644))
 
-	returnedPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	returnedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
 	// EnsureLibraryHardlink counts 1 existing mp4 → assigns E0002.
@@ -115,6 +141,7 @@ func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
 // TestEnsureLibraryHardlink_EpisodeNumbering verifies that when N mp4 files
 // already exist in Season 01, a new call assigns episode N+1.
 func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 
@@ -127,7 +154,7 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 第三集.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
 
-	targetPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
 	expectedPath := filepath.Join(seasonDir, "主播.S01E0003.2026-03-20 - 第三集.mp4")
@@ -139,6 +166,7 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 // was removed by cleanup. Reusing that slot would attach old subtitles to a new
 // source recording.
 func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 
@@ -152,7 +180,7 @@ func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 11-00-00 - 同名直播.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("new source"), 0o644))
 
-	targetPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
 	expectedPath := filepath.Join(seasonDir, "主播.S01E0002.2026-03-20 - 同名直播.mp4")
@@ -162,6 +190,7 @@ func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
 }
 
 func TestEnsureLibraryHardlink_UsesCompletedMetadataSourcePath(t *testing.T) {
+	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
@@ -190,7 +219,7 @@ func TestEnsureLibraryHardlink_UsesCompletedMetadataSourcePath(t *testing.T) {
 		CompletedAt: &completedAt,
 	}))
 
-	returnedPath, err := EnsureLibraryHardlink(sourcePath, libraryRoot, "主播", referenceTime)
+	returnedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
 	assert.Equal(t, libraryPath, returnedPath, "completed sidecar source_path should win even after burned output replaced the hardlink")
@@ -203,6 +232,26 @@ func TestEnsureLibraryHardlink_UsesCompletedMetadataSourcePath(t *testing.T) {
 		}
 	}
 	assert.Equal(t, 1, mp4Count, "must not publish the same source as a second raw episode")
+}
+
+func TestEnsureLibraryHardlink_RepairsMissingSidecarsForExistingHardlink(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	targetPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	require.NoError(t, os.Link(sourcePath, targetPath))
+
+	returnedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
+	require.NoError(t, err)
+
+	assert.Equal(t, targetPath, returnedPath)
+	require.FileExists(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.nfo"))
+	require.FileExists(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.jpg"))
 }
 
 // TestBuildEpisodeFilename_Basic checks the filename builder directly.
