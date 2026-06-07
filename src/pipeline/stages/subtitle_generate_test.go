@@ -511,6 +511,74 @@ func TestSubtitleGenerateUsesCompletedSidecarWhenKnowledgeAggregationRetries(t *
 	assert.Equal(t, "live-session:session-20260601-linkai", metadata.KnowledgeSyncSourceID)
 }
 
+func TestSubtitleGenerateDeletesResidualSourceWhenCompletedSidecarIsReused(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("raw source"), 0o644))
+
+	libraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试.mp4")
+	srtPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".srt"
+	assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
+	metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.WriteFile(libraryPath, []byte("burned output"), 0o644))
+	require.NoError(t, os.WriteFile(srtPath, []byte("1\n00:00:00,000 --> 00:00:01,000\n测试\n"), 0o644))
+	require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+	require.NoError(t, subtitle.SaveMetadata(metadataPath, subtitle.Metadata{
+		Status:         subtitle.StatusCompleted,
+		SourcePath:     sourcePath,
+		OutputPath:     libraryPath,
+		SRTPath:        srtPath,
+		ASSPath:        assPath,
+		SourceExists:   true,
+		RendererStatus: subtitle.StatusCompleted,
+		Segments: []subtitle.Segment{
+			{Index: 1, Start: "00:00:00,000", End: "00:00:01,000", Text: "测试"},
+		},
+	}))
+
+	workerCalls := 0
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		workerCalls++
+		http.Error(w, "worker should not be called for completed subtitle sidecar", http.StatusInternalServerError)
+	}))
+	defer worker.Close()
+
+	cfg := configs.NewConfig()
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.SourceRoot = sourceRoot
+	cfg.Subtitle.DeleteSourceOnCompletion = true
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform: "哔哩哔哩",
+			HostName: "主播",
+			RoomName: "测试",
+		},
+	}, []pipeline.FileInfo{
+		{Path: sourcePath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, output, 3)
+	assert.Equal(t, 0, workerCalls, "completed sidecar retry must not call subtitle worker")
+	_, statErr := os.Stat(sourcePath)
+	assert.True(t, os.IsNotExist(statErr), "completed sidecar retry should delete residual source when configured")
+	metadata, err := subtitle.LoadMetadata(metadataPath)
+	require.NoError(t, err)
+	assert.False(t, metadata.SourceExists)
+	assert.NotNil(t, metadata.SourceDeletedAt)
+}
+
 func TestSubtitleGenerateSkipsLibraryPublishForTooShortVideo(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
