@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/bililive-go/bililive-go/src/tools"
@@ -35,6 +36,12 @@ var extractCoverTo = tools.ExtractCoverTo
 // multiple whitespace, and trims leading/trailing spaces and dots.
 // Mirrors sanitize_component() in bililive_media_organizer.py.
 func sanitizeComponent(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf) {
+			return -1
+		}
+		return r
+	}, s)
 	s = invalidFilenameChars.ReplaceAllString(s, " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	s = strings.ReplaceAll(s, "\r", " ")
