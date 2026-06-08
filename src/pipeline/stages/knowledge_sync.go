@@ -231,6 +231,24 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 		}
 	}
 
+	inputs, err := knowledgeSessionInputsFromManifest(manifest)
+	if err != nil {
+		return err
+	}
+
+	goCtx := context.Background()
+	ffmpegPath := ""
+	if ctx != nil {
+		if ctx.Ctx != nil {
+			goCtx = ctx.Ctx
+		}
+		ffmpegPath = ctx.FFmpegPath
+	}
+	aggregate, err := publishLiveSessionMediaAggregate(goCtx, ffmpegPath, libraryRoot, &manifest)
+	if err != nil {
+		return err
+	}
+
 	contentHash := knowledgeSessionManifestContentHash(manifest)
 	if manifest.PostedContentHash == contentHash && contentHash != "" {
 		metadata.KnowledgeSyncStatus = subtitle.StatusQueued
@@ -245,11 +263,12 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 		return nil
 	}
 
-	inputs, err := knowledgeSessionInputsFromManifest(manifest)
-	if err != nil {
-		return err
+	var payload knowledgeIngestPayload
+	if aggregate != nil {
+		payload, err = buildKnowledgeLiveSessionAggregateIngestPayload(ctx, cfg, libraryRoot, aggregate)
+	} else {
+		payload, err = buildKnowledgeSessionIngestPayload(ctx, cfg, libraryRoot, inputs)
 	}
-	payload, err := buildKnowledgeSessionIngestPayload(ctx, cfg, libraryRoot, inputs)
 	if err != nil {
 		return err
 	}

@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,7 @@ func TestSyncKnowledgeLiveSessionDefersUntilQuietWindow(t *testing.T) {
 }
 
 func TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow(t *testing.T) {
+	stubLiveSessionMedia(t, []float64{120, 90})
 	libraryRoot := t.TempDir()
 	firstLibraryPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "第一段内容")
 	secondLibraryPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第二段内容")
@@ -107,12 +109,13 @@ func TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow(t *t
 	assert.Equal(t, "session-20260601-linkai", capturedPayload.LiveSessionID)
 	assert.Equal(t, "qwen3.7-plus", capturedPayload.ModelName)
 	assert.Equal(t, "教程", capturedPayload.Style)
-	require.Len(t, capturedPayload.SourceVideos, 2)
-	assert.True(t, strings.Contains(capturedPayload.SourceVideos[0].SourceVideoPath, "S01E0019"))
-	assert.True(t, strings.Contains(capturedPayload.SourceVideos[1].SourceVideoPath, "S01E0020"))
+	assert.Contains(t, capturedPayload.SourceVideoPath, "S01E0019-S01E0020")
+	assert.Empty(t, capturedPayload.SourceVideos)
+	assert.Empty(t, capturedPayload.MediaSegments)
 	require.Len(t, capturedPayload.Segments, 2)
 	assert.Equal(t, 0, capturedPayload.Segments[0].SourceIndex)
-	assert.Equal(t, 1, capturedPayload.Segments[1].SourceIndex)
+	assert.Equal(t, 0, capturedPayload.Segments[1].SourceIndex)
+	assert.Equal(t, 120.0, capturedPayload.Segments[1].Start)
 
 	firstPosted, err := subtitle.LoadMetadata(firstMetadataPath)
 	require.NoError(t, err)
@@ -126,6 +129,59 @@ func TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow(t *t
 	err = stage.syncKnowledgeAt(secondCtx, cfg, libraryRoot, secondLibraryPath, secondMetadataPath, &secondPosted, start.Add(8*time.Minute))
 	require.NoError(t, err)
 	assert.Equal(t, 1, knowledgeCalls, "same unchanged session manifest should not post duplicate BiliNote documents")
+}
+
+func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegments(t *testing.T) {
+	stubLiveSessionMedia(t, []float64{120, 90})
+	libraryRoot := t.TempDir()
+	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "第一段内容")
+	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第二段内容")
+	firstStem := strings.TrimSuffix(firstLibraryPath, filepath.Ext(firstLibraryPath))
+	require.NoError(t, os.WriteFile(firstStem+".jpg", []byte("cover"), 0o644))
+
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:session-20260601-linkai",
+		LiveSessionID: "session-20260601-linkai",
+		Sources: []knowledgeSessionManifestSource{
+			{
+				TaskID:       "bililive-go-619",
+				SourceID:     knowledgeSourceID(libraryRoot, firstLibraryPath),
+				LibraryPath:  firstLibraryPath,
+				MetadataPath: firstMetadataPath,
+			},
+			{
+				TaskID:       "bililive-go-620",
+				SourceID:     knowledgeSourceID(libraryRoot, secondLibraryPath),
+				LibraryPath:  secondLibraryPath,
+				MetadataPath: secondMetadataPath,
+			},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	assert.Contains(t, filepath.Base(aggregate.LibraryPath), "S01E0019-S01E0020")
+	require.FileExists(t, aggregate.LibraryPath)
+	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".subtitle.json")
+	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".srt")
+	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".ass")
+	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".nfo")
+	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".jpg")
+
+	assert.NoFileExists(t, firstLibraryPath)
+	assert.NoFileExists(t, secondLibraryPath)
+	seasonDir := filepath.Dir(firstLibraryPath)
+	visibleMP4 := visibleMP4Files(t, seasonDir)
+	assert.Equal(t, []string{filepath.Base(aggregate.LibraryPath)}, visibleMP4)
+
+	firstMetadata, err := subtitle.LoadMetadata(firstMetadataPath)
+	require.NoError(t, err)
+	assert.Contains(t, firstMetadata.OutputPath, ".live_session_segments")
+	require.FileExists(t, firstMetadata.OutputPath)
+	assert.Equal(t, aggregate.LibraryPath, firstMetadata.RecordMeta["live_session_media_aggregate_path"])
+	require.Len(t, aggregate.Metadata.Segments, 2)
+	assert.Equal(t, "00:02:00,000", aggregate.Metadata.Segments[1].Start)
 }
 
 func knowledgeSessionTestContext(taskID int64) *pipeline.PipelineContext {
@@ -167,6 +223,45 @@ func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host strin
 	}
 	require.NoError(t, subtitle.SaveMetadata(metadataPath, metadata))
 	return libraryPath, metadataPath, metadata
+}
+
+func visibleMP4Files(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var names []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".mp4") {
+			continue
+		}
+		names = append(names, entry.Name())
+	}
+	return names
+}
+
+func stubLiveSessionMedia(t *testing.T, durations []float64) {
+	t.Helper()
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
+		require.Len(t, inputs, 2)
+		require.Contains(t, inputs[0], "S01E0019")
+		require.Contains(t, inputs[1], "S01E0020")
+		return os.WriteFile(outputPath, []byte("aggregate-video"), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(ctx context.Context, ffmpegPath string, inputPath string) (float64, error) {
+		if strings.Contains(inputPath, "S01E0019") {
+			return durations[0], nil
+		}
+		if strings.Contains(inputPath, "S01E0020") {
+			return durations[1], nil
+		}
+		return 0, fmt.Errorf("unexpected input path: %s", inputPath)
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
 }
 
 func requireRetryLater(t *testing.T, err error) {

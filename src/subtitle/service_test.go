@@ -53,6 +53,37 @@ func TestResolveLibraryVideoPathPrefersMetadataWhenLibraryVideoWasReplaced(t *te
 	assert.Equal(t, libraryPath, resolved)
 }
 
+func TestResolveLibraryVideoPathUsesAbsorbedSegmentSidecarStem(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := filepath.Join(t.TempDir(), "video")
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(filepath.Join(seasonDir, ".live_session_segments", "session"), 0o755))
+
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	libraryPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	hiddenPath := filepath.Join(seasonDir, ".live_session_segments", "session", filepath.Base(libraryPath))
+	require.NoError(t, os.WriteFile(hiddenPath, []byte("hidden segment"), 0o644))
+	require.NoError(t, SaveMetadata(sidecarPathForVideo(libraryPath), Metadata{
+		Status:     StatusCompleted,
+		SourcePath: sourcePath,
+		OutputPath: hiddenPath,
+		ASSPath:    filepath.Join(filepath.Dir(libraryPath), "主播.S01E0001.2026-03-20 - 测试标题.ass"),
+		SRTPath:    filepath.Join(filepath.Dir(libraryPath), "主播.S01E0001.2026-03-20 - 测试标题.srt"),
+		RecordMeta: map[string]any{
+			"live_session_media_role":           "segment",
+			"live_session_media_aggregate_path": filepath.Join(seasonDir, "主播.S01E0001-S01E0002.2026-03-20 - 测试标题.mp4"),
+			"live_session_segment_hidden_path":  hiddenPath,
+		},
+	}))
+
+	resolved, err := ResolveLibraryVideoPath(sourcePath, libraryRoot)
+
+	require.NoError(t, err)
+	assert.Equal(t, libraryPath, resolved)
+}
+
 func TestResolveSourcePathPrefersMetadata(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()

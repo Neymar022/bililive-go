@@ -25,7 +25,7 @@ var normalizedFilenamePattern = regexp.MustCompile(
 	`^(?P<alias_name>.+?) - (?P<recorded_at>\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}) - (?P<title>.+)$`,
 )
 
-var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})\.`)
+var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})(?:-S\d{2}E(\d{4}))?\.`)
 
 // invalidFilenameChars mirrors INVALID_FILENAME_CHARS in bililive_media_organizer.py.
 var invalidFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
@@ -193,7 +193,15 @@ func nextAvailableEpisodeNumber(dir string) int {
 		if err != nil {
 			continue
 		}
-		used[episodeNumber] = struct{}{}
+		lastEpisodeNumber := episodeNumber
+		if len(match) > 2 && match[2] != "" {
+			if parsed, parseErr := strconv.Atoi(match[2]); parseErr == nil && parsed >= episodeNumber {
+				lastEpisodeNumber = parsed
+			}
+		}
+		for number := episodeNumber; number <= lastEpisodeNumber; number++ {
+			used[number] = struct{}{}
+		}
 	}
 	for episodeNumber := 1; ; episodeNumber++ {
 		if _, ok := used[episodeNumber]; !ok {
