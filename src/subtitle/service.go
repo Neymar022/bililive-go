@@ -119,9 +119,14 @@ func ResolveLibraryVideoPath(sourcePath, libraryRoot string) (string, error) {
 		if metadata.SourcePath != sourcePath {
 			return nil
 		}
+		sidecarVideoPath := strings.TrimSuffix(path, ".subtitle.json") + filepath.Ext(sourcePath)
+		if liveSessionMediaSegmentAbsorbed(metadata) {
+			metadataResolved = sidecarVideoPath
+			return errors.New("subtitle: resolved")
+		}
 		outputPath := metadata.OutputPath
 		if outputPath == "" {
-			outputPath = strings.TrimSuffix(path, ".subtitle.json") + filepath.Ext(sourcePath)
+			outputPath = sidecarVideoPath
 		}
 		if _, statErr := os.Stat(outputPath); statErr == nil {
 			metadataResolved = outputPath
@@ -172,6 +177,16 @@ func ResolveLibraryVideoPath(sourcePath, libraryRoot string) (string, error) {
 		return "", fmt.Errorf("未在字幕库中找到源文件对应的展示视频: %s", sourcePath)
 	}
 	return resolved, nil
+}
+
+func liveSessionMediaSegmentAbsorbed(metadata Metadata) bool {
+	if metadata.RecordMeta == nil {
+		return false
+	}
+	role, _ := metadata.RecordMeta["live_session_media_role"].(string)
+	aggregatePath, _ := metadata.RecordMeta["live_session_media_aggregate_path"].(string)
+	hiddenPath, _ := metadata.RecordMeta["live_session_segment_hidden_path"].(string)
+	return role == "segment" && strings.TrimSpace(aggregatePath) != "" && strings.TrimSpace(hiddenPath) != ""
 }
 
 func ResolveSourcePath(libraryPath, sourceRoot string) (string, error) {

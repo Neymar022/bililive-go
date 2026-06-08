@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-06-02
+更新时间：2026-06-08
 
 ## State Ownership
 
@@ -36,6 +36,8 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
 
 ## Current Work
+
+2026-06-08 same-live 媒体库聚合补齐已在隔离 worktree `worktrees/same-live-media-library-aggregation` / branch `codex/same-live-media-library-aggregation` 完成代码实现和本地测试，尚未提交、PR、构建镜像或部署 NAS。根因确认：此前同场直播只在 BiliNote 文档层按 `live_session_id` 聚合，UGREEN 媒体库仍扫描 `video/<主播>/Season 01/*.mp4`，所以由录制切片产生的主段+尾段会继续作为多个可见 S01E 半成品出现。修复策略已改为媒体库最终产物优先：同一 `live_session_id` 在静默窗口稳定后，先用 ffmpeg concat 生成一个可见整场聚合 MP4，命名为 `主播.S01E起始-S01E结束.日期 - 标题.mp4`；生成整场 `.subtitle.json`、`.srt`、`.ass`、`.nfo`、`.jpg` 和 `tvshow.nfo`；原子分段视频移动到 `Season 01/.live_session_segments/<session-hash>/` 作为内部素材保留，分段 sidecar 记录 `live_session_media_aggregate_path` / `live_session_segment_hidden_path`，后续同源重跑会命中已完成 sidecar，不再重新创建可见子分段。整场字幕和 BiliNote 时间轴偏移优先使用每个分段的真实视频时长，字幕尾部只作为 ffmpeg duration 探测失败时的兜底，避免静音尾段导致目录/原片跳转提前。BiliNote 同步 payload 在聚合成功后改指向整场 aggregate `source_video_path`，避免文档跳转继续依赖隐藏子分段。额外修复：Go hardlink 编号和 `scripts/repair-library-sidecars.py` 都能识别 `S01E0002-S01E0003` range 并保留整个编号区间，避免后续重编号复用被聚合集覆盖的 S01E。验证：新增 RED/GREEN 测试覆盖 range 编号保留、同场两个分段最终只留下一个可见 MP4、被整场吸收的分段重跑不会重新发布、真实视频时长大于字幕尾部时仍按视频时长推进 offset；`GOCACHE=/tmp/bililive-go-build-cache go test ./src/... -count=1` 通过；`python3 -m py_compile scripts/repair-library-sidecars.py` 通过。剩余：提交/PR/CI/合并；master 发布 `latest` 后，必须用 NAS 原生 Docker 项目拉取 latest，并用用户本地 Chrome + Computer Use 验收 UGREEN 媒体库同场分段是否只显示一个整场成品。
 
 2026-06-03 same-live 后续复查发现，Bililive-go 侧聚合不是唯一缺口；BiliNote 消费端原先没有理解 `source_videos`/多媒体段契约，会把 `source_id=live-session:*` 当成单一媒体路径渲染，导致原片链接落到 `/api/knowledge/media/live-session%3A...`，截图也无法映射回具体分段。同时，BiliNote 可见笔记记录只按 `task_id` upsert，同一个 `live-session:*` 若多次 ingest 且 task_id 不同，会生成多张历史卡片；长文分块总结还暴露了目录问题：只要部分 H2 有合法 `Content-[mm:ss]`，旧逻辑就整体跳过补齐，后半段章节可能显示 `原片（原片）` 或缺失时间跳转，目录编号也随 LLM 分块从 1 重置。已在独立 BiliNote 工作树 `worktrees/bilinote-same-live-media-segments-clean` / branch `codex/same-live-media-segments` 完成对应修复：模型接收 `source_videos`/`media_segments`；note 后处理按全局时间选择子媒体并用本地秒数生成链接/截图；`live-session:*` 可见记录复用已有 task_id 并用最新 payload 覆盖；目录生成在检测到编号标题时改为全局连续编号，逐标题补齐缺失 Content 标记并清理无效 `原片（原片）` 标签。BiliNote 验证：先 RED 再 GREEN；最终 `PYTHONPATH=backend python3 -m pytest backend/tests/test_prompt_and_note_regressions.py backend/tests/test_knowledge_memory.py backend/tests/test_note_router_regressions.py -q` 返回 `85 passed, 32 warnings`；`git diff --check` 无输出。Bililive-go 同一直播分支同步补充 `media_segments` payload 别名，与 `source_videos` 内容一致，以防消费端契约漂移；验证：`GOCACHE=/tmp/bililive-go-build-cache go test ./src/pipeline/stages -run 'TestBuildKnowledgeSessionIngestPayloadKeepsPerSegmentSourceEvidence|TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation|TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow' -count=1` 返回通过，`GOCACHE=/tmp/bililive-go-build-cache go test ./src/... -count=1` 返回通过，`git diff --check` 无输出。剩余：两个仓库分别提交/PR/合并；BiliNote 与 Bililive-go 新 master 发布 latest 后，NAS 拉取并用用户本地 Chrome + Computer Use 验收新的同一直播样本。
 

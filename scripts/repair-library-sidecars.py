@@ -197,9 +197,11 @@ def existing_episode_slots(season_dir: Path) -> set[int]:
     for entry in season_dir.iterdir():
         if entry.is_dir():
             continue
-        match = re.search(r"\.S01E(\d{4})\.", entry.name)
+        match = re.search(r"\.S01E(\d{4})(?:-S\d{2}E(\d{4}))?\.", entry.name)
         if match:
-            used.add(int(match.group(1)))
+            first = int(match.group(1))
+            last = int(match.group(2)) if match.group(2) else first
+            used.update(range(first, last + 1))
     return used
 
 

@@ -189,6 +189,26 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	assert.Equal(t, expectedPath, targetPath)
 }
 
+func TestEnsureLibraryHardlink_EpisodeNumberingReservesRangeEpisode(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0001.2026-03-18 - 第一集.mp4"), []byte("ep1"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0002-S01E0003.2026-03-20 - 同场聚合.mp4"), []byte("ep2-3"), 0o644))
+
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-22 10-00-00 - 第四集.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime.Add(48*time.Hour), "bililive-go")
+	require.NoError(t, err)
+
+	expectedPath := filepath.Join(seasonDir, "主播.S01E0004.2026-03-22 - 第四集.mp4")
+	assert.Equal(t, expectedPath, targetPath)
+}
+
 // TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars verifies that
 // completed subtitle sidecars reserve an episode slot even if the rendered mp4
 // was removed by cleanup. Reusing that slot would attach old subtitles to a new
