@@ -37,6 +37,10 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 
 ## Current Work
 
+2026-06-13 09:35 +08 用户完成 UGREEN 原生 Docker 拉取重建后，二次验收确认 `/api/info` 仍为 `app_version=806da08` / `git_hash=806da08c5cc299d593910a83221c6c6e640532d1`，`/api/update/status` 为 `idle`。`/api/pipeline/tasks?limit=80` 结构化检查显示，新版本之后的最近任务（如 #672 旭东聊装修、#673 汤山老王）已经完成到字幕产物和同场知识同步提交；历史失败主要集中在 2026-06-08 至 2026-06-11 的同场聚合任务，错误为旧版本生成 `*.mp4.tmp` 输出路径后 FFmpeg 报 `Unable to choose an output format ... .mp4.tmp`。当前代码已改为 `*.tmp.mp4`，并且 concat 命令显式加 `-f mp4`，说明防复发代码已在新镜像中。不要批量调用 `/api/pipeline/tasks/{id}/retry` 修历史：`RetryTask` 会重置到第 0 阶段并使用 `InitialFiles`，而许多历史任务的 FLV 已在 convert 阶段删除，直接 retry 容易制造新失败或重复产物。历史补偿应走 NAS 文件系统脚本：先修复/聚合媒体库 sidecar 和重复 show，再回填 BiliNote cover；没有安全 NAS 写入通道前只能做只读验收。
+
+2026-06-13 09:10 +08 用户在 UGREEN 原生 Docker 项目中拉取并重建 `bililive` / `subtitle-worker` 后，运行态只读验收已确认切到本次封面/sidecar 修复版本：`GET http://192.168.1.80:18090/api/info` 返回 `app_version=806da08`、`git_hash=806da08c5cc299d593910a83221c6c6e640532d1`、`platform=linux/amd64`；`/api/update/status` 返回 `state=idle`、`graceful_update_pending=false`、`active_recordings_count=0`；BiliNote `GET http://192.168.1.80:3015/api/sys_health` 返回 success。重新验证源码与补偿脚本：`python3 -m unittest tests/test_repair_library_sidecars.py tests/test_backfill_bilinote_covers.py` 通过，`python3 -m py_compile scripts/repair-library-sidecars.py scripts/backfill-bilinote-covers.py` 通过，非沙盒 `env GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/subtitle ./src/pipeline/stages` 通过。当前历史遗留补偿尚未执行：本地没有 `/volume2/docker/bililive-go/video` / `/volume2/docker/bilinote/data` 挂载；免密 SSH 不可用；Dockge `bililive-go` 页面是漂移的旧 compose，容器 Bash 入口直接报 `/volume2/docker/bililive-go/.env not found`，不能作为生产执行通道。下一步需要通过 UGREEN 原生 Docker 容器终端、NAS shell/SSH 显式授权通道，或用户提供的一次性安全执行通道，在 NAS 上先 dry-run `scripts/repair-library-sidecars.py --root /volume2/docker/bililive-go/video --fail-on-duplicate-shows`，再按结果执行 `--apply --merge-duplicate-shows`；随后对 BiliNote DB 运行 `scripts/backfill-bilinote-covers.py` 回填 `cover_url`，最后用本地 Chrome/Computer Use 验收 BiliNote 最近文档封面和 UGREEN 媒体库重复 show。
+
 2026-06-13 cover/sidecar 与重复剧集复发修复已在隔离 worktree `worktrees/same-live-media-library-aggregation` / branch `codex/same-live-media-library-aggregation` 完成本地实现，尚未提交、PR、构建镜像、部署 NAS，也未修改生产媒体库。根因确认：前次修复只覆盖 `EnsureLibraryHardlink` 新建硬链接路径；最近生产任务多数通过 `ResolveLibraryVideoPath` 直接命中已存在媒体库路径，因此跳过 `.jpg`、episode `.nfo`、`tvshow.nfo` finalizer。BiliNote/NAS 封面缺失不是 pending 队列导致，而是 completed 产物缺最终 sidecar；同场聚合也会先找分段 `.jpg`，当分段缺封面且 ffmpeg 抽帧失败被静默吞掉时，`audio_meta.cover_url` 会继续为空。重复剧集复发来自历史物理目录仍未完全归一，例如不可见字符、控制/格式字符或连续 Unicode 空白导致同一主播落入多个 show 目录，UGREEN 会按物理目录识别成多个剧集库。
 
 本地实现策略：新增统一 `subtitle.EnsureLibrarySidecars` finalizer，无论 `ResolveLibraryVideoPath` 命中还是 `EnsureLibraryHardlink` 兜底创建，都在字幕发布阶段补齐 `tvshow.nfo`、episode `.nfo` 和 `.jpg`；封面抽取失败现在返回明确错误，不再允许“completed 但暂无封面”的静默成功。同场聚合封面逻辑改为先复用分段封面，再从聚合视频抽帧，再从源/分段视频抽帧；全部失败会阻止后续知识同步。`scripts/repair-library-sidecars.py` 扩展为历史补偿工具：默认 dry-run，`--apply` 才写入缺失 sidecar 和封面；规范化后同名 show 目录合并时不删除媒体、不覆盖冲突文件，冲突进入 `.quarantine-library-sidecars/<timestamp>/`。新增 `scripts/backfill-bilinote-covers.py`，只对 `note_records.audio_meta.cover_url` 为空且源视频旁已有 `.jpg` 的记录回填本地静态封面 URL，不重跑总结模型。
@@ -304,3 +308,59 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 不要把 LanceDB 当成事实源；索引必须可重建。
 - 不要在未验证镜像 SHA 和运行态之前宣称生产链路已跑通。
 - 不要继续依赖旧 provider goal 的内存状态；任何新结论都要回写 plan-tree。
+
+## 2026-06-13 原片截图缺失 RCA
+
+- 用户报告：BiliNote 已勾选“原片截图”，但最新和最近由自动烧录生成的文档均没有原片截图。
+- 运行态证据：
+  - `GET http://192.168.1.80:18090/api/info` 返回 `app_version=806da08`、`git_hash=806da08c5cc299d593910a83221c6c6e640532d1`。
+  - `GET /api/subtitles/settings` 的 `subtitle.knowledge_sync` 只包含 `enabled/endpoint/provider_id/model_name/generate_note/non_blocking/timeout/min_video_duration/live_session_quiet_window`，没有 `format`、`link`、`screenshot`、`video_understanding`。
+  - 最近完成任务 `#672/#673` 的字幕阶段命令均为 `POST BiliNote /api/knowledge/ingest (same-live aggregation, non-blocking)`，即走 Bililive-go 自动同步机器接口，不走 BiliNote 左侧表单的手动生成接口。
+- 代码证据：
+  - Bililive-go `knowledgeIngestPayload` 支持发送 `format/link/screenshot`，但只从 `SubtitleKnowledgeSyncConfig` 复制；当前运行配置为空时不会发送。
+  - Bililive-go 默认 `SubtitleKnowledgeSyncConfig` 不设置 `Format/Link/Screenshot`，现有测试也断言默认 `Format` 为空、`Screenshot` 为 `nil`。
+  - BiliNote 运行目录 `/Volumes/BiliNoteRuntime/BiliNote/backend/app/models/knowledge_model.py` 中 `KnowledgeIngestRequest` 没有 `format/link/screenshot/style/extras` 字段；手动 `/notes/from_transcript` 使用的 `TranscriptNoteRequest` 才有这些字段。
+  - BiliNote 截图后处理只在 `formats` 包含 `"screenshot"` 时进入 `_post_process_markdown` 的截图插入/兜底逻辑。
+- 根因：
+  - “原片截图”勾选状态只作用于 BiliNote 手动生成路径；Bililive-go 自动烧录同步路径没有继承 UI 勾选项。
+  - 更深层设计偏差是 Bililive-go 注释假设 `format/link/screenshot` 留空时 BiliNote 机器 ingest 会使用默认格式，但 BiliNote 当前机器 ingest schema 实际没有这些字段，也没有读取用户 UI 默认格式。因此自动同步生成的文档会稳定缺少原片截图。
+- 非根因：
+  - 不是媒体库 `.jpg/.nfo/tvshow.nfo` sidecar 封面问题。
+  - 不是 ffmpeg 截图器失效；截图器只在 BiliNote 接收到 `screenshot=true` 或 `format` 包含 `screenshot` 后才会被调用。
+- 修复方向：
+  - BiliNote：扩展 `KnowledgeIngestRequest`，支持并持久化 `format/link/screenshot/style/extras/video_understanding/video_interval/grid_size`，生成 note 时复用与 `/notes/from_transcript` 一致的截图后处理。
+  - Bililive-go：自动 `knowledge_sync` 默认值或运行配置必须显式传 `format: [toc, link, screenshot, summary]`、`link: true`、`screenshot: true`，并用回归测试覆盖 same-live aggregation payload。
+  - 验收：真实自动任务完成后，BiliNote markdown 中应出现 `/static/screenshots/...` 或 `![视频截图 ...]`；若用户只在 UI 勾选而未配置自动同步，必须在设置页明确提示两者不是同一配置域。
+
+## 2026-06-13 原片截图缺失修复 checkpoint
+
+- 执行方式：按用户要求调用两个子代理并由主会话审核。
+  - BiliNote 子任务：扩展 `/api/knowledge/ingest` 机器接口，支持 `format/link/screenshot/style/extras/video_understanding/video_interval/grid_size` 并调度 `NoteGenerator.generate_from_transcript`。
+  - Bililive-go 子任务：`SubtitleKnowledgeSyncConfig` 增加默认 note 格式 `[toc, link, screenshot, summary]`，默认 `link/screenshot=true`，所有单段、same-live session、aggregate payload 均通过 `ResolveNoteOptions()` 发送。
+- 主会话审核追加修正：
+  - BiliNote 机器 ingest 显式 `link=false` / `screenshot=false` 现在会从 format 中移除对应项，避免显式关闭被默认格式覆盖。
+  - BiliNote `generate_from_transcript` 在 `screenshot` 或 `video_understanding` 开启但请求缺少采样参数时，默认使用 `video_interval=4`、`grid_size=[3,3]`，避免自动链路只传截图开关却没有可用帧，导致 LLM 不产出 Screenshot 标记且 fallback 无帧可插。
+  - Bililive-go `config.yml` 样例和 `config_comments.go` 注释模板同步说明 `link/screenshot` 留空时使用 Bililive-go 默认值，避免后续 YAML round-trip 恢复旧误导注释。
+- 本地验证：
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Volumes/ISCSI-Disk/Folder/BiliNote/backend python3 -m pytest /Volumes/ISCSI-Disk/Folder/BiliNote/backend/tests/test_knowledge_ingest_note_options.py /Volumes/ISCSI-Disk/Folder/BiliNote/backend/tests/test_notes_from_transcript.py -q -p no:cacheprovider` -> `6 passed`。
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Volumes/ISCSI-Disk/Folder/BiliNote/backend python3 -m pytest /Volumes/ISCSI-Disk/Folder/BiliNote/backend/tests/test_note_router_regressions.py /Volumes/ISCSI-Disk/Folder/BiliNote/backend/tests/test_prompt_and_note_regressions.py -q -p no:cacheprovider` -> `28 passed`。
+  - `PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/Volumes/ISCSI-Disk/Folder/BiliNote/backend python3 -m pytest /Volumes/ISCSI-Disk/Folder/BiliNote/backend/tests/test_knowledge_memory.py -q -p no:cacheprovider` -> `19 passed`。
+  - `GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/configs ./src/pipeline/stages` -> passed after rerun outside sandbox because `httptest` needs loopback bind.
+  - `GOCACHE=/tmp/bililive-go-gocache make dev` -> built `bin/bililive-darwin-arm64` successfully.
+  - `git diff --check` clean for both Bililive-go worktree and BiliNote scoped changes.
+- Remaining rollout gate:
+  - 当前只是本地代码和 unit/build 验证；还未提交 PR、未发布镜像、未在 NAS `latest` 上真实自动任务验收。
+  - 上线后必须用本地 Chrome/Computer Use 验证 BiliNote 最近自动文档出现 `![视频截图 ...]`，并用 NAS `/api/info` 确认 Bililive-go 运行 hash。
+
+## 2026-06-13 原片截图缺失分支拆分
+
+- 复查旧分支状态：
+  - Bililive-go `codex/same-live-media-library-aggregation` 对应 PR #34 已 merged，当前未提交截图默认值补丁不能继续追加到已合并分支。
+  - BiliNote `codex/fix-long-transcript-chunking` 对应 PR #35 已 merged，且原工作树混有前端/transcriber 等无关脏改动，不能作为本次截图修复提交面。
+- 新分支策略：
+  - Bililive-go 从最新 `origin/master=806da08c5cc299d593910a83221c6c6e640532d1` 切出 `codex/restore-note-screenshots`，承载自动同步 `format/link/screenshot` 默认值与 payload 测试。
+  - BiliNote 从最新 `origin/master=4237108c745996c3a016a1a3dcd4ca19cb838e23` 新建干净 worktree `worktrees/bilinote-machine-ingest-screenshots` / branch `codex/machine-ingest-screenshots`，只承载 `generate_from_transcript` 缺省视频采样兜底与回归测试。
+- 新增验证：
+  - BiliNote 干净 worktree：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=backend python3 -m pytest backend/tests/test_prompt_and_note_regressions.py backend/tests/test_knowledge_memory.py backend/tests/test_note_router_regressions.py -q -p no:cacheprovider` -> `89 passed`。
+  - Bililive-go 新分支：`GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/configs ./src/pipeline/stages` -> sandbox 因 `httptest` loopback bind 被拒；非沙盒重跑通过。
+  - 两个工作树 `git diff --check` 均 clean。

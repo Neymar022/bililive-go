@@ -461,6 +461,8 @@ const DefaultSubtitleKnowledgeSyncMinVideoDurationSeconds = 3
 const DefaultSubtitleKnowledgeSyncLiveSessionQuietWindowSeconds = 300
 const DefaultSubtitleScheduleRunAt = "02:00"
 
+var defaultSubtitleKnowledgeSyncFormat = []string{"toc", "link", "screenshot", "summary"}
+
 type SubtitleLocalConfig struct {
 	Model       string `yaml:"model" json:"model"`
 	ComputeType string `yaml:"compute_type" json:"compute_type"`
@@ -490,6 +492,75 @@ type SubtitleKnowledgeSyncConfig struct {
 	TimeoutSeconds                int      `yaml:"timeout_seconds" json:"timeout_seconds"`
 	MinVideoDurationSeconds       int      `yaml:"min_video_duration_seconds" json:"min_video_duration_seconds"`
 	LiveSessionQuietWindowSeconds int      `yaml:"live_session_quiet_window_seconds" json:"live_session_quiet_window_seconds"`
+}
+
+func (s *SubtitleKnowledgeSyncConfig) SetDefaults() {
+	if s == nil {
+		return
+	}
+	formatConfigured := len(s.Format) > 0
+	if !formatConfigured {
+		s.Format = append([]string(nil), defaultSubtitleKnowledgeSyncFormat...)
+	}
+
+	link := true
+	if s.Link != nil {
+		link = *s.Link
+	} else if formatConfigured {
+		link = containsString(s.Format, "link")
+	}
+	s.Link = BoolPtr(link)
+
+	screenshot := true
+	if s.Screenshot != nil {
+		screenshot = *s.Screenshot
+	} else if formatConfigured {
+		screenshot = containsString(s.Format, "screenshot")
+	}
+	s.Screenshot = BoolPtr(screenshot)
+
+	s.Format = filterKnowledgeSyncFormat(s.Format, link, screenshot)
+}
+
+func (s SubtitleKnowledgeSyncConfig) ResolveNoteOptions() ([]string, *bool, *bool) {
+	s.SetDefaults()
+	return append([]string(nil), s.Format...), BoolPtr(*s.Link), BoolPtr(*s.Screenshot)
+}
+
+func filterKnowledgeSyncFormat(format []string, link bool, screenshot bool) []string {
+	result := make([]string, 0, len(format))
+	seen := make(map[string]struct{}, len(format))
+	for _, item := range format {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		switch item {
+		case "link":
+			if !link {
+				continue
+			}
+		case "screenshot":
+			if !screenshot {
+				continue
+			}
+		}
+		if _, ok := seen[item]; ok {
+			continue
+		}
+		seen[item] = struct{}{}
+		result = append(result, item)
+	}
+	return result
+}
+
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if strings.TrimSpace(value) == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (s SubtitleKnowledgeSyncConfig) GetEndpoint() string {
@@ -1190,6 +1261,7 @@ func newConfigPostProcess(c *Config) {
 	if c.AppDataPath == "" {
 		c.AppDataPath = filepath.Join(c.OutPutPath, ".appdata")
 	}
+	c.Subtitle.KnowledgeSync.SetDefaults()
 }
 
 // configMinimal 是配置文件的最小子集，仅包含 launcher 决策所需的字段。

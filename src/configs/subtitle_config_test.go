@@ -27,9 +27,11 @@ func TestSubtitleConfigDefaults(t *testing.T) {
 	assert.False(t, cfg.Subtitle.KnowledgeSync.Enabled)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.GenerateNote)
 	assert.True(t, cfg.Subtitle.KnowledgeSync.NonBlocking)
-	assert.Empty(t, cfg.Subtitle.KnowledgeSync.Format)
-	assert.Nil(t, cfg.Subtitle.KnowledgeSync.Link)
-	assert.Nil(t, cfg.Subtitle.KnowledgeSync.Screenshot)
+	assert.Equal(t, []string{"toc", "link", "screenshot", "summary"}, cfg.Subtitle.KnowledgeSync.Format)
+	assert.NotNil(t, cfg.Subtitle.KnowledgeSync.Link)
+	assert.True(t, *cfg.Subtitle.KnowledgeSync.Link)
+	assert.NotNil(t, cfg.Subtitle.KnowledgeSync.Screenshot)
+	assert.True(t, *cfg.Subtitle.KnowledgeSync.Screenshot)
 	assert.Nil(t, cfg.Subtitle.KnowledgeSync.VideoUnderstanding)
 	assert.Zero(t, cfg.Subtitle.KnowledgeSync.VideoInterval)
 	assert.Empty(t, cfg.Subtitle.KnowledgeSync.GridSize)
@@ -73,6 +75,24 @@ func TestSubtitleKnowledgeSyncUsesEnvironment(t *testing.T) {
 	assert.Equal(t, "env-token", cfg.Subtitle.KnowledgeSync.GetToken())
 	assert.Equal(t, "qwen", cfg.Subtitle.KnowledgeSync.GetProviderID())
 	assert.Equal(t, "qwen3.6-plus", cfg.Subtitle.KnowledgeSync.GetModelName())
+}
+
+func TestSubtitleKnowledgeSyncExplicitFormatWithoutScreenshotDisablesScreenshot(t *testing.T) {
+	cfg, err := NewConfigWithBytes([]byte(`
+subtitle:
+  knowledge_sync:
+    format:
+      - toc
+      - link
+      - summary
+`))
+
+	assert.NoError(t, err)
+	assert.Equal(t, []string{"toc", "link", "summary"}, cfg.Subtitle.KnowledgeSync.Format)
+	assert.NotNil(t, cfg.Subtitle.KnowledgeSync.Link)
+	assert.True(t, *cfg.Subtitle.KnowledgeSync.Link)
+	assert.NotNil(t, cfg.Subtitle.KnowledgeSync.Screenshot)
+	assert.False(t, *cfg.Subtitle.KnowledgeSync.Screenshot)
 }
 
 func TestSubtitleScheduleNextRunAfter(t *testing.T) {

@@ -653,6 +653,7 @@ func buildKnowledgeLiveSessionAggregateIngestPayload(
 	}
 
 	sourceID := "live-session:" + sessionID
+	format, link, screenshot := cfg.ResolveNoteOptions()
 	return knowledgeIngestPayload{
 		SourceID:           sourceID,
 		SourceType:         "bililive-go",
@@ -670,9 +671,9 @@ func buildKnowledgeLiveSessionAggregateIngestPayload(
 		NonBlocking:        cfg.NonBlocking,
 		ModelName:          cfg.GetModelName(),
 		ProviderID:         cfg.GetProviderID(),
-		Format:             append([]string(nil), cfg.Format...),
-		Link:               cfg.Link,
-		Screenshot:         cfg.Screenshot,
+		Format:             format,
+		Link:               link,
+		Screenshot:         screenshot,
 		Style:              cfg.Style,
 		Extras:             cfg.Extras,
 		VideoUnderstanding: cfg.VideoUnderstanding,

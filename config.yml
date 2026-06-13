@@ -206,6 +206,16 @@ subtitle:
     generate_note: true
     # true 时 BiliNote 后台处理，Bililive-go 只等待接收成功
     non_blocking: true
+    # 可选：覆盖 BiliNote 机器 ingest 默认笔记格式，例如 [toc, link, screenshot, summary]
+    format:
+      - toc
+      - link
+      - screenshot
+      - summary
+    # 可选：覆盖是否生成原片跳转；留空时使用 Bililive-go 默认值
+    link: true
+    # 可选：覆盖是否生成原片截图；留空时使用 Bililive-go 默认值
+    screenshot: true
     # Bililive-go 等待 BiliNote 接收请求的超时时间
     timeout_seconds: 30
     # BiliNote 同步最小时长（秒）
