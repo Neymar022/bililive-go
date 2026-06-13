@@ -363,6 +363,52 @@ func TestEnsureLibraryHardlink_RepairsShowNFO(t *testing.T) {
 	assert.Contains(t, string(showNFOText), "<studio>bililive-go</studio>")
 }
 
+func TestEnsureLibrarySidecarsRepairsResolvedLibraryPath(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "天津蛋哥   6点说车 - 2026-06-12 20-00-00 - 晚间说车.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	seasonDir := filepath.Join(libraryRoot, "天津蛋哥 6点说车", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	libraryPath := filepath.Join(seasonDir, "天津蛋哥 6点说车.S01E0003.2026-06-12 - 晚间说车.mp4")
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	err := EnsureLibrarySidecars(context.Background(), sourcePath, libraryPath, "天津蛋哥 6点说车", referenceTime, "srt_video")
+	require.NoError(t, err)
+
+	require.FileExists(t, filepath.Join(libraryRoot, "天津蛋哥 6点说车", "tvshow.nfo"))
+	require.FileExists(t, strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath))+".nfo")
+	require.FileExists(t, strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath))+".jpg")
+	require.NoDirExists(t, filepath.Join(libraryRoot, "天津蛋哥   6点说车"))
+}
+
+func TestEnsureLibrarySidecarsFailsWhenCoverCannotBeCreated(t *testing.T) {
+	original := extractCoverTo
+	extractCoverTo = func(_ context.Context, _, _ string) (string, error) {
+		return "", assert.AnError
+	}
+	t.Cleanup(func() {
+		extractCoverTo = original
+	})
+
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+	seasonDir := filepath.Join(libraryRoot, "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	libraryPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	require.NoError(t, os.Link(sourcePath, libraryPath))
+
+	err := EnsureLibrarySidecars(context.Background(), sourcePath, libraryPath, "主播", referenceTime, "bililive-go")
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extract episode cover")
+	assert.NoFileExists(t, strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath))+".jpg")
+}
+
 // TestBuildEpisodeFilename_Basic checks the filename builder directly.
 func TestBuildEpisodeFilename_Basic(t *testing.T) {
 	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local)

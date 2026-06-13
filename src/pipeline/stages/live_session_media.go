@@ -35,6 +35,7 @@ type liveSessionMediaProbeDurationFunc func(ctx context.Context, ffmpegPath stri
 
 var liveSessionMediaConcat liveSessionMediaConcatFunc = concatLiveSessionMediaWithFFmpeg
 var liveSessionMediaProbeDuration liveSessionMediaProbeDurationFunc = probeLiveSessionMediaDuration
+var liveSessionMediaExtractCover = tools.ExtractCoverTo
 
 var libraryMediaEpisodePattern = regexp.MustCompile(`^(.+?)\.S(\d{2})E(\d{4})(?:-S\d{2}E\d{4})?\.(\d{4}-\d{2}-\d{2}) - (.+)\.[^.]+$`)
 
@@ -80,12 +81,16 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		aggregateStem+".srt",
 		aggregateStem+".ass",
 	)
+	if metadataExists && aggregateMetadata.RecordMeta["live_session_media_role"] != "aggregate" {
+		metadataExists = false
+	}
 	if !metadataExists {
 		segmentPaths, err := liveSessionSegmentVideoPaths(inputs)
 		if err != nil {
 			return nil, err
 		}
-		tmpPath := aggregatePath + ".tmp"
+		ext := filepath.Ext(aggregatePath)
+		tmpPath := strings.TrimSuffix(aggregatePath, ext) + ".tmp" + ext
 		_ = os.Remove(tmpPath)
 		if err := os.MkdirAll(filepath.Dir(aggregatePath), 0o755); err != nil {
 			return nil, err
@@ -120,27 +125,23 @@ func liveSessionAggregatePath(inputs []knowledgeSessionPayloadInput) (string, er
 	if len(inputs) == 0 {
 		return "", fmt.Errorf("live session media aggregate has no inputs")
 	}
-	first, ok := parseLiveSessionMediaEpisode(inputs[0].LibraryPath)
+	target, ok := parseLiveSessionMediaEpisode(inputs[0].LibraryPath)
 	if !ok {
 		return "", fmt.Errorf("cannot parse library episode path: %s", inputs[0].LibraryPath)
 	}
-	last := first
 	for _, input := range inputs[1:] {
 		parsed, ok := parseLiveSessionMediaEpisode(input.LibraryPath)
 		if !ok {
 			continue
 		}
-		if parsed.Episode > last.Episode {
-			last = parsed
+		if parsed.Episode > target.Episode {
+			target = parsed
 		}
 	}
 
-	rangeText := fmt.Sprintf("S%sE%04d", first.Season, first.Episode)
-	if last.Episode > first.Episode {
-		rangeText = fmt.Sprintf("%s-S%sE%04d", rangeText, last.Season, last.Episode)
-	}
-	name := fmt.Sprintf("%s.%s.%s - %s.mp4", first.Alias, rangeText, first.Date, first.Title)
-	return filepath.Join(first.SeasonDir, name), nil
+	episodeText := fmt.Sprintf("S%sE%04d", target.Season, target.Episode)
+	name := fmt.Sprintf("%s.%s.%s - %s.mp4", target.Alias, episodeText, target.Date, target.Title)
+	return filepath.Join(target.SeasonDir, name), nil
 }
 
 func parseLiveSessionMediaEpisode(path string) (liveSessionMediaEpisode, bool) {
@@ -211,7 +212,7 @@ func concatLiveSessionMediaWithFFmpeg(ctx context.Context, ffmpegPath string, in
 		return err
 	}
 
-	args := []string{"-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath}
+	args := []string{"-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-f", "mp4", outputPath}
 	output, err := exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("ffmpeg concat failed: %w: %s", err, trimCommandOutput(output))
@@ -275,7 +276,9 @@ func writeLiveSessionAggregateSidecars(
 	if err := writeLiveSessionShowNFO(aggregatePath, inputs); err != nil {
 		return subtitle.Metadata{}, err
 	}
-	ensureLiveSessionAggregateCover(ctx, aggregatePath, inputs, stem+".jpg")
+	if err := ensureLiveSessionAggregateCover(ctx, aggregatePath, inputs, stem+".jpg"); err != nil {
+		return subtitle.Metadata{}, err
+	}
 
 	now := time.Now().UTC()
 	firstMetadata := inputs[0].Metadata
@@ -492,11 +495,33 @@ func aggregatePlatform(inputs []knowledgeSessionPayloadInput) string {
 	return "bililive-go"
 }
 
-func ensureLiveSessionAggregateCover(ctx context.Context, aggregatePath string, inputs []knowledgeSessionPayloadInput, targetPath string) {
+func ensureLiveSessionAggregateCover(ctx context.Context, aggregatePath string, inputs []knowledgeSessionPayloadInput, targetPath string) error {
 	if copyFirstCover(inputs, targetPath) {
-		return
+		return nil
 	}
-	_, _ = tools.ExtractCoverTo(ctx, aggregatePath, targetPath)
+	if _, err := liveSessionMediaExtractCover(ctx, aggregatePath, targetPath); err == nil && nonEmptyFile(targetPath) {
+		return nil
+	}
+	for _, input := range inputs {
+		for _, candidate := range liveSessionCoverSourceCandidates(input) {
+			if candidate == "" || candidate == aggregatePath || !fileExists(candidate) {
+				continue
+			}
+			if _, err := liveSessionMediaExtractCover(ctx, candidate, targetPath); err == nil && nonEmptyFile(targetPath) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("live session aggregate cover could not be created: %s", targetPath)
+}
+
+func liveSessionCoverSourceCandidates(input knowledgeSessionPayloadInput) []string {
+	var candidates []string
+	if input.Metadata != nil {
+		candidates = append(candidates, input.Metadata.OutputPath, input.Metadata.SourcePath)
+	}
+	candidates = append(candidates, input.LibraryPath)
+	return candidates
 }
 
 func copyFirstCover(inputs []knowledgeSessionPayloadInput, targetPath string) bool {
@@ -511,6 +536,11 @@ func copyFirstCover(inputs []knowledgeSessionPayloadInput, targetPath string) bo
 		return true
 	}
 	return false
+}
+
+func nonEmptyFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Size() > 0
 }
 
 func hideLiveSessionSegmentVideos(libraryRoot string, manifest *knowledgeSessionManifest, inputs []knowledgeSessionPayloadInput, aggregatePath string) error {

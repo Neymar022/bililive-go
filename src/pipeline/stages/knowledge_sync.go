@@ -198,6 +198,18 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 	if err != nil {
 		return err
 	}
+	if metadata.RecordMeta["live_session_media_role"] == "aggregate" && manifest.PostedContentHash != "" {
+		metadata.KnowledgeSyncStatus = subtitle.StatusQueued
+		metadata.KnowledgeSyncTaskID = taskID
+		metadata.KnowledgeSyncSourceID = sourceID
+		metadata.KnowledgeSyncError = ""
+		metadata.KnowledgeSyncUpdatedAt = &now
+		if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
+			logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save aggregate knowledge sync queued status")
+		}
+		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", filepath.Base(libraryPath))
+		return nil
+	}
 	changed, err := registerKnowledgeSessionSource(&manifest, libraryRoot, knowledgeSessionPayloadInput{
 		TaskID:       taskID,
 		LibraryPath:  libraryPath,

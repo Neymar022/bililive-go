@@ -26,6 +26,9 @@ var normalizedFilenamePattern = regexp.MustCompile(
 )
 
 var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})(?:-S\d{2}E(\d{4}))?\.`)
+var libraryEpisodeFilenamePattern = regexp.MustCompile(
+	`^(?P<alias_name>.+?)\.S\d{2}E\d{4}(?:-S\d{2}E\d{4})?\.(?P<recorded_date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$`,
+)
 
 // invalidFilenameChars mirrors INVALID_FILENAME_CHARS in bililive_media_organizer.py.
 var invalidFilenameChars = regexp.MustCompile(`[<>:"/\\|?*\x00-\x1F]`)
@@ -264,6 +267,28 @@ func parseSourceFilename(sourcePath, fallbackHost string, fallbackTime time.Time
 	return sourceFileMeta{aliasName: aliasName, recordedAt: recordedAt, title: title}
 }
 
+func parseLibraryEpisodeFilename(libraryPath string) (sourceFileMeta, bool) {
+	stem := strings.TrimSuffix(filepath.Base(libraryPath), filepath.Ext(libraryPath))
+	m := libraryEpisodeFilenamePattern.FindStringSubmatch(stem)
+	if m == nil {
+		return sourceFileMeta{}, false
+	}
+	aliasName := sanitizeComponent(m[libraryEpisodeFilenamePattern.SubexpIndex("alias_name")])
+	title := sanitizeComponent(m[libraryEpisodeFilenamePattern.SubexpIndex("title")])
+	recordedDate := m[libraryEpisodeFilenamePattern.SubexpIndex("recorded_date")]
+	recordedAt, err := time.ParseInLocation("2006-01-02", recordedDate, time.Local)
+	if err != nil {
+		recordedAt = time.Now()
+	}
+	if aliasName == "" {
+		aliasName = "未分类主播"
+	}
+	if title == "" {
+		title = "未命名直播"
+	}
+	return sourceFileMeta{aliasName: aliasName, recordedAt: recordedAt, title: title}, true
+}
+
 // findExistingHardlinkInDir scans dir for any mp4 file that shares the same
 // inode as sourcePath (i.e., is a hardlink to it). Returns the path if found,
 // empty string otherwise.
@@ -417,8 +442,40 @@ func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath st
 			"cover":  coverPath,
 			"error":  err,
 		}).Warn("EnsureLibraryHardlink: failed to extract episode cover")
+		return fmt.Errorf("EnsureLibraryHardlink: extract episode cover %s: %w", coverPath, err)
+	}
+	if info, err := os.Stat(coverPath); err != nil || info.Size() == 0 {
+		if err != nil {
+			return fmt.Errorf("EnsureLibraryHardlink: stat extracted episode cover %s: %w", coverPath, err)
+		}
+		return fmt.Errorf("EnsureLibraryHardlink: extracted episode cover is empty: %s", coverPath)
 	}
 	return nil
+}
+
+func EnsureLibrarySidecars(ctx context.Context, sourcePath, libraryPath, fallbackHost string, fallbackTime time.Time, platform string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	meta, ok := parseLibraryEpisodeFilename(libraryPath)
+	if !ok {
+		meta = parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
+	}
+	if meta.aliasName == "" {
+		meta.aliasName = sanitizeComponent(fallbackHost)
+	}
+	if meta.aliasName == "" {
+		meta.aliasName = "未分类主播"
+	}
+	if meta.title == "" {
+		meta.title = "未命名直播"
+	}
+
+	coverSource := sourcePath
+	if _, err := os.Stat(coverSource); err != nil {
+		coverSource = libraryPath
+	}
+	return ensureLibraryEpisodeSidecars(ctx, coverSource, libraryPath, meta, platform)
 }
 
 // EnsureLibraryHardlink creates a Plex-style hard-link for sourcePath inside

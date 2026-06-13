@@ -109,7 +109,8 @@ func TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow(t *t
 	assert.Equal(t, "session-20260601-linkai", capturedPayload.LiveSessionID)
 	assert.Equal(t, "qwen3.7-plus", capturedPayload.ModelName)
 	assert.Equal(t, "教程", capturedPayload.Style)
-	assert.Contains(t, capturedPayload.SourceVideoPath, "S01E0019-S01E0020")
+	assert.Contains(t, capturedPayload.SourceVideoPath, "S01E0020")
+	assert.NotContains(t, capturedPayload.SourceVideoPath, "-S01E")
 	assert.Empty(t, capturedPayload.SourceVideos)
 	assert.Empty(t, capturedPayload.MediaSegments)
 	require.Len(t, capturedPayload.Segments, 2)
@@ -161,7 +162,8 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
 	require.NoError(t, err)
 	require.NotNil(t, aggregate)
-	assert.Contains(t, filepath.Base(aggregate.LibraryPath), "S01E0019-S01E0020")
+	assert.Contains(t, filepath.Base(aggregate.LibraryPath), "S01E0020")
+	assert.NotContains(t, filepath.Base(aggregate.LibraryPath), "-S01E")
 	require.FileExists(t, aggregate.LibraryPath)
 	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".subtitle.json")
 	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".srt")
@@ -170,7 +172,7 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	require.FileExists(t, strings.TrimSuffix(aggregate.LibraryPath, filepath.Ext(aggregate.LibraryPath))+".jpg")
 
 	assert.NoFileExists(t, firstLibraryPath)
-	assert.NoFileExists(t, secondLibraryPath)
+	assert.Equal(t, secondLibraryPath, aggregate.LibraryPath)
 	seasonDir := filepath.Dir(firstLibraryPath)
 	visibleMP4 := visibleMP4Files(t, seasonDir)
 	assert.Equal(t, []string{filepath.Base(aggregate.LibraryPath)}, visibleMP4)
@@ -182,6 +184,31 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	assert.Equal(t, aggregate.LibraryPath, firstMetadata.RecordMeta["live_session_media_aggregate_path"])
 	require.Len(t, aggregate.Metadata.Segments, 2)
 	assert.Equal(t, "00:02:00,000", aggregate.Metadata.Segments[1].Start)
+}
+
+func TestPublishLiveSessionMediaAggregateFailsWhenCoverCannotBeCreated(t *testing.T) {
+	stubLiveSessionMedia(t, []float64{120, 90})
+	stubLiveSessionCoverExtraction(t, assert.AnError)
+	libraryRoot := t.TempDir()
+	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "第一段内容")
+	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第二段内容")
+	require.NoError(t, os.Remove(strings.TrimSuffix(firstLibraryPath, filepath.Ext(firstLibraryPath))+".jpg"))
+	require.NoError(t, os.Remove(strings.TrimSuffix(secondLibraryPath, filepath.Ext(secondLibraryPath))+".jpg"))
+
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:session-20260601-linkai",
+		LiveSessionID: "session-20260601-linkai",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-619", SourceID: knowledgeSourceID(libraryRoot, firstLibraryPath), LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath},
+			{TaskID: "bililive-go-620", SourceID: knowledgeSourceID(libraryRoot, secondLibraryPath), LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "aggregate cover")
 }
 
 func knowledgeSessionTestContext(taskID int64) *pipeline.PipelineContext {
@@ -206,6 +233,7 @@ func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host strin
 	metadataPath := base + ".subtitle.json"
 	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
 	require.NoError(t, os.WriteFile(libraryPath, []byte("video"), 0o644))
+	require.NoError(t, os.WriteFile(base+".jpg", []byte("cover"), 0o644))
 	require.NoError(t, os.WriteFile(srtPath, []byte(text), 0o644))
 	require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
 	completedAt := time.Date(2026, 6, 1, 18, episode, 0, 0, time.UTC)
@@ -261,6 +289,23 @@ func stubLiveSessionMedia(t *testing.T, durations []float64) {
 	t.Cleanup(func() {
 		liveSessionMediaConcat = oldConcat
 		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+}
+
+func stubLiveSessionCoverExtraction(t *testing.T, err error) {
+	t.Helper()
+	oldExtractCover := liveSessionMediaExtractCover
+	liveSessionMediaExtractCover = func(ctx context.Context, videoPath, coverPath string) (string, error) {
+		if err != nil {
+			return "", err
+		}
+		if writeErr := os.WriteFile(coverPath, []byte("cover"), 0o644); writeErr != nil {
+			return "", writeErr
+		}
+		return coverPath, nil
+	}
+	t.Cleanup(func() {
+		liveSessionMediaExtractCover = oldExtractCover
 	})
 }
 

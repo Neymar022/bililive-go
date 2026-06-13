@@ -10,7 +10,9 @@ from __future__ import annotations
 
 import argparse
 import html
+import os
 import re
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime
@@ -190,29 +192,6 @@ def collect_episodes(root: Path) -> list[Episode]:
     return episodes
 
 
-def existing_episode_slots(season_dir: Path) -> set[int]:
-    used: set[int] = set()
-    if not season_dir.exists():
-        return used
-    for entry in season_dir.iterdir():
-        if entry.is_dir():
-            continue
-        match = re.search(r"\.S01E(\d{4})(?:-S\d{2}E(\d{4}))?\.", entry.name)
-        if match:
-            first = int(match.group(1))
-            last = int(match.group(2)) if match.group(2) else first
-            used.update(range(first, last + 1))
-    return used
-
-
-def next_episode_slot(used: set[int]) -> int:
-    episode = 1
-    while episode in used:
-        episode += 1
-    used.add(episode)
-    return episode
-
-
 def duplicate_show_identities(episodes: list[Episode]) -> dict[str, list[Path]]:
     by_identity: dict[str, set[Path]] = {}
     for ep in episodes:
@@ -224,39 +203,115 @@ def duplicate_show_identities(episodes: list[Episode]) -> dict[str, list[Path]]:
     }
 
 
-def move_duplicate_show_dirs(root: Path, episodes: list[Episode], apply: bool) -> tuple[int, int]:
+def unique_quarantine_path(quarantine_root: Path, relative_path: Path) -> Path:
+    target = quarantine_root / relative_path
+    if not target.exists():
+        return target
+    for index in range(1, 1000):
+        candidate = target.with_name(f"{target.stem}.conflict{index}{target.suffix}")
+        if not candidate.exists():
+            return candidate
+    raise RuntimeError(f"too many quarantine conflicts for {target}")
+
+
+def move_or_quarantine(src: Path, dst: Path, root: Path, apply: bool) -> tuple[bool, bool]:
+    if dst.exists():
+        quarantine_root = root / ".quarantine-library-sidecars" / datetime.now().strftime("%Y%m%d-%H%M%S")
+        try:
+            rel = src.relative_to(root)
+        except ValueError:
+            rel = Path(src.name)
+        quarantine = unique_quarantine_path(quarantine_root, rel)
+        print(f"[quarantine] {src} -> {quarantine} (conflict: {dst})")
+        if apply:
+            quarantine.parent.mkdir(parents=True, exist_ok=True)
+            src.replace(quarantine)
+        return False, True
+
+    print(f"[move] {src} -> {dst}")
+    if apply:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.replace(dst)
+    return True, False
+
+
+def move_duplicate_show_dirs(root: Path, episodes: list[Episode], apply: bool) -> tuple[int, int, int]:
     by_show: dict[Path, list[Episode]] = {}
     for ep in episodes:
         by_show.setdefault(ep.show_dir, []).append(ep)
 
     moved_episodes = 0
     moved_files = 0
+    quarantined_files = 0
     for identity, dirs in sorted(duplicate_show_identities(episodes).items()):
         canonical_show_dir = root / identity
         canonical_season_dir = canonical_show_dir / "Season 01"
-        used_slots = existing_episode_slots(canonical_season_dir)
 
         for show_dir in dirs:
             if show_dir == canonical_show_dir:
                 continue
             for ep in sorted(by_show.get(show_dir, []), key=lambda item: (item.season, item.episode, item.path.name)):
-                episode = next_episode_slot(used_slots)
-                new_stem = f"{identity}.S01E{episode:04d}.{ep.date} - {ep.title}"
+                new_stem = f"{identity}.S01E{ep.episode:04d}.{ep.date} - {ep.title}"
                 moved_episodes += 1
                 for suffix in SIDECAR_SUFFIXES:
                     src = ep.path.with_suffix(suffix)
                     if not src.exists():
                         continue
                     dst = canonical_season_dir / f"{new_stem}{suffix}"
-                    moved_files += 1
-                    print(f"[move] {src} -> {dst}")
-                    if apply:
-                        canonical_season_dir.mkdir(parents=True, exist_ok=True)
-                        if dst.exists():
-                            raise FileExistsError(f"refusing to overwrite existing file: {dst}")
-                        src.replace(dst)
+                    moved, quarantined = move_or_quarantine(src, dst, root, apply)
+                    if moved:
+                        moved_files += 1
+                    if quarantined:
+                        quarantined_files += 1
 
-    return moved_episodes, moved_files
+    return moved_episodes, moved_files, quarantined_files
+
+
+def cover_complete(path: Path) -> bool:
+    try:
+        return path.exists() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def extract_cover(video_path: Path, cover_path: Path, ffmpeg_bin: str, apply: bool) -> bool:
+    print(f"[cover] {cover_path}")
+    if not apply:
+        return True
+
+    cover_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cover_path.with_name(f".{cover_path.name}.tmp")
+    if tmp_path.exists():
+        tmp_path.unlink()
+    cmd = [
+        ffmpeg_bin,
+        "-y",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-ss",
+        "1",
+        "-i",
+        str(video_path),
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+        str(tmp_path),
+    ]
+    result = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    if result.returncode != 0:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        print(f"[cover-error] {video_path}: {result.stderr.strip() or result.stdout.strip() or result.returncode}")
+        return False
+    if not cover_complete(tmp_path):
+        if tmp_path.exists():
+            tmp_path.unlink()
+        print(f"[cover-error] {video_path}: ffmpeg produced empty cover")
+        return False
+    tmp_path.replace(cover_path)
+    return True
 
 
 def main() -> int:
@@ -274,6 +329,11 @@ def main() -> int:
         action="store_true",
         help="move duplicate show-directory episodes into the normalized canonical show directory; requires --apply",
     )
+    parser.add_argument(
+        "--ffmpeg",
+        default=os.environ.get("FFMPEG_BIN", "ffmpeg"),
+        help="ffmpeg binary used when --apply needs to extract missing episode covers",
+    )
     args = parser.parse_args()
     if args.merge_duplicate_shows and not args.apply:
         parser.error("--merge-duplicate-shows requires --apply")
@@ -290,8 +350,9 @@ def main() -> int:
 
     moved_episodes = 0
     moved_files = 0
+    quarantined_files = 0
     if args.merge_duplicate_shows:
-        moved_episodes, moved_files = move_duplicate_show_dirs(root, episodes, args.apply)
+        moved_episodes, moved_files, quarantined_files = move_duplicate_show_dirs(root, episodes, args.apply)
         episodes = collect_episodes(root)
         if args.only_show:
             episodes = [
@@ -311,6 +372,8 @@ def main() -> int:
 
     show_repairs = 0
     episode_repairs = 0
+    cover_repairs = 0
+    cover_failures = 0
     for show_dir, show_episodes in sorted(by_show.items(), key=lambda item: str(item[0])):
         first = show_episodes[0]
         show_nfo = show_dir / "tvshow.nfo"
@@ -331,14 +394,24 @@ def main() -> int:
                 if args.apply:
                     nfo.write_text(build_episode_nfo(ep, studio), encoding="utf-8")
 
+            cover = ep.path.with_suffix(".jpg")
+            if not cover_complete(cover):
+                cover_repairs += 1
+                if not extract_cover(ep.path, cover, args.ffmpeg, args.apply):
+                    cover_failures += 1
+
     mode = "apply" if args.apply else "dry-run"
     print(
         f"{datetime.now().isoformat(timespec='seconds')} {mode}: "
         f"shows={len(by_show)} episodes={len(episodes)} "
         f"show_repairs={show_repairs} episode_repairs={episode_repairs} "
+        f"cover_repairs={cover_repairs} cover_failures={cover_failures} "
         f"duplicate_show_identities={len(duplicates)} "
-        f"moved_episodes={moved_episodes} moved_files={moved_files}"
+        f"moved_episodes={moved_episodes} moved_files={moved_files} "
+        f"quarantined_files={quarantined_files}"
     )
+    if cover_failures:
+        return 3
     if duplicates and args.fail_on_duplicate_shows:
         return 2
     return 0
