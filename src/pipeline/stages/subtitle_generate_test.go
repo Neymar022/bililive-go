@@ -266,9 +266,11 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	assert.True(t, capturedPayload.NonBlocking)
 	assert.Equal(t, "qwen3.6-plus", capturedPayload.ModelName)
 	assert.Equal(t, "qwen", capturedPayload.ProviderID)
-	assert.Empty(t, capturedPayload.Format)
-	assert.Nil(t, capturedPayload.Link)
-	assert.Nil(t, capturedPayload.Screenshot)
+	assert.Equal(t, []string{"toc", "link", "screenshot", "summary"}, capturedPayload.Format)
+	require.NotNil(t, capturedPayload.Link)
+	assert.True(t, *capturedPayload.Link)
+	require.NotNil(t, capturedPayload.Screenshot)
+	assert.True(t, *capturedPayload.Screenshot)
 	assert.Nil(t, capturedPayload.VideoUnderstanding)
 	assert.Zero(t, capturedPayload.VideoInterval)
 	assert.Empty(t, capturedPayload.GridSize)
@@ -729,6 +731,38 @@ func TestBuildKnowledgePayloadPassesOptionalNoteOverrides(t *testing.T) {
 	assert.True(t, *payload.VideoUnderstanding)
 	assert.Equal(t, 4, payload.VideoInterval)
 	assert.Equal(t, []int{3, 3}, payload.GridSize)
+}
+
+func TestBuildKnowledgePayloadRespectsExplicitScreenshotDisabled(t *testing.T) {
+	screenshot := false
+	cfg := configs.SubtitleKnowledgeSyncConfig{
+		GenerateNote: true,
+		NonBlocking:  true,
+		ProviderID:   "qwen",
+		ModelName:    "qwen3.6-plus",
+		Format:       []string{"toc", "link", "summary"},
+		Screenshot:   &screenshot,
+	}
+	metadata := &subtitle.Metadata{
+		SRTPath:  "/video/host/e1.srt",
+		Language: "zh",
+		Segments: []subtitle.Segment{
+			{Index: 1, Start: "00:00:00,000", End: "00:00:02,000", Text: "字幕内容"},
+		},
+	}
+
+	payload, err := buildKnowledgeIngestPayload(
+		&pipeline.PipelineContext{TaskID: 473},
+		cfg,
+		"/video",
+		"/video/host/e1.mp4",
+		metadata,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"toc", "link", "summary"}, payload.Format)
+	require.NotNil(t, payload.Screenshot)
+	assert.False(t, *payload.Screenshot)
 }
 
 func TestSubtitleGenerateDoesNotFailWhenKnowledgeSyncFails(t *testing.T) {

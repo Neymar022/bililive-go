@@ -364,6 +364,7 @@ func buildKnowledgeIngestPayload(
 		host = ctx.RecordInfo.HostName
 		topic = ctx.RecordInfo.RoomName
 	}
+	format, link, screenshot := cfg.ResolveNoteOptions()
 
 	payload := knowledgeIngestPayload{
 		SourceID:           sourceID,
@@ -381,9 +382,9 @@ func buildKnowledgeIngestPayload(
 		NonBlocking:        cfg.NonBlocking,
 		ModelName:          cfg.GetModelName(),
 		ProviderID:         cfg.GetProviderID(),
-		Format:             append([]string(nil), cfg.Format...),
-		Link:               cfg.Link,
-		Screenshot:         cfg.Screenshot,
+		Format:             format,
+		Link:               link,
+		Screenshot:         screenshot,
 		Style:              cfg.Style,
 		Extras:             cfg.Extras,
 		VideoUnderstanding: cfg.VideoUnderstanding,
@@ -416,6 +417,7 @@ func buildKnowledgeSessionIngestPayload(
 
 	sourceID := "live-session:" + sessionID
 	title := strings.TrimSuffix(filepath.Base(inputs[0].LibraryPath), filepath.Ext(inputs[0].LibraryPath))
+	format, link, screenshot := cfg.ResolveNoteOptions()
 	payload := knowledgeIngestPayload{
 		SourceID:           sourceID,
 		SourceType:         "bililive-go",
@@ -429,9 +431,9 @@ func buildKnowledgeSessionIngestPayload(
 		NonBlocking:        cfg.NonBlocking,
 		ModelName:          cfg.GetModelName(),
 		ProviderID:         cfg.GetProviderID(),
-		Format:             append([]string(nil), cfg.Format...),
-		Link:               cfg.Link,
-		Screenshot:         cfg.Screenshot,
+		Format:             format,
+		Link:               link,
+		Screenshot:         screenshot,
 		Style:              cfg.Style,
 		Extras:             cfg.Extras,
 		VideoUnderstanding: cfg.VideoUnderstanding,
