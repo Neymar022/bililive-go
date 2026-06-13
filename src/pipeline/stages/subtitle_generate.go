@@ -99,6 +99,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 				"library": libraryPath,
 			}).Info("subtitle_generate: 已自建字幕库硬链接（cron 尚未运行）")
 		}
+		if err := subtitle.EnsureLibrarySidecars(ctx.Ctx, file.Path, libraryPath, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime, ctx.RecordInfo.Platform); err != nil {
+			return nil, fmt.Errorf("subtitle_generate: failed to ensure library sidecars: %w", err)
+		}
 		srtPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".srt"
 		assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
 		metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"

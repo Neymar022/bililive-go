@@ -47,6 +47,7 @@ func TestSubtitleGenerateStageExecute(t *testing.T) {
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -117,6 +118,7 @@ func TestSubtitleGenerateQueuesSidecarWhenMacTranscriberUnavailable(t *testing.T
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -221,6 +223,7 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	defer knowledge.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -318,6 +321,7 @@ func TestSubtitleGenerateSkipsKnowledgeSyncForTooShortTranscript(t *testing.T) {
 	defer knowledge.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -407,6 +411,7 @@ func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(
 	defer knowledge.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -474,6 +479,7 @@ func TestSubtitleGenerateUsesCompletedSidecarWhenKnowledgeAggregationRetries(t *
 	defer knowledge.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -546,6 +552,7 @@ func TestSubtitleGenerateDeletesResidualSourceWhenCompletedSidecarIsReused(t *te
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -586,6 +593,7 @@ func TestSubtitleGenerateSkipsLibraryPublishForTooShortVideo(t *testing.T) {
 	require.NoError(t, os.WriteFile(sourcePath, []byte("short source"), 0o644))
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -647,6 +655,7 @@ func TestSubtitleGenerateRemovesExistingLibraryLinkForTooShortVideo(t *testing.T
 	require.NoError(t, os.Link(sourcePath, libraryPath))
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -752,6 +761,7 @@ func TestSubtitleGenerateDoesNotFailWhenKnowledgeSyncFails(t *testing.T) {
 	defer knowledge.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -813,6 +823,7 @@ func TestSubtitleGenerateDeletesSourceOnCompletion(t *testing.T) {
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -872,6 +883,7 @@ func TestSubtitleGenerateSelfSufficientCreatesHardlink(t *testing.T) {
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -917,6 +929,7 @@ func TestSubtitleGenerateRejectsRawFlvInput(t *testing.T) {
 	require.NoError(t, os.WriteFile(sourcePath, []byte("raw flv"), 0o644))
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -968,6 +981,7 @@ func TestSubtitleGenerateSelfSufficientUsesExistingLink(t *testing.T) {
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -1029,6 +1043,7 @@ func TestSubtitleGenerateAutoDeleteSurvivesMissingSource(t *testing.T) {
 	defer worker.Close()
 
 	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
 	cfg.OutPutPath = sourceRoot
 	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = libraryRoot
@@ -1059,6 +1074,20 @@ func fakeFFmpegForDuration(t *testing.T, duration string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "ffmpeg")
 	script := fmt.Sprintf("#!/bin/sh\necho 'Duration: %s, start: 0.000000, bitrate: 0 kb/s' >&2\nexit 0\n", duration)
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	return path
+}
+
+func fakeFFmpegForCover(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ffmpeg")
+	script := `#!/bin/sh
+out=""
+for arg do
+  out="$arg"
+done
+printf cover > "$out"
+`
 	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
 	return path
 }
