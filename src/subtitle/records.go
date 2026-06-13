@@ -1,6 +1,8 @@
 package subtitle
 
 import (
+	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -39,6 +41,8 @@ type Record struct {
 	KnowledgeSyncAttempts  int        `json:"knowledge_sync_attempts,omitempty"`
 	KnowledgeSyncUpdatedAt *time.Time `json:"knowledge_sync_updated_at,omitempty"`
 }
+
+var ErrSourceNotDeletable = errors.New("subtitle: resolved source is not a deletable source file")
 
 // ListRecords 返回字幕库中所有 mp4 录制的状态列表。
 //
@@ -106,6 +110,9 @@ func DeleteSourceFile(videoPath, sourceRoot string) error {
 	if err != nil {
 		return err
 	}
+	if !isDeletableSourcePath(videoPath, sourceRoot, sourcePath) {
+		return fmt.Errorf("%w: %s", ErrSourceNotDeletable, sourcePath)
+	}
 	if err := os.Remove(sourcePath); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -140,6 +147,9 @@ func CleanupExpiredSources(libraryRoot, sourceRoot string, retentionDays int, no
 			continue
 		}
 		if err := DeleteSourceFile(record.VideoPath, sourceRoot); err != nil {
+			if errors.Is(err, ErrSourceNotDeletable) {
+				continue
+			}
 			return deleted, err
 		}
 		deleted++
@@ -208,6 +218,45 @@ func buildRecord(videoPath, libraryRoot, sourceRoot string, retentionDays int) (
 
 	record.SourceExists = sourceExistsForVideo(videoPath, sourceRoot)
 	return record, nil
+}
+
+func isDeletableSourcePath(videoPath, sourceRoot, sourcePath string) bool {
+	if strings.TrimSpace(sourcePath) == "" || strings.TrimSpace(sourceRoot) == "" {
+		return false
+	}
+	if same, err := sameCleanPath(sourcePath, videoPath); err == nil && same {
+		return false
+	}
+	inside, err := pathWithinRoot(sourcePath, sourceRoot)
+	return err == nil && inside
+}
+
+func sameCleanPath(left, right string) (bool, error) {
+	leftAbs, err := filepath.Abs(left)
+	if err != nil {
+		return false, err
+	}
+	rightAbs, err := filepath.Abs(right)
+	if err != nil {
+		return false, err
+	}
+	return filepath.Clean(leftAbs) == filepath.Clean(rightAbs), nil
+}
+
+func pathWithinRoot(path, root string) (bool, error) {
+	rootAbs, err := filepath.Abs(root)
+	if err != nil {
+		return false, err
+	}
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	rel, err := filepath.Rel(filepath.Clean(rootAbs), filepath.Clean(pathAbs))
+	if err != nil {
+		return false, err
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel), nil
 }
 
 func sourceExistsForVideo(videoPath, sourceRoot string) bool {

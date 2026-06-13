@@ -888,6 +888,65 @@ func TestSubtitleGenerateDeletesSourceOnCompletion(t *testing.T) {
 	assert.NotNil(t, metadata.SourceDeletedAt, "源已删，metadata.SourceDeletedAt 应有时间戳")
 }
 
+func TestSubtitleGenerateDoesNotDeleteLibraryVideoOnRerun(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	libraryPath := filepath.Join(libraryRoot, "小司说钢构", "Season 01", "小司说钢构.S01E0004.2026-06-11 - 钢结构该怎么选择002.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
+	require.NoError(t, os.WriteFile(libraryPath, []byte("library product"), 0o644))
+
+	var request subtitle.ProcessRequest
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&request))
+		require.NoError(t, os.WriteFile(request.OutputVideoPath, []byte("burned"), 0o644))
+		require.NoError(t, os.WriteFile(request.OutputSRTPath, []byte("1\n00:00:00,000 --> 00:00:02,000\n测试\n"), 0o644))
+		assPath := strings.TrimSuffix(request.OutputSRTPath, filepath.Ext(request.OutputSRTPath)) + ".ass"
+		require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
+		require.NoError(t, json.NewEncoder(w).Encode(subtitle.ProcessResponse{
+			ASSPath:  assPath,
+			Segments: []subtitle.Segment{{Index: 1, Start: "00:00:00,000", End: "00:00:02,000", Text: "测试"}},
+		}))
+	}))
+	defer worker.Close()
+
+	cfg := configs.NewConfig()
+	cfg.FfmpegPath = fakeFFmpegForCover(t)
+	cfg.OutPutPath = sourceRoot
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = libraryRoot
+	cfg.Subtitle.SourceRoot = sourceRoot
+	cfg.Subtitle.DeleteSourceOnCompletion = true
+	configs.SetCurrentConfig(cfg)
+	t.Setenv("SUBTITLE_WORKER_URL", worker.URL)
+
+	stage, err := NewSubtitleGenerateStage(pipeline.StageConfig{Name: pipeline.StageNameSubtitleGenerate})
+	require.NoError(t, err)
+
+	output, err := stage.Execute(&pipeline.PipelineContext{
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			Platform: "抖音",
+			HostName: "小司说钢构",
+			RoomName: "钢结构该怎么选择002",
+		},
+	}, []pipeline.FileInfo{
+		{Path: libraryPath, Type: pipeline.FileTypeVideo},
+	})
+
+	require.NoError(t, err)
+	require.Len(t, output, 3)
+	assert.Equal(t, libraryPath, request.SourcePath)
+	assert.Equal(t, libraryPath, request.OutputVideoPath)
+	_, statErr := os.Stat(libraryPath)
+	assert.NoError(t, statErr, "rerun 输入已经是媒体库成品时，自动删源不能删除这个 MP4")
+
+	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
+	require.NoError(t, err)
+	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
+	assert.True(t, metadata.SourceExists, "成品保留时不应把 source_exists 标成已删")
+	assert.Nil(t, metadata.SourceDeletedAt)
+}
+
 // TestSubtitleGenerateSelfSufficientCreatesHardlink P17: 当 library 中不存在对应
 // 硬链接时（cron 尚未运行），pipeline 应自动创建 Plex-style 硬链接并继续处理，
 // 而不是报 "未在字幕库中找到源文件" 的错误。

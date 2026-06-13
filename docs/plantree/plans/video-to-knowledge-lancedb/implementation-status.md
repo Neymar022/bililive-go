@@ -364,3 +364,77 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
   - BiliNote 干净 worktree：`PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=backend python3 -m pytest backend/tests/test_prompt_and_note_regressions.py backend/tests/test_knowledge_memory.py backend/tests/test_note_router_regressions.py -q -p no:cacheprovider` -> `89 passed`。
   - Bililive-go 新分支：`GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/configs ./src/pipeline/stages` -> sandbox 因 `httptest` loopback bind 被拒；非沙盒重跑通过。
   - 两个工作树 `git diff --check` 均 clean。
+
+## 2026-06-13 原片截图缺失发布 checkpoint
+
+- Bililive-go 修复已进入 `master`：
+  - PR：Neymar022/bililive-go#35。
+  - Merge commit：`96c7db59c28d0ff6cf5bdb4db8da9c17dd81a85a`。
+  - GitHub Actions：master `Publish Docker Images On Master` run `27464561456` 成功，已发布 `neymar022/bililive-go-app:latest` 与 `neymar022/bililive-go-subtitle-worker:latest`。
+- BiliNote 修复已进入 `master`：
+  - PR：Neymar022/bilinote#48。
+  - Merge commit：`8f4a353c7d94183a8141f336d2112085c0935be3`。
+  - GitHub Actions：master `Build & Push Docker images` run `27464561410` 成功，frontend 与 backend Docker Hub `latest` 均已推送。
+- NAS 运行态尚未更新到上述镜像：
+  - `GET http://192.168.1.80:18090/api/info` 返回 `git_hash=806da08c5cc299d593910a83221c6c6e640532d1`，仍是本次修复前的 Bililive-go 版本。
+  - `GET http://192.168.1.80:3015/api/sys_health` 返回 `200`，但 `/api/knowledge/runtime/machine` 需要 bearer token；未在未授权情况下读取 BiliNote runtime SHA。
+- 下一步验收门禁：
+  1. 先在 NAS Docker 项目中拉取并重建 Bililive-go 与 BiliNote latest。
+  2. 通过 `/api/info` 确认 Bililive-go 运行 hash 为 `96c7db59c28d0ff6cf5bdb4db8da9c17dd81a85a` 或对应短 hash。
+  3. 通过 BiliNote runtime/build 证据确认 backend 包含 `8f4a353c7d94183a8141f336d2112085c0935be3`。
+  4. 使用用户本地 Chrome/Computer Use 验证最近自动生成文档包含 `![视频截图 ...]` / `/static/screenshots/...`，不要使用沙盒浏览器替代。
+
+## 2026-06-13 NAS latest 验收 checkpoint
+
+- 运行态版本已确认：
+  - Bililive-go `GET /api/info` 返回 `app_version=96c7db5`、`git_hash=96c7db59c28d0ff6cf5bdb4db8da9c17dd81a85a`，已是 PR #35/latest 截图默认值修复版本。
+  - BiliNote backend 容器环境返回 `BILINOTE_BUILD_SHA=8f4a353c7d94183a8141f336d2112085c0935be3`，已是 PR #48/latest 机器 ingest 截图修复版本。
+  - `GET http://192.168.1.80:3015/api/sys_health` 返回 success。
+- 部署偏差与修复：
+  - BiliNote backend 虽已是 latest，但原 compose 没有把 `/volume2/docker/bililive-go/video` 挂入容器，机器 ingest 收到 `source_video_path` 后无法读取原视频，因此无法生成封面与原片截图。
+  - 已更新 NAS `/volume2/docker/dockge/stacks/bilinote/compose.yaml`，为 backend 增加 `/volume2/docker/bililive-go/video:/volume2/docker/bililive-go/video:ro`，并保持 backend/frontend 使用 Docker Hub `latest`。
+  - 已重建 BiliNote backend/nginx；`docker inspect bilinote-backend` 确认媒体路径已只读挂载，容器内可 `find /volume2/docker/bililive-go/video`。
+- 历史媒体库补偿：
+  - 已执行 `/volume2/docker/bililive-go/reports/codex-repair-library-sidecars.py --apply`。
+  - 复核 dry-run：`show_repairs=0 episode_repairs=0 cover_repairs=0 cover_failures=0 duplicate_show_identities=0 moved_episodes=0 moved_files=0 quarantined_files=0`。
+- 历史 BiliNote 文档封面补偿：
+  - 已在 BiliNote backend 容器内执行 `/tmp/codex-backfill-bilinote-covers.py --apply`，回填 18 条 `note_records.audio_meta.cover_url`，不重跑总结模型、不修改媒体库文件。
+  - 复核示例：`bililive-go-673`、`bililive-go-678` 均已有 `/static/cover/...jpg`。
+  - 仍有 6 条更早 `bililive-go-*` 记录无 cover_url，原因待单独确认；当前 dry-run 没有可用 `.jpg` 候选，可能是历史源路径缺失或不指向媒体库成品。
+- 真实链路验收进度：
+  - 已尝试重跑历史记录 `汤山老王.S01E0015.2026-06-12...`，生成任务 `682`。
+  - `682` 失败原因为该历史记录的 MP4 已被存储清理：`video file does not exist`，不是封面/截图链路失败。
+  - 下一步需要改选当前实际存在的 completed MP4，通过 `/api/subtitles/records/{relative_path}/rerun` 重新验收，并检查新 BiliNote 记录的 `cover_url`、markdown screenshot markers、`/app/static/screenshots` 文件。
+- 当前阻塞：
+  - NAS SSH 继续检查被工具审批额度阻断，系统提示 21:56 后重试；不能绕过审批限制。
+  - 额度恢复后继续执行：选取实际存在 MP4 -> 重跑 -> 查询 BiliNote DB -> 使用本地 Chrome/Computer Use 验收 UI。
+
+## 2026-06-13 NAS latest 真实链路二次根因
+
+- 运行态版本复核：
+  - Bililive-go NAS `/api/info` 已是 `app_version=96c7db5` / `git_hash=96c7db59c28d0ff6cf5bdb4db8da9c17dd81a85a`。
+  - BiliNote backend 容器环境已是 `BILINOTE_BUILD_SHA=8f4a353c7d94183a8141f336d2112085c0935be3`。
+- 真实链路复现：
+  - 改选实际存在的 completed 媒体库 MP4 `小司说钢构.S01E0004.2026-06-11 - 钢结构该怎么选择002.mp4` 触发 `/api/subtitles/records/{path}/rerun`，生成任务 `683` 并完成。
+  - 任务 `683` 的 BiliNote payload 已包含 `format=["toc","link","screenshot","summary"]`、`screenshot=true`、`video_understanding=true`、`video_interval=4`、`grid_size=[3,3]`，说明 PR #35/#48 的截图参数链路已生效。
+  - 但 BiliNote 新记录 `bililive-go-683` 仍无 `cover_url` 且 markdown 无 `/static/screenshots/`，同时 NAS 文件侧该媒体库 MP4 在字幕完成后消失，只剩 `.ass/.srt/.jpg/.nfo/.subtitle.json`。
+- 根因：
+  - `subtitle_generate.deleteSourceAfterCompletion` 在知识同步前调用 `subtitle.DeleteSourceFile(libraryPath, sourceRoot)`。
+  - 当 rerun 输入已经是媒体库成品 MP4 时，`Metadata.SourcePath=file.Path` 被写成同一个媒体库 MP4；`ResolveSourcePath` 又优先返回 sidecar 中仍存在的 `SourcePath`，于是 `DeleteSourceFile` 删除了最终媒体库成品。
+  - 这解释了“截图参数已生效但 BiliNote 无截图”：BiliNote 后台收到的是正确 `source_video_path`，但异步生成截图时视频文件已经被 Bililive-go 删除。
+  - 同一中心 helper 还被 retention cleanup 和手动 delete-source API 复用，因此必须在 `DeleteSourceFile` 中央加防线，不能只在 subtitle stage 局部修。
+- 本地修复：
+  - `DeleteSourceFile` 新增 `ErrSourceNotDeletable` 与中心校验：只允许删除 `sourceRoot` 内、且不是 `videoPath` 自身的路径；媒体库成品或源目录外路径一律拒绝删除。
+  - `CleanupExpiredSources` 遇到 `ErrSourceNotDeletable` 跳过污染记录并继续，不中断后台清理。
+  - `subtitle_generate` 遇到 `ErrSourceNotDeletable` 记录“保留媒体库成品”并继续 pipeline，不再写成普通删除失败。
+- 新增回归：
+  - `TestDeleteSourceFileRefusesLibraryVideoPath`
+  - `TestCleanupExpiredSourcesSkipsLibraryVideoSourcePath`
+  - `TestSubtitleGenerateDoesNotDeleteLibraryVideoOnRerun`
+- 本地验证：
+  - `GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/subtitle ./src/pipeline/stages` -> passed。
+  - `GOCACHE=/tmp/bililive-go-gocache go test -count=1 ./src/...` -> passed（仅 `github.com/shoenig/go-m1cpu` 依赖在 macOS 上输出 clang VLA warning）。
+- 剩余 rollout：
+  - 需要提交/PR/CI/合并并发布新 `latest` 后，NAS 再拉取验证。
+  - 当前 NAS latest 仍是会删除媒体库 MP4 的版本，不能继续用它跑自动截图验收，否则会制造新的历史缺失记录。
+  - 已被任务 `683` 删除的 `小司说钢构.S01E0004...mp4` 需要后续按是否有源文件/备份单独恢复；没有 MP4 时无法补回截图，只能用已有 `.jpg` 回填封面。
