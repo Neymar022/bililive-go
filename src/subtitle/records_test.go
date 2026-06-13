@@ -111,6 +111,32 @@ func TestDeleteSourceFileMarksMetadata(t *testing.T) {
 	assert.NotNil(t, meta.SourceDeletedAt)
 }
 
+func TestDeleteSourceFileRefusesLibraryVideoPath(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	videoPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(videoPath), 0o755))
+	require.NoError(t, os.WriteFile(videoPath, []byte("library output"), 0o644))
+	require.NoError(t, SaveMetadata(sidecarPathForVideo(videoPath), Metadata{
+		Status:       StatusCompleted,
+		SourcePath:   videoPath,
+		OutputPath:   videoPath,
+		ASSPath:      strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".ass",
+		SRTPath:      strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt",
+		SourceExists: true,
+	}))
+
+	err := DeleteSourceFile(videoPath, sourceRoot)
+
+	require.ErrorIs(t, err, ErrSourceNotDeletable)
+	_, statErr := os.Stat(videoPath)
+	assert.NoError(t, statErr, "DeleteSourceFile must never remove the media-library product")
+	meta, err := LoadMetadata(sidecarPathForVideo(videoPath))
+	require.NoError(t, err)
+	assert.True(t, meta.SourceExists)
+	assert.Nil(t, meta.SourceDeletedAt)
+}
+
 func TestCleanupExpiredSourcesDeletesEligibleFiles(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
@@ -180,4 +206,37 @@ func TestCleanupExpiredSourcesSkipsVideosWithoutSidecar(t *testing.T) {
 	assert.Error(t, err)
 	_, err = os.Stat(orphanVideoPath)
 	assert.NoError(t, err)
+}
+
+func TestCleanupExpiredSourcesSkipsLibraryVideoSourcePath(t *testing.T) {
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	now := time.Unix(1_763_200_000, 0).UTC()
+
+	videoPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试.mp4")
+	require.NoError(t, os.MkdirAll(filepath.Dir(videoPath), 0o755))
+	require.NoError(t, os.WriteFile(videoPath, []byte("library product"), 0o644))
+	srtPath := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".srt"
+	assPath := strings.TrimSuffix(videoPath, filepath.Ext(videoPath)) + ".ass"
+	completedAt := now.Add(-9 * 24 * time.Hour)
+	require.NoError(t, SaveMetadata(sidecarPathForVideo(videoPath), Metadata{
+		Status:       StatusCompleted,
+		SourcePath:   videoPath,
+		OutputPath:   videoPath,
+		ASSPath:      assPath,
+		SRTPath:      srtPath,
+		SourceExists: true,
+		CompletedAt:  &completedAt,
+	}))
+
+	deleted, err := CleanupExpiredSources(libraryRoot, sourceRoot, 7, now)
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, deleted)
+	_, statErr := os.Stat(videoPath)
+	assert.NoError(t, statErr, "retention cleanup must not remove media-library products")
+	meta, err := LoadMetadata(sidecarPathForVideo(videoPath))
+	require.NoError(t, err)
+	assert.True(t, meta.SourceExists)
+	assert.Nil(t, meta.SourceDeletedAt)
 }

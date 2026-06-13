@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -281,6 +282,14 @@ func (s *SubtitleGenerateStage) deleteSourceAfterCompletion(
 		sourcePath = libraryPath
 	}
 	if err := subtitle.DeleteSourceFile(libraryPath, sourceRoot); err != nil {
+		if errors.Is(err, subtitle.ErrSourceNotDeletable) {
+			logrus.WithError(err).WithFields(logrus.Fields{
+				"source":  sourcePath,
+				"library": libraryPath,
+			}).Info("字幕完成后跳过源文件删除：解析结果是媒体库成品或不在源目录中")
+			s.logs += fmt.Sprintf("源文件删除已跳过（保留媒体库成品）: %s\n", filepath.Base(sourcePath))
+			return
+		}
 		logrus.WithError(err).WithField("source", sourcePath).
 			Warn("字幕完成后删除源文件失败（不阻塞 pipeline，retention 后台兜底）")
 		s.logs += fmt.Sprintf("源文件删除失败（已记入日志）: %s\n", filepath.Base(sourcePath))
