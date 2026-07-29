@@ -23,6 +23,9 @@
   - BiliNote ingest 幂等和机器 token。
   - 知识生成失败不阻断烧录。
   - LanceDB 不可达时降级。
+- UGREEN 合集稳定身份与封面续修：
+  - 历史数据已无损收敛：旭东有稳定 show poster，天津只剩唯一 NFO category，精确审计连续两轮 GREEN。
+  - 本地 TDD 防复发已通过完整项目门禁；剩余双轴 review、PR、合并、Docker Hub 发布、NAS 只重建 app 和部署后验。
 - 文档优先 + 字幕证据 + 非阻塞同步 + 可重建索引的跨仓库验证。
   - BiliNote 手动样本、Bililive-go 单样本和连续自动样本均已验证；剩余工作是发布治理、失败 smoke 和回填策略。
 

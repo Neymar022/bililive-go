@@ -26,6 +26,7 @@ type knowledgeSessionManifest struct {
 	UpdatedAt         time.Time                        `json:"updated_at"`
 	PostedContentHash string                           `json:"posted_content_hash,omitempty"`
 	PostedAt          *time.Time                       `json:"posted_at,omitempty"`
+	AggregatePath     string                           `json:"aggregate_path,omitempty"`
 	Sources           []knowledgeSessionManifestSource `json:"sources"`
 }
 

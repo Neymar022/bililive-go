@@ -2,6 +2,8 @@ package subtitle
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -73,6 +75,309 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	assert.Contains(t, string(showNFOText), "<studio>哔哩哔哩</studio>")
 }
 
+func TestEnsureLibraryHardlinkRemovesNewEpisodeSidecarsWhenLinkFails(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 失败场次.mp4")
+	require.NoError(t, os.Mkdir(sourcePath, 0o755), "目录不能被硬链接，用于稳定触发非 EEXIST 失败")
+	showDir := filepath.Join(libraryRoot, "主播")
+	showNFOPath := filepath.Join(showDir, "tvshow.nfo")
+	showPosterPath := filepath.Join(showDir, "poster.jpg")
+	require.NoError(t, os.MkdirAll(showDir, 0o755))
+	require.NoError(t, os.WriteFile(showNFOPath, []byte("用户原始 NFO"), 0o640))
+	require.NoError(t, os.WriteFile(showPosterPath, nil, 0o600))
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.Error(t, err)
+	assert.Empty(t, targetPath)
+
+	failedStem := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 失败场次")
+	assert.NoFileExists(t, failedStem+".mp4")
+	assert.NoFileExists(t, failedStem+".nfo")
+	assert.NoFileExists(t, failedStem+".jpg")
+	assert.Equal(t, []byte("用户原始 NFO"), mustReadFile(t, showNFOPath))
+	assert.Empty(t, mustReadFile(t, showPosterPath))
+
+	retrySource := filepath.Join(sourceRoot, "主播 - 2026-03-20 11-00-00 - 重试场次.mp4")
+	require.NoError(t, os.WriteFile(retrySource, []byte("source"), 0o644))
+	retryPath, retryErr := EnsureLibraryHardlink(context.Background(), retrySource, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, retryErr)
+	assert.Contains(t, filepath.Base(retryPath), ".S01E0001.", "失败发布不得占用单集槽位")
+}
+
+func TestEnsureLibraryHardlinkPreservesConcurrentShowMetadataWhenLinkFails(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 并发更新.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	showDir := filepath.Join(libraryRoot, "主播")
+	showNFOPath := filepath.Join(showDir, "tvshow.nfo")
+	showPosterPath := filepath.Join(showDir, "poster.jpg")
+	oldLink := libraryHardlinkLink
+	libraryHardlinkLink = func(_, _ string) error {
+		require.NoError(t, os.WriteFile(showNFOPath, []byte("用户并发 NFO"), 0o644))
+		require.NoError(t, os.WriteFile(showPosterPath, []byte("用户并发封面"), 0o644))
+		return errors.New("injected link failure")
+	}
+	t.Cleanup(func() {
+		libraryHardlinkLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.Error(t, err)
+	assert.Empty(t, targetPath)
+	assert.Contains(t, err.Error(), "injected link failure")
+	assert.Equal(t, []byte("用户并发 NFO"), mustReadFile(t, showNFOPath))
+	assert.Equal(t, []byte("用户并发封面"), mustReadFile(t, showPosterPath))
+
+	failedStem := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 并发更新")
+	assert.NoFileExists(t, failedStem+".mp4")
+	assert.NoFileExists(t, failedStem+".nfo")
+	assert.NoFileExists(t, failedStem+".jpg")
+	stagingDirs, globErr := filepath.Glob(filepath.Join(filepath.Dir(libraryRoot), ".library_publish_staging", "episode-*"))
+	require.NoError(t, globErr)
+	require.Len(t, stagingDirs, 1, "外部更新导致 show rollback 拒绝时必须保留 staging")
+	assert.Contains(t, err.Error(), "publication rollback failed")
+	require.FileExists(t, filepath.Join(stagingDirs[0], ".show-backup", "manifest.json"))
+}
+
+func TestEnsureLibraryHardlinkDoesNotPublishStagedSidecarsIntoExternallyOccupiedSlot(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 外部冲突.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	var occupiedTarget string
+	oldLink := libraryHardlinkLink
+	libraryHardlinkLink = func(_, targetPath string) error {
+		occupiedTarget = targetPath
+		require.NoError(t, os.WriteFile(targetPath, []byte("external-video"), 0o644))
+		return os.ErrExist
+	}
+	t.Cleanup(func() {
+		libraryHardlinkLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.ErrorContains(t, err, "target occupied during publication")
+	assert.Empty(t, targetPath)
+	require.NotEmpty(t, occupiedTarget)
+	assert.Equal(t, []byte("external-video"), mustReadFile(t, occupiedTarget))
+	stem := strings.TrimSuffix(occupiedTarget, filepath.Ext(occupiedTarget))
+	assert.NoFileExists(t, stem+".nfo")
+	assert.NoFileExists(t, stem+".jpg")
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "poster.jpg"))
+}
+
+func TestEnsureLibraryHardlinkMovesSidecarsToConcurrentSameSourceSlot(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 同源并发.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	var occupiedTarget string
+	var alternateTarget string
+	oldLink := libraryHardlinkLink
+	libraryHardlinkLink = func(stagedPath, targetPath string) error {
+		occupiedTarget = targetPath
+		alternateTarget = strings.Replace(targetPath, ".S01E0001.", ".S01E0002.", 1)
+		require.NoError(t, os.WriteFile(targetPath, []byte("external-video"), 0o644))
+		require.NoError(t, os.Link(stagedPath, alternateTarget))
+		return os.ErrExist
+	}
+	t.Cleanup(func() {
+		libraryHardlinkLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, err)
+	assert.Equal(t, alternateTarget, targetPath)
+	assert.Equal(t, []byte("external-video"), mustReadFile(t, occupiedTarget))
+	occupiedStem := strings.TrimSuffix(occupiedTarget, filepath.Ext(occupiedTarget))
+	assert.NoFileExists(t, occupiedStem+".nfo")
+	assert.NoFileExists(t, occupiedStem+".jpg")
+	alternateStem := strings.TrimSuffix(alternateTarget, filepath.Ext(alternateTarget))
+	require.FileExists(t, alternateStem+".nfo")
+	require.FileExists(t, alternateStem+".jpg")
+}
+
+func TestEnsureLibraryHardlinkPreservesInPlaceEpisodeNFOUpdateWhenVideoPublicationFails(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - NFO并发更新.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	var updatedNFO string
+	oldLink := libraryHardlinkLink
+	libraryHardlinkLink = func(_, targetPath string) error {
+		updatedNFO = strings.TrimSuffix(targetPath, filepath.Ext(targetPath)) + ".nfo"
+		require.NoError(t, os.WriteFile(updatedNFO, []byte("用户原地更新 NFO"), 0o644))
+		return errors.New("injected video publish failure")
+	}
+	t.Cleanup(func() {
+		libraryHardlinkLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.Error(t, err)
+	assert.Empty(t, targetPath)
+	assert.Contains(t, err.Error(), "publication rollback failed")
+	assert.Contains(t, err.Error(), "changed before rollback")
+	assert.Equal(t, []byte("用户原地更新 NFO"), mustReadFile(t, updatedNFO))
+	assert.NoFileExists(t, strings.TrimSuffix(updatedNFO, ".nfo")+".mp4")
+	require.FileExists(t, strings.TrimSuffix(updatedNFO, ".nfo")+".jpg")
+	require.FileExists(t, filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	require.FileExists(t, filepath.Join(libraryRoot, "主播", "poster.jpg"))
+	stagingDirs, globErr := filepath.Glob(filepath.Join(filepath.Dir(libraryRoot), ".library_publish_staging", "episode-*"))
+	require.NoError(t, globErr)
+	require.Len(t, stagingDirs, 1)
+}
+
+func TestEnsureLibraryHardlinkRollsBackVideoAndNFOWhenCoverPublicationConflicts(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 封面冲突.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	var conflictingCover string
+	oldLink := librarySidecarLink
+	librarySidecarLink = func(stagedPath, targetPath string) error {
+		if strings.HasSuffix(targetPath, ".jpg") {
+			conflictingCover = targetPath
+			require.NoError(t, os.WriteFile(targetPath, []byte("用户封面"), 0o644))
+			return os.ErrExist
+		}
+		return os.Link(stagedPath, targetPath)
+	}
+	t.Cleanup(func() {
+		librarySidecarLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.ErrorContains(t, err, "publish episode cover")
+	assert.Empty(t, targetPath)
+	require.NotEmpty(t, conflictingCover)
+	assert.Equal(t, []byte("用户封面"), mustReadFile(t, conflictingCover))
+	stem := strings.TrimSuffix(conflictingCover, ".jpg")
+	assert.NoFileExists(t, stem+".mp4")
+	assert.NoFileExists(t, stem+".nfo")
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "poster.jpg"))
+}
+
+func TestEnsureLibraryHardlinkRollsBackVideoWhenNFOPublicationConflicts(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - NFO冲突.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	var conflictingNFO string
+	oldLink := librarySidecarLink
+	librarySidecarLink = func(_, targetPath string) error {
+		conflictingNFO = targetPath
+		require.NoError(t, os.WriteFile(targetPath, []byte("用户 NFO"), 0o644))
+		return os.ErrExist
+	}
+	t.Cleanup(func() {
+		librarySidecarLink = oldLink
+	})
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.ErrorContains(t, err, "publish episode NFO")
+	assert.Empty(t, targetPath)
+	require.NotEmpty(t, conflictingNFO)
+	assert.Equal(t, []byte("用户 NFO"), mustReadFile(t, conflictingNFO))
+	stem := strings.TrimSuffix(conflictingNFO, ".nfo")
+	assert.NoFileExists(t, stem+".mp4")
+	assert.NoFileExists(t, stem+".jpg")
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
+	assert.NoFileExists(t, filepath.Join(libraryRoot, "主播", "poster.jpg"))
+}
+
+func TestEnsureLibraryShowNFORebuildsMalformedMatchingIdentity(t *testing.T) {
+	showDir := t.TempDir()
+	nfoPath := filepath.Join(showDir, "tvshow.nfo")
+	require.NoError(t, os.WriteFile(nfoPath, []byte("<tvshow>\n<title>主播</title>\n<showtitle>主播</showtitle>\n<plot>未闭合\n<custom>损坏文件</custom>\n</tvshow>\n"), 0o644))
+
+	err := ensureLibraryShowNFO(showDir, sourceFileMeta{
+		aliasName:  "主播",
+		recordedAt: referenceTime,
+		title:      "测试标题",
+	}, "哔哩哔哩")
+	require.NoError(t, err)
+
+	content := string(mustReadFile(t, nfoPath))
+	assert.Contains(t, content, "<tvshow>")
+	assert.Contains(t, content, "</tvshow>")
+	assert.Contains(t, content, "<title>主播</title>")
+	assert.NotContains(t, content, "<custom>损坏文件</custom>")
+}
+
+func TestEnsureLibraryHardlinkCreatesStableShowPosterFromEpisodeCover(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, err)
+
+	episodeCover := strings.TrimSuffix(targetPath, filepath.Ext(targetPath)) + ".jpg"
+	showPoster := filepath.Join(libraryRoot, "主播", "poster.jpg")
+	require.Equal(t, []byte("cover"), mustReadFile(t, episodeCover))
+	require.Equal(t, []byte("cover"), mustReadFile(t, showPoster))
+
+	showNFOPath := filepath.Join(libraryRoot, "主播", "tvshow.nfo")
+	showNFOText := string(mustReadFile(t, showNFOPath))
+	assert.Contains(t, showNFOText, `<thumb aspect="poster">poster.jpg</thumb>`)
+
+	customShowNFO := strings.Replace(showNFOText, `  <thumb aspect="poster">poster.jpg</thumb>`+"\n", "  <custom>保留字段</custom>\n", 1)
+	require.NoError(t, os.WriteFile(showNFOPath, []byte(customShowNFO), 0o644))
+	require.NoError(t, os.WriteFile(showPoster, []byte("curated-poster"), 0o644))
+	_, err = EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("curated-poster"), mustReadFile(t, showPoster), "重复发布不得覆盖已有合集封面")
+	assert.Equal(t, []byte("cover"), mustReadFile(t, episodeCover), "合集封面必须独立于单集封面")
+	updatedShowNFO := string(mustReadFile(t, showNFOPath))
+	assert.Contains(t, updatedShowNFO, "<custom>保留字段</custom>")
+	assert.Contains(t, updatedShowNFO, `<thumb aspect="poster">poster.jpg</thumb>`)
+
+	require.NoError(t, ensureLibraryShowNFO(filepath.Dir(showNFOPath), sourceFileMeta{
+		aliasName:  "主播",
+		recordedAt: referenceTime.AddDate(1, 0, 0),
+		title:      "跨年直播",
+	}, "抖音"))
+	crossYearShowNFO := string(mustReadFile(t, showNFOPath))
+	assert.Contains(t, crossYearShowNFO, "<custom>保留字段</custom>")
+	assert.Contains(t, crossYearShowNFO, "<year>2026</year>")
+	assert.Contains(t, crossYearShowNFO, "<studio>哔哩哔哩</studio>")
+}
+
+func TestEnsureLibraryHardlinkRepairsEmptyShowPoster(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 测试标题.mp4")
+	showDir := filepath.Join(libraryRoot, "主播")
+	require.NoError(t, os.MkdirAll(showDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(showDir, "poster.jpg"), nil, 0o644))
+	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+
+	_, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("cover"), mustReadFile(t, filepath.Join(showDir, "poster.jpg")))
+}
+
 func TestEnsureLibraryHardlink_NormalizesInvisibleShowNameCharacters(t *testing.T) {
 	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
@@ -90,6 +395,87 @@ func TestEnsureLibraryHardlink_NormalizesInvisibleShowNameCharacters(t *testing.
 	showNFOText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
 	require.NoError(t, err)
 	assert.Contains(t, string(showNFOText), "<title>主播</title>")
+}
+
+func TestNewLibraryPublishStagingPathRejectsSymlinkBackIntoLibrary(t *testing.T) {
+	parent := t.TempDir()
+	libraryRoot := filepath.Join(parent, "video")
+	inlineStaging := filepath.Join(libraryRoot, "inline-staging")
+	require.NoError(t, os.MkdirAll(inlineStaging, 0o755))
+	require.NoError(t, os.Symlink(inlineStaging, filepath.Join(parent, ".library_publish_staging")))
+	targetPath := filepath.Join(libraryRoot, "主播", "Season 01", "episode.mp4")
+
+	stagedPath, cleanup, err := newLibraryPublishStagingPath(libraryRoot, targetPath)
+	require.Error(t, err)
+	assert.Empty(t, stagedPath)
+	assert.Nil(t, cleanup)
+	assert.Contains(t, err.Error(), "inside library root")
+}
+
+func TestEnsureLibraryHardlinkKeepsIncrementalEpisodesInOneNormalizedShow(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	firstAlias := "天津蛋哥\t\n\u00a0\u3000 6点说车"
+	firstSource := filepath.Join(sourceRoot, firstAlias+" - 2026-03-20 10-00-00 - 第一场.mp4")
+	secondSource := filepath.Join(sourceRoot, "天津蛋哥 6点说车 - 2026-03-21 10-00-00 - 第二场.mp4")
+	require.NoError(t, os.WriteFile(firstSource, []byte("first"), 0o644))
+	require.NoError(t, os.WriteFile(secondSource, []byte("second"), 0o644))
+
+	firstPath, err := EnsureLibraryHardlink(context.Background(), firstSource, libraryRoot, firstAlias, referenceTime, "抖音")
+	require.NoError(t, err)
+	secondPath, err := EnsureLibraryHardlink(context.Background(), secondSource, libraryRoot, "天津蛋哥 6点说车", referenceTime.Add(24*time.Hour), "抖音")
+	require.NoError(t, err)
+
+	canonicalShowDir := filepath.Join(libraryRoot, "天津蛋哥 6点说车")
+	assert.Equal(t, canonicalShowDir, filepath.Dir(filepath.Dir(firstPath)))
+	assert.Equal(t, canonicalShowDir, filepath.Dir(filepath.Dir(secondPath)))
+	require.NoDirExists(t, filepath.Join(libraryRoot, firstAlias))
+	require.FileExists(t, filepath.Join(canonicalShowDir, "poster.jpg"))
+	showNFOText := string(mustReadFile(t, filepath.Join(canonicalShowDir, "tvshow.nfo")))
+	assert.Contains(t, showNFOText, "<showtitle>天津蛋哥 6点说车</showtitle>")
+	assert.Contains(t, showNFOText, `<thumb aspect="poster">poster.jpg</thumb>`)
+}
+
+func TestEnsureLibraryHardlinkSerializesConcurrentEpisodePublication(t *testing.T) {
+	oldExtract := extractCoverTo
+	extractCoverTo = func(_ context.Context, sourcePath, targetPath string) (string, error) {
+		return targetPath, os.WriteFile(targetPath, []byte(filepath.Base(sourcePath)), 0o644)
+	}
+	t.Cleanup(func() {
+		extractCoverTo = oldExtract
+	})
+
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	const recordings = 20
+	type result struct {
+		source string
+		target string
+		err    error
+	}
+	results := make(chan result, recordings)
+	for index := 0; index < recordings; index++ {
+		sourcePath := filepath.Join(sourceRoot, fmt.Sprintf("主播 - 2026-03-20 10-00-%02d - 并发场次 %02d.mp4", index, index))
+		require.NoError(t, os.WriteFile(sourcePath, []byte(fmt.Sprintf("source-%02d", index)), 0o644))
+		go func(source string) {
+			target, err := EnsureLibraryHardlink(context.Background(), source, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+			results <- result{source: source, target: target, err: err}
+		}(sourcePath)
+	}
+
+	targets := make(map[string]struct{}, recordings)
+	for index := 0; index < recordings; index++ {
+		item := <-results
+		require.NoError(t, item.err)
+		if _, exists := targets[item.target]; exists {
+			t.Fatalf("并发发布复用了同一集数槽: %s", item.target)
+		}
+		targets[item.target] = struct{}{}
+		coverPath := strings.TrimSuffix(item.target, filepath.Ext(item.target)) + ".jpg"
+		assert.Equal(t, []byte(filepath.Base(item.source)), mustReadFile(t, coverPath))
+	}
+	assert.Len(t, targets, recordings)
 }
 
 // TestEnsureLibraryHardlink_IdempotentSameInode verifies that calling
@@ -433,4 +819,11 @@ func TestParseSourceFilename_Fallback(t *testing.T) {
 	meta := parseSourceFilename("/some/dir/unrecognised-filename.mp4", "fallback-host", ts)
 	assert.Equal(t, "fallback-host", meta.aliasName)
 	assert.Equal(t, "未命名直播", meta.title)
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	content, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return content
 }

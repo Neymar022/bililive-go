@@ -110,9 +110,65 @@ update state=idle
 - 部署后 `/api/info` 返回 HTTP 200，`git_hash=99e19f96dd5726883e53618b23ce164c0a1e3392`；运行 image ID 为 `sha256:5ac71076622c943ccf64136d25c35775f71c5f3802084f56088c5cf729edeb25`，OCI revision 与 master 一致，容器 restart count 为 0，活动 compose checksum 未变化。
 - 两轮部署后验均为 GREEN：库内 inline MP4 `0`、UGREEN `file_info` inline 索引 `0`、建筑师电影 type 索引 `0`；外置 MP4 `187`、总字节 `78,576,915,095`、missing/size mismatch `0`；195 个 JSON 解析错误 `0`、旧引用 `0`、新引用 `402`。错误电影 `ug_video_info_id 4381/4385` 及其文件关系均为 `0`。
 
+## 合集封面与稳定身份续修
+
+用户在上述部署后从生产 UI 发现两个剩余症状：`旭东聊装修` 无合集封面；`天津蛋哥 6点说车` 仍显示两个合集，其中一个只有一集。新的只读红灯同时覆盖文件、NFO 和 UGREEN DB：
+
+```text
+xudong_cover_image=0
+xudong_missing_episode_jpg=1
+tianjin_active_categories=2
+tianjin_singleton_categories=1
+tianjin_non_nfo_categories=1
+RED
+```
+
+直接证据：
+
+- 旭东 category `4322` 的 `poster_path/backdrop_path` 指向已不存在的 `S01E0105.mp4`，show 根没有 `poster.jpg`，E0073 没有 JPG。
+- 天津正确 category `4326` 为 `use_nfo=3`；错误 category `4384` 为 `use_nfo=1`，仅关联可见成品 E0033，episode title 为空且 cover 指向 MP4。
+- `天津蛋哥   6点说车` 三空格目录没有 MP4，不是当前两个 active category 的直接来源。
+
+历史修复备份根为 `/volume2/docker/bililive-go/backups/show-cover-identity-20260729-112930/`，包含三表 custom dump、`pg_restore -l` 清单、目标关系 CSV、原始 NFO、文件 inventory、工具哈希、执行日志和 E0033/E0073/E0036 回滚硬链接。所有写入前均重新满足录制 `0`、pipeline running/pending `0/0`、update `idle`。
+
+修复保留所有 MP4：从真实视频补齐缺失 episode JPG；从首个有效 episode JPG 原子复制独立的 `poster.jpg`，不覆盖已有非空 poster；`tvshow.nfo` 加入 `<thumb aspect="poster">poster.jpg</thumb>`。E0033 移出监控根后 watcher 删除旧关系，恢复时读取已在位的 NFO/JPG，将其归入 category `4326` 并自然移除 `4384`。旭东 E0073 采用相同重扫；旧 poster/backdrop 仍未自然更新，因此在完整 DB 备份后用单行事务只把 category `4322` 改指向现存 show poster。没有删除 category、episode 或 MP4。
+
+修复后的同一命令连续两次为 GREEN：
+
+```text
+inline_mp4=0
+inline_file_info=0
+architect_inline_movies=0
+json_parse_errors=0
+effective_old_inline_json_refs=0
+preserved_stale_inline_json_refs=147
+external_hidden_json_refs=402
+xudong_active_categories=1
+xudong_cover_image=1
+xudong_show_poster=1
+xudong_missing_episode_jpg=0
+xudong_tvshow_poster_thumb=1
+xudong_poster_independent_inode=1
+tianjin_active_categories=1
+tianjin_singleton_categories=0
+tianjin_non_nfo_categories=0
+tianjin_wrong_category_files=0
+tianjin_show_poster=1
+tianjin_missing_episode_jpg=0
+tianjin_tvshow_poster_thumb=1
+GREEN
+```
+
+文件后验确认修复前 inventory 的 MP4 缺失 `0`、大小变化 `0`，两个 show 的可见 MP4 均有同 stem JPG/NFO；库外隐藏媒体仍为 `187` 个、`78,576,915,095` bytes。源码防复发采用同一稳定身份规则：常规发布与 aggregate 都先准备 episode NFO/JPG、show NFO 和独立 poster；重复/增量发布保留已有 poster；Go/Python 同时把 tab、newline、NBSP、全角空格等 Unicode whitespace 归一成单空格，并删除其余 Cc/Cf；ffmpeg 临时封面保留 `.jpg` 扩展。
+
+同场 aggregate 不再复用或覆盖最后一个原分段，而是使用 manifest `aggregate_path` 持久化独立、稳定的可见路径；原 N 个分段全部保留到媒体库外。Session 增加迟到分段时继续复用同一路径，旧 aggregate 视频、metadata 和 sidecar 一起归档到库外 `.aggregate_versions`。aggregate metadata 的 `live_session_media_sources` 在实际 hidden 冲突处理完成后才写入，保证首次发布、唯一冲突目标、重复发布 stale refs 自愈和增量归档都只引用现存媒体。
+
+分段事务顺序为持久化 target hardlink、原子更新 segment metadata、再 unlink source；aggregate metadata 和旧版本归档成功后才删除 journal。rollback 使用 inode/size/mtime/hash CAS，并按 source、metadata、target 的依赖顺序 fail-stop；metadata restore、restored-source fsync、hidden-target fsync、source `ENOENT` 和 aggregate metadata rename 后 fsync 失败都有故障注入覆盖。失败无法完整回滚时保留 hidden 媒体、仍指向它的 metadata 和事务目录，不删除最后副本。双轴 review 的可操作发现均在当前循环修复，源码仍待 PR、合并、镜像发布和运行态部署。
+
 ## 回滚
 
 - 文件层：按 inventory 逆序把 target rename 回 source，并从 `file-reference-backup/json/` 原子恢复 195 个 JSON。
 - DB 层：本次未执行手写 DB 事务。若回滚文件后 UGREEN 未自然重建，可参考 custom dump 和 affected CSV 做受控恢复；不要在仍有正确可见媒体关联时整表或整 category 覆盖。
+- 合集续修：从 `show-cover-identity-20260729-112930` 恢复原始 `tvshow.nfo` 和目标三表；恢复 DB 前先核对当前关系，优先把单行 poster/backdrop 恢复为 `xudong-category-before-poster-fix.csv` 中的值，不整表覆盖。回滚硬链接可原子恢复 E0033/E0073/E0036，禁止删除当前可见 MP4。
 - 运行态：使用部署备份中的活动 compose 和旧 app image rollback tag，只重建 `bililive`；回滚前仍须重新满足零录制、零 running/pending pipeline 和 update idle 门禁。
 - 历史迁移与部署备份均保留，稳定观察期结束前不要删除。
