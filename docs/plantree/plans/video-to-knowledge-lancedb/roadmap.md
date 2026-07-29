@@ -14,6 +14,7 @@
 - 同场直播分段聚合的本地实现已完成：Bililive-go 持久化 `live_session_id`，字幕完成后用 `.knowledge_sessions` manifest 聚合同一直播分段，静默窗口稳定后只 POST 一次 session-level BiliNote payload；RetryLater 恢复不重复调用字幕 worker；媒体库/知识同步最小时长仅过滤无 session 的独立短片段。最终验证已通过 `go test ./src/... -count=1`、`make build-web test`、`make bililive`、`make check-agents` 和 `git diff --check`。
 - 同场直播媒体库最终产物聚合的本地实现已完成：静默窗口后把同一 `live_session_id` 的多个分段 concat 为一个可见整场 MP4，写入整场字幕/封面/NFO sidecar，原子分段视频移入隐藏 `.live_session_segments` 保留为内部素材；BiliNote payload 改指向整场 aggregate 媒体，并按真实分段视频时长推进整场字幕/知识时间轴。已通过 `go test ./src/... -count=1` 和 `python3 -m py_compile scripts/repair-library-sidecars.py`。
 - UGREEN 影视中心 inline live-session 历史污染已安全修复：187 个分段 MP4 全部保留并迁到媒体库根同级隐藏目录，195 个有效 JSON 原子更新 402 次引用；UGREEN watcher 自然清理 76 个错误 `file_info` 索引和对应错误电影/重复剧集，无需手写数据库事务。三断言红灯连续两次为 0，详细证据和回滚见 [迁移主题](topics/2026-07-29-ugreen-inline-live-segment-relocation.md)。
+- inline live-session 库外隐藏防复发已通过 PR #37 合并 master 并部署 UGREEN 原生 Docker 项目；运行 SHA、镜像 revision、三断言、187 个媒体、402 个引用和 UGREEN DB 后验均通过，只重建 app 容器，worker 与 video 服务未重启。
 
 ## In Progress
 
@@ -24,13 +25,10 @@
   - LanceDB 不可达时降级。
 - 文档优先 + 字幕证据 + 非阻塞同步 + 可重建索引的跨仓库验证。
   - BiliNote 手动样本、Bililive-go 单样本和连续自动样本均已验证；剩余工作是发布治理、失败 smoke 和回填策略。
-- 同场直播聚合发布治理。
-  - 已用 TDD 把 live-session 分段隐藏根移到媒体库根外，本地项目门禁和双轴 review 均通过；当前进入 PR、CI、合并和 NAS 原生 Docker `latest` 部署验证。
 
 ## Next
 
 - 决定 BiliNote `branch-vtok-473-b5544ce` 与 Bililive-go `sha-97c3f27` 的开 PR、合并、稳定 tag 或 NAS pin 策略；两个验证提交当前都尚未进入各自 `origin/master`。
-- 完成 inline live-session 分段库外隐藏修复的 review、PR、CI 和合并；等待 master 镜像后走 NAS 原生 Docker `latest` 验证，以 `/api/info` Git SHA、三断言红灯、文件/引用完整性和 UGREEN DB 后验为准。
 - 如需更强生产验收，执行受控失败 smoke：BiliNote 不可达或 bad endpoint 时只记录 `knowledge_sync_status=failed`，不影响 pipeline completed。
 - 小批量 backfill 前先确认发布 tag、失败 smoke、限流、失败恢复和 LanceDB rebuild 路径。
 - 建立 golden queries：`部署`、`Claude Code`、`字幕`、以及一个无关词。

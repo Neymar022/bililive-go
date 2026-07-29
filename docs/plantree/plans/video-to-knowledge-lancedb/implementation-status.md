@@ -45,7 +45,9 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - UGREEN 相关表和文件引用已备份到 `/volume2/docker/bililive-go/backups/live-segment-relocation-20260729-085035/`。文件迁移 journal 为 `completed`；UGREEN watcher 自然清理错误索引，无需执行手写 DB 事务。
 - 文件后验：旧路径 `0`、新路径 `187`、总字节不变、size mismatch `0`、旧有效引用 `0`、新有效引用 `402`、库内 inline 目录 `0`。原始三断言在 `08:54:45` 和 `08:56:01 +08` 连续为 GREEN。
 - TDD 源码修复已完成：旧代码回归测试因隐藏路径仍在媒体库根内而 RED；最小修复将隐藏根改为 `libraryRoot` 同级，并验证 sidecar/manifest 重载仍解析到保留的分段媒体。双轴 review 发现并修复相对库根和文件系统根边界后复审无发现；定向测试、`make dev`、`make build-web dev`、`make lint`、`make test`、agent 同步检查和 diff/plan 链接检查均通过。
-- 当前 Next Target：提交、推送、创建中文 PR、等待 CI 并合并 master；等待 master Docker Hub 镜像后按 UGREEN 原生 Docker 项目部署，最终用运行 SHA、三断言、媒体/引用和 DB 后验验收。
+- 源码经 PR #37 合并到 master，merge commit 为 `99e19f96dd5726883e53618b23ce164c0a1e3392`；master Docker Hub 发布 workflow 成功，`latest` 与 `sha-99e19f9` 指向相同 digest。
+- UGREEN 原生 Docker 项目运行态交付已完成：部署前、拉取后重建前和部署后门禁均为录制 `0`、pipeline running/pending `0/0`、update `idle`；只重建 `bililive`，`subtitle-worker` 未重启。活动 compose 保持不变，部署回滚备份位于 `/volume2/docker/bililive-go/backups/deploy-99e19f9-20260729-093247/`。
+- 最终运行态 `/api/info.git_hash=99e19f96dd5726883e53618b23ce164c0a1e3392`，app image revision 与之相同，API 返回 HTTP 200、容器 restart count 为 0。部署后两轮后验均确认三断言 `0/0/0`、外置 MP4 `187`、总字节 `78,576,915,095`、旧/新 JSON 引用 `0/402`、解析错误 `0`，UGREEN 建筑师错误电影条目 `0`。本主题当前无未完成运行态步骤。
 
 2026-06-13 09:35 +08 用户完成 UGREEN 原生 Docker 拉取重建后，二次验收确认 `/api/info` 仍为 `app_version=806da08` / `git_hash=806da08c5cc299d593910a83221c6c6e640532d1`，`/api/update/status` 为 `idle`。`/api/pipeline/tasks?limit=80` 结构化检查显示，新版本之后的最近任务（如 #672 旭东聊装修、#673 汤山老王）已经完成到字幕产物和同场知识同步提交；历史失败主要集中在 2026-06-08 至 2026-06-11 的同场聚合任务，错误为旧版本生成 `*.mp4.tmp` 输出路径后 FFmpeg 报 `Unable to choose an output format ... .mp4.tmp`。当前代码已改为 `*.tmp.mp4`，并且 concat 命令显式加 `-f mp4`，说明防复发代码已在新镜像中。不要批量调用 `/api/pipeline/tasks/{id}/retry` 修历史：`RetryTask` 会重置到第 0 阶段并使用 `InitialFiles`，而许多历史任务的 FLV 已在 convert 阶段删除，直接 retry 容易制造新失败或重复产物。历史补偿应走 NAS 文件系统脚本：先修复/聚合媒体库 sidecar 和重复 show，再回填 BiliNote cover；没有安全 NAS 写入通道前只能做只读验收。
 
