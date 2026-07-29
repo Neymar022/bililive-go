@@ -32,6 +32,20 @@
 | `test-e2e` | Playwright E2E 测试 |
 | `version-switching` | 不停机版本切换设计规范（Docker/独立运行） |
 
+## Agent skills
+
+### Issue tracker
+
+本仓库使用 GitHub Issues（`Neymar022/bililive-go`）跟踪问题。详见 `docs/agents/issue-tracker.md`。
+
+### Triage labels
+
+本仓库使用五个默认 triage 角色标签。详见 `docs/agents/triage-labels.md`。
+
+### Domain docs
+
+本仓库采用 single-context 领域文档布局。领域词汇位于根目录 `CONTEXT.md`，架构决策位于 `docs/adr/`。详见 `docs/agents/domain.md`。
+
 ## 快速参考
 
 ```bash

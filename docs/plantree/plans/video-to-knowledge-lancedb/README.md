@@ -25,6 +25,7 @@
 - [implementation-status.md](implementation-status.md)：当前执行交接状态。
 - [open-questions.md](open-questions.md)：尚未解决的问题。
 - [decisions/](decisions/)：已接受的跨仓库计划决策。
+- [UGREEN inline live-session 分段迁移](topics/2026-07-29-ugreen-inline-live-segment-relocation.md)：影视中心错误归类的根因、历史修复、回滚和源码防复发证据。
 
 ## Decisions
 

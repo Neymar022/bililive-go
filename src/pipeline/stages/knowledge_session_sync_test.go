@@ -185,10 +185,75 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	firstMetadata, err := subtitle.LoadMetadata(firstMetadataPath)
 	require.NoError(t, err)
 	assert.Contains(t, firstMetadata.OutputPath, ".live_session_segments")
+	hiddenRoot := filepath.Join(filepath.Dir(libraryRoot), liveSessionSegmentsDirName)
+	relHiddenOutput, err := filepath.Rel(hiddenRoot, firstMetadata.OutputPath)
+	require.NoError(t, err)
+	assert.False(t, relHiddenOutput == ".." || strings.HasPrefix(relHiddenOutput, ".."+string(filepath.Separator)))
 	require.FileExists(t, firstMetadata.OutputPath)
 	assert.Equal(t, aggregate.LibraryPath, firstMetadata.RecordMeta["live_session_media_aggregate_path"])
+	assert.Equal(t, firstMetadata.OutputPath, firstMetadata.RecordMeta["live_session_segment_hidden_path"])
+	assert.NoDirExists(t, filepath.Join(seasonDir, liveSessionSegmentsDirName))
+
+	manifestPath := knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID)
+	require.NoError(t, saveKnowledgeSessionManifest(manifestPath, manifest))
+	reloadedManifest, err := loadKnowledgeSessionManifest(manifestPath)
+	require.NoError(t, err)
+	reloadedInputs, err := knowledgeSessionInputsFromManifest(reloadedManifest)
+	require.NoError(t, err)
+	reloadedPaths, err := liveSessionSegmentVideoPaths(reloadedInputs)
+	require.NoError(t, err)
+	assert.Contains(t, reloadedPaths, firstMetadata.OutputPath)
+	assert.Contains(t, reloadedPaths, aggregate.LibraryPath)
 	require.Len(t, aggregate.Metadata.Segments, 2)
 	assert.Equal(t, "00:02:00,000", aggregate.Metadata.Segments[1].Start)
+}
+
+func TestPublishLiveSessionMediaAggregateKeepsRelativeLibraryRootOutsideMediaLibrary(t *testing.T) {
+	stubLiveSessionMedia(t, []float64{120, 90})
+	workDir := t.TempDir()
+	libraryDir := filepath.Join(workDir, "video")
+	require.NoError(t, os.MkdirAll(libraryDir, 0o755))
+	t.Chdir(libraryDir)
+
+	libraryRoot := "."
+	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "第一段内容")
+	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第二段内容")
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:session-20260601-relative-root",
+		LiveSessionID: "session-20260601-relative-root",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-619", SourceID: knowledgeSourceID(libraryRoot, firstLibraryPath), LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath},
+			{TaskID: "bililive-go-620", SourceID: knowledgeSourceID(libraryRoot, secondLibraryPath), LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+
+	firstMetadata, err := subtitle.LoadMetadata(firstMetadataPath)
+	require.NoError(t, err)
+	hiddenRoot := filepath.Join(workDir, liveSessionSegmentsDirName)
+	relHiddenOutput, err := filepath.Rel(hiddenRoot, firstMetadata.OutputPath)
+	require.NoError(t, err)
+	assert.False(t, relHiddenOutput == ".." || strings.HasPrefix(relHiddenOutput, ".."+string(filepath.Separator)))
+	assert.NoDirExists(t, filepath.Join(libraryDir, liveSessionSegmentsDirName))
+	require.FileExists(t, firstMetadata.OutputPath)
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsFilesystemRootLibrary(t *testing.T) {
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:session-20260601-filesystem-root",
+		LiveSessionID: "session-20260601-filesystem-root",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-619", LibraryPath: "/tmp/主播/Season 01/主播.S01E0019.2026-06-01 - 第一段.mp4"},
+			{TaskID: "bililive-go-620", LibraryPath: "/tmp/主播/Season 01/主播.S01E0020.2026-06-01 - 第二段.mp4"},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", string(filepath.Separator), &manifest)
+	require.ErrorContains(t, err, "cannot place live session segments outside library root")
+	assert.Nil(t, aggregate)
 }
 
 func TestPublishLiveSessionMediaAggregateFailsWhenCoverCannotBeCreated(t *testing.T) {

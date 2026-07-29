@@ -55,6 +55,10 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	absoluteLibraryRoot, _, err := liveSessionSegmentRoots(libraryRoot)
+	if err != nil {
+		return nil, err
+	}
 
 	inputs, err := knowledgeSessionInputsFromManifest(*manifest)
 	if err != nil {
@@ -110,7 +114,7 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		}
 	}
 
-	if err := hideLiveSessionSegmentVideos(libraryRoot, manifest, inputs, aggregatePath); err != nil {
+	if err := hideLiveSessionSegmentVideos(absoluteLibraryRoot, manifest, inputs, aggregatePath); err != nil {
 		return nil, err
 	}
 
@@ -592,12 +596,32 @@ func hideLiveSessionSegmentVideos(libraryRoot string, manifest *knowledgeSession
 }
 
 func hiddenLiveSessionSegmentPath(libraryRoot string, manifest *knowledgeSessionManifest, libraryPath string, segmentPath string) (string, error) {
-	seasonDir := filepath.Dir(libraryPath)
-	if rel, err := filepath.Rel(libraryRoot, seasonDir); err != nil || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+	absoluteLibraryRoot, hiddenRoot, err := liveSessionSegmentRoots(libraryRoot)
+	if err != nil {
+		return "", err
+	}
+	seasonDir, err := filepath.Abs(filepath.Dir(libraryPath))
+	if err != nil {
+		return "", err
+	}
+	rel, err := filepath.Rel(absoluteLibraryRoot, seasonDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 		return "", fmt.Errorf("library path is outside library root: %s", libraryPath)
 	}
 	hash := sha256.Sum256([]byte(manifest.SourceID + "\n" + manifest.LiveSessionID))
-	return filepath.Join(seasonDir, liveSessionSegmentsDirName, hex.EncodeToString(hash[:])[:16], filepath.Base(segmentPath)), nil
+	return filepath.Join(hiddenRoot, rel, hex.EncodeToString(hash[:])[:16], filepath.Base(segmentPath)), nil
+}
+
+func liveSessionSegmentRoots(libraryRoot string) (string, string, error) {
+	absoluteLibraryRoot, err := filepath.Abs(libraryRoot)
+	if err != nil {
+		return "", "", err
+	}
+	parentDir := filepath.Dir(absoluteLibraryRoot)
+	if sameCleanPath(parentDir, absoluteLibraryRoot) {
+		return "", "", fmt.Errorf("cannot place live session segments outside library root: %s", libraryRoot)
+	}
+	return absoluteLibraryRoot, filepath.Join(parentDir, liveSessionSegmentsDirName), nil
 }
 
 func uniqueLiveSessionHiddenPath(path string) string {
