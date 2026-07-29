@@ -101,8 +101,18 @@ update state=idle
 
 本地验证通过：定向 Go 测试、`make dev`、`make build-web dev`、`make lint`、`make test`、`make sync-agents`、`make check-agents`、diff 检查和 plan 链接检查。双轴 code review 修复相对库根/文件系统根边界和文档标题后，Standards 与 Spec 复审均无可操作发现。
 
+## 发布与运行态后验
+
+- 中文 PR #37 已合并 master，merge commit 为 `99e19f96dd5726883e53618b23ce164c0a1e3392`。PR 的 build、test、lint、agent 指示检查、build-web 和 Playwright E2E 均通过；`claude-review` 在开始审查前因仓库未安装 Claude Code GitHub App 返回 401，属于外部审查服务配置，已在 PR 留痕。
+- master workflow `30414072309` 成功发布 app 和 worker 镜像。Docker Hub app `latest` 与 `sha-99e19f9` 均指向 digest `sha256:9140fd9baad22812bb5ba60a89efa44c2b73517b82fa152b1f4b54f7d204b208`。
+- 生产活动 compose 由 UGREEN 原生项目 `bililive-go` 持有，路径为 `/volume2/docker/bililive-go/bililive-go-ugreen/docker-compose.yaml`。部署前备份活动/canonical compose、配置、运行环境摘要、旧容器和镜像回滚信息到 `/volume2/docker/bililive-go/backups/deploy-99e19f9-20260729-093247/`，并为旧 app image 保留本地 rollback tag。
+- 部署前、拉取后重建前和部署后均重新核对：`active_recordings_count=0`、pipeline `running_count=0`、`pending_count=0`、update `idle`。只拉取并重建 `bililive`；`subtitle-worker` 容器 ID 保持不变，没有重启 UGREEN video 服务。
+- 部署后 `/api/info` 返回 HTTP 200，`git_hash=99e19f96dd5726883e53618b23ce164c0a1e3392`；运行 image ID 为 `sha256:5ac71076622c943ccf64136d25c35775f71c5f3802084f56088c5cf729edeb25`，OCI revision 与 master 一致，容器 restart count 为 0，活动 compose checksum 未变化。
+- 两轮部署后验均为 GREEN：库内 inline MP4 `0`、UGREEN `file_info` inline 索引 `0`、建筑师电影 type 索引 `0`；外置 MP4 `187`、总字节 `78,576,915,095`、missing/size mismatch `0`；195 个 JSON 解析错误 `0`、旧引用 `0`、新引用 `402`。错误电影 `ug_video_info_id 4381/4385` 及其文件关系均为 `0`。
+
 ## 回滚
 
 - 文件层：按 inventory 逆序把 target rename 回 source，并从 `file-reference-backup/json/` 原子恢复 195 个 JSON。
 - DB 层：本次未执行手写 DB 事务。若回滚文件后 UGREEN 未自然重建，可参考 custom dump 和 affected CSV 做受控恢复；不要在仍有正确可见媒体关联时整表或整 category 覆盖。
-- 在 master 镜像部署和最终生产后验完成前，不删除备份根。
+- 运行态：使用部署备份中的活动 compose 和旧 app image rollback tag，只重建 `bililive`；回滚前仍须重新满足零录制、零 running/pending pipeline 和 update idle 门禁。
+- 历史迁移与部署备份均保留，稳定观察期结束前不要删除。
