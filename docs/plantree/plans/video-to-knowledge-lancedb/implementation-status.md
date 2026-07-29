@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-06-08
+更新时间：2026-07-29
 
 ## State Ownership
 
@@ -36,6 +36,16 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
 
 ## Current Work
+
+### 2026-07-29 UGREEN inline live-session 错误归类修复
+
+- 生产红灯在 `2026-07-29 08:34 +08` 连续两次稳定复现：媒体库根内 inline MP4 `187`、UGREEN `file_info` inline 索引 `76`、建筑师电影 type 索引 `13`。
+- 根因已证实：Bililive-go 把内部 live-session 分段放在 `/volume2/docker/bililive-go/video` 监控根内部；UGREEN 会递归扫描点目录。分段均无同名 NFO，因此普通主播形成重复 TV 分类，`建筑师 linkai` 的 13 个分段被匹配成 2006/2009 两部豆瓣电影。
+- 历史修复已完成且未删除媒体：187 个 MP4（78,576,915,095 bytes）迁到同级 `/volume2/docker/bililive-go/.live_session_segments`；195 个有效 sidecar 原子更新 402 次精确引用；2 个无引用 MP4 仍按原身份保留。147 次预存 stale 引用保持不变，避免猜测性改写。
+- UGREEN 相关表和文件引用已备份到 `/volume2/docker/bililive-go/backups/live-segment-relocation-20260729-085035/`。文件迁移 journal 为 `completed`；UGREEN watcher 自然清理错误索引，无需执行手写 DB 事务。
+- 文件后验：旧路径 `0`、新路径 `187`、总字节不变、size mismatch `0`、旧有效引用 `0`、新有效引用 `402`、库内 inline 目录 `0`。原始三断言在 `08:54:45` 和 `08:56:01 +08` 连续为 GREEN。
+- TDD 源码修复已完成：旧代码回归测试因隐藏路径仍在媒体库根内而 RED；最小修复将隐藏根改为 `libraryRoot` 同级，并验证 sidecar/manifest 重载仍解析到保留的分段媒体。双轴 review 发现并修复相对库根和文件系统根边界后复审无发现；定向测试、`make dev`、`make build-web dev`、`make lint`、`make test`、agent 同步检查和 diff/plan 链接检查均通过。
+- 当前 Next Target：提交、推送、创建中文 PR、等待 CI 并合并 master；等待 master Docker Hub 镜像后按 UGREEN 原生 Docker 项目部署，最终用运行 SHA、三断言、媒体/引用和 DB 后验验收。
 
 2026-06-13 09:35 +08 用户完成 UGREEN 原生 Docker 拉取重建后，二次验收确认 `/api/info` 仍为 `app_version=806da08` / `git_hash=806da08c5cc299d593910a83221c6c6e640532d1`，`/api/update/status` 为 `idle`。`/api/pipeline/tasks?limit=80` 结构化检查显示，新版本之后的最近任务（如 #672 旭东聊装修、#673 汤山老王）已经完成到字幕产物和同场知识同步提交；历史失败主要集中在 2026-06-08 至 2026-06-11 的同场聚合任务，错误为旧版本生成 `*.mp4.tmp` 输出路径后 FFmpeg 报 `Unable to choose an output format ... .mp4.tmp`。当前代码已改为 `*.tmp.mp4`，并且 concat 命令显式加 `-f mp4`，说明防复发代码已在新镜像中。不要批量调用 `/api/pipeline/tasks/{id}/retry` 修历史：`RetryTask` 会重置到第 0 阶段并使用 `InitialFiles`，而许多历史任务的 FLV 已在 convert 阶段删除，直接 retry 容易制造新失败或重复产物。历史补偿应走 NAS 文件系统脚本：先修复/聚合媒体库 sidecar 和重复 show，再回填 BiliNote cover；没有安全 NAS 写入通道前只能做只读验收。
 
