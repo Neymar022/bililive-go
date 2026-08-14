@@ -172,3 +172,27 @@ GREEN
 - 合集续修：从 `show-cover-identity-20260729-112930` 恢复原始 `tvshow.nfo` 和目标三表；恢复 DB 前先核对当前关系，优先把单行 poster/backdrop 恢复为 `xudong-category-before-poster-fix.csv` 中的值，不整表覆盖。回滚硬链接可原子恢复 E0033/E0073/E0036，禁止删除当前可见 MP4。
 - 运行态：使用部署备份中的活动 compose 和旧 app image rollback tag，只重建 `bililive`；回滚前仍须重新满足零录制、零 running/pending pipeline 和 update idle 门禁。
 - 历史迁移与部署备份均保留，稳定观察期结束前不要删除。
+
+## 2026-08-14 合集时间排序修复
+
+### 根因与源码修复
+
+- UGREEN 影视中心主要按 `season_number/episode_number` 排序；旧发布逻辑按“第一个空闲集号”分配，任务晚到或并发完成时会让集号与真实录制开始时间相反。
+- 普通发布现在优先采用 `RecordInfo.StartTime`，仅在其为空时解析规范源文件名，并固定按 `UTC+8` 解释无时区时间；不使用文件 mtime 或路径字典序代表录制时间。
+- episode identity 为 `(recordedAt Unix 微秒 - 2020-01-01 UTC Unix 微秒) * 8 + collision slot`。8 个碰撞槽处理同一精确时间的多个媒体；超出 JavaScript 安全整数范围时 fail closed。Go 使用 `int64` 并通过 Linux `386` 编译检查。
+- live-session 输入按 `record_meta.start_time`、metadata `source_path/output_path` 中的规范时间、可解码的新 episode identity 依次取可信时间；存在 metadata 但无法得到可信时间时拒绝聚合。旧无 sidecar 测试 seam 仅兼容既有四位集号顺序。
+- 聚合视频、字幕来源、NFO `dateadded` 和 aggregate metadata `start_time` 均采用最早真实录制时间。晚到更早分段时切换到更早 episode identity，旧聚合 MP4/NFO/JPG/SRT/ASS/metadata 整体归档到库外 `.aggregate_versions`；manifest 用 `previous_aggregate_path` 保留崩溃恢复身份，故障注入与重试测试证明中断后仍会归档旧聚合并清除恢复标记。
+
+### 历史只读计划
+
+- `scripts/repair-library-sidecars.py --plan-chronological-renumber` 只生成计划，不提供 apply：按精确 `recordedAt` 和确定性 collision slot 计算全库双射目标，拒绝越界、重复目标和已有冲突。
+- dry-run 逐项输出 MP4/sidecar 改名、NFO `episode/sorttitle/aired/dateadded/plot` 字段变化，以及媒体库、`.knowledge_sessions` 和库外 `.live_session_segments` 中 manifest/sidecar JSON 的 JSON Pointer、old/new path；缺 NFO 时 fail closed。
+- dry-run 在内存中实际替换并重新遍历 JSON，要求 old refs 为 0、new refs 不少于原有效引用数，并证明 MP4 数量和总字节守恒、每个合集的时间与集号单调。
+- 早期 NAS 只读算法试跑得到 `episodes=389`、`unique_sources=389`、`unique_targets=389`、`changed=389`、`target_conflicts=0`，14 个 show 均单调；该证据早于最终“2020 epoch + 精确微秒 + 8 槽”算法，必须用当前脚本重新生成后才能作为历史 apply 依据。
+
+### 当前门禁与回滚
+
+- 2026-08-15 root 权威 dry-run 已通过：399 个 episode source/target 完整双射，2346 个媒体/sidecar 文件、1319 个 JSON、2100 条引用均可计划更新；模拟后旧引用为 0，400 个 MP4 和 `787776233209` bytes 守恒，冲突 0、所有 show 单调。报告压缩文件 SHA-256 为 `c55b83f80ffec0e06cdd5195577a37c37478f62d8827080b2aeeab9a4e59a8bb`。
+- 当前门禁为 active recordings `0`、pipeline `running=0`、`pending=2`、update `idle`。两项计划字幕任务的输入位于 `srt_video`，与当前重编号 source/target/JSON 引用交集为 0；它们不会被 apply 改名，但旧生产版本完成任务后可能新增四位集号，因此不强跑、不取消，等待其自然完成后重新固定最终 apply 快照。
+- 历史 apply 前必须重新满足录制 0、pipeline running/pending 0/0、update idle；随后备份目标 MP4/NFO/字幕/JSON/manifest 映射及 `file_info/ug_video_info/ug_television_episode`，并用临时名和原子 rename 处理换名环，任何目标冲突拒绝覆盖。
+- 回滚必须按 journal 逆序恢复文件名与 JSON/NFO 原件，再核对 MP4 数量、字节和引用；不得删除任何 MP4。部署新 episode identity 后还需单独验证 UGREEN 对长 episode number 的真实兼容性。

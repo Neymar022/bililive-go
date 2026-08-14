@@ -115,7 +115,7 @@ func TestSyncKnowledgeLiveSessionPostsAggregatedPayloadOnceAfterQuietWindow(t *t
 	assert.True(t, *capturedPayload.Link)
 	require.NotNil(t, capturedPayload.Screenshot)
 	assert.True(t, *capturedPayload.Screenshot)
-	assert.Contains(t, capturedPayload.SourceVideoPath, "S01E0019")
+	assert.Contains(t, capturedPayload.SourceVideoPath, fmt.Sprintf("S01E%d", chronologicalLiveSessionEpisodeIdentity(time.Date(2026, 6, 1, 18, 19, 0, 0, time.UTC))))
 	assert.Contains(t, capturedPayload.SourceVideoPath, "[同场聚合]")
 	assert.Empty(t, capturedPayload.SourceVideos)
 	assert.Empty(t, capturedPayload.MediaSegments)
@@ -170,7 +170,7 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
 	require.NoError(t, err)
 	require.NotNil(t, aggregate)
-	assert.Contains(t, filepath.Base(aggregate.LibraryPath), "S01E0019")
+	assert.Contains(t, filepath.Base(aggregate.LibraryPath), fmt.Sprintf("S01E%d", chronologicalLiveSessionEpisodeIdentity(time.Date(2026, 6, 1, 18, 19, 0, 0, time.UTC))))
 	assert.Contains(t, filepath.Base(aggregate.LibraryPath), "[同场聚合]")
 	assert.NotContains(t, filepath.Base(aggregate.LibraryPath), "-S01E")
 	require.FileExists(t, aggregate.LibraryPath)
@@ -276,6 +276,71 @@ func TestPublishLiveSessionMediaAggregateCreatesOneVisibleEpisodeAndHidesSegment
 	assert.Len(t, hiddenVideosAfterRepeat, 2)
 }
 
+func TestPublishLiveSessionMediaAggregateUsesEarliestRecordedAtInsteadOfPathOrder(t *testing.T) {
+	stubLiveSessionMediaForEpisodeList(t, []float64{90, 120}, []string{"S01E1704099600000000", "S01E1704103200000000"})
+	libraryRoot := t.TempDir()
+	laterPath, laterMetadataPath, laterMetadata := writeCompletedKnowledgeSessionSidecarAt(
+		t, libraryRoot, "主播", 1704103200000000,
+		time.Date(2024, 1, 1, 10, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)), "较晚段",
+	)
+	earlierPath, earlierMetadataPath, earlierMetadata := writeCompletedKnowledgeSessionSidecarAt(
+		t, libraryRoot, "主播", 1704099600000000,
+		time.Date(2024, 1, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)), "较早段",
+	)
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:recorded-at-order",
+		LiveSessionID: "recorded-at-order",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "later", LibraryPath: laterPath, MetadataPath: laterMetadataPath},
+			{TaskID: "earlier", LibraryPath: earlierPath, MetadataPath: earlierMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	expectedIdentity := chronologicalLiveSessionEpisodeIdentity(time.Date(2024, 1, 1, 9, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)))
+	assert.Contains(t, filepath.Base(aggregate.LibraryPath), fmt.Sprintf(".S01E%d.", expectedIdentity))
+	assert.Equal(t, earlierMetadata.RecordMeta["start_time"], aggregate.Metadata.RecordMeta["start_time"])
+	sources := aggregate.Metadata.RecordMeta["live_session_media_sources"].([]map[string]any)
+	require.Len(t, sources, 2)
+	assert.Equal(t, earlierMetadataPath, sources[0]["metadata_path"])
+	assert.Equal(t, laterMetadataPath, sources[1]["metadata_path"])
+	assert.NotEqual(t, laterMetadata.RecordMeta["start_time"], aggregate.Metadata.RecordMeta["start_time"])
+	nfo := string(mustReadStageFile(t, strings.TrimSuffix(aggregate.LibraryPath, ".mp4")+".nfo"))
+	assert.Contains(t, nfo, "<dateadded>2024-01-01 09:00:00</dateadded>")
+}
+
+func TestLiveSessionAggregatePathPreservesEarliestInputCollisionSlot(t *testing.T) {
+	libraryRoot := t.TempDir()
+	recordedAt := time.Date(2026, 6, 1, 18, 19, 0, 123456000, time.FixedZone("UTC+8", 8*60*60))
+	baseIdentity := chronologicalLiveSessionEpisodeIdentity(recordedAt)
+	firstPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "主播", baseIdentity+1, recordedAt, "同刻第二槽")
+	secondPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "主播", baseIdentity+2, recordedAt, "同刻第三槽")
+
+	aggregatePath, err := liveSessionAggregatePath([]knowledgeSessionPayloadInput{
+		{LibraryPath: firstPath, MetadataPath: firstMetadataPath, Metadata: &firstMetadata},
+		{LibraryPath: secondPath, MetadataPath: secondMetadataPath, Metadata: &secondMetadata},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, filepath.Base(aggregatePath), fmt.Sprintf("S01E%d", baseIdentity+1))
+}
+
+func TestLiveSessionAggregatePathRejectsUnsafeRecordedAtBeforeLegacyCollisionCheck(t *testing.T) {
+	libraryRoot := t.TempDir()
+	recordedAt := time.Date(2019, 12, 31, 23, 59, 0, 0, time.UTC)
+	firstPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "主播", 1, recordedAt, "旧集号一")
+	secondPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "主播", 2, recordedAt.Add(time.Second), "旧集号二")
+
+	aggregatePath, err := liveSessionAggregatePath([]knowledgeSessionPayloadInput{
+		{LibraryPath: firstPath, MetadataPath: firstMetadataPath, Metadata: &firstMetadata},
+		{LibraryPath: secondPath, MetadataPath: secondMetadataPath, Metadata: &secondMetadata},
+	})
+	require.Error(t, err)
+	assert.Empty(t, aggregatePath)
+	assert.Contains(t, err.Error(), "safe episode identity range")
+}
+
 func TestPublishLiveSessionMediaAggregateKeepsOneStableVisibleAggregateWhenSessionGrows(t *testing.T) {
 	oldConcat := liveSessionMediaConcat
 	oldProbeDuration := liveSessionMediaProbeDuration
@@ -310,7 +375,8 @@ func TestPublishLiveSessionMediaAggregateKeepsOneStableVisibleAggregateWhenSessi
 	firstAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
 	require.NoError(t, err)
 	require.NotNil(t, firstAggregate)
-	assert.Contains(t, filepath.Base(firstAggregate.LibraryPath), "S01E0020")
+	firstIdentity := chronologicalLiveSessionEpisodeIdentity(time.Date(2026, 6, 1, 18, 20, 0, 0, time.UTC))
+	assert.Contains(t, filepath.Base(firstAggregate.LibraryPath), fmt.Sprintf("S01E%d", firstIdentity))
 	assert.Equal(t, []byte("aggregate-2"), mustReadStageFile(t, firstAggregate.LibraryPath))
 
 	thirdLibraryPath, thirdMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "迟到的更早分段")
@@ -324,10 +390,13 @@ func TestPublishLiveSessionMediaAggregateKeepsOneStableVisibleAggregateWhenSessi
 	secondAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
 	require.NoError(t, err)
 	require.NotNil(t, secondAggregate)
-	assert.Equal(t, firstAggregate.LibraryPath, secondAggregate.LibraryPath)
-	assert.Contains(t, filepath.Base(secondAggregate.LibraryPath), "S01E0020")
+	assert.NotEqual(t, firstAggregate.LibraryPath, secondAggregate.LibraryPath)
+	secondIdentity := chronologicalLiveSessionEpisodeIdentity(time.Date(2026, 6, 1, 18, 19, 0, 0, time.UTC))
+	assert.Contains(t, filepath.Base(secondAggregate.LibraryPath), fmt.Sprintf("S01E%d", secondIdentity))
+	assert.Equal(t, secondAggregate.LibraryPath, manifest.AggregatePath)
 	assert.Equal(t, []byte("aggregate-3"), mustReadStageFile(t, secondAggregate.LibraryPath))
 	assert.Equal(t, []string{filepath.Base(secondAggregate.LibraryPath)}, visibleMP4Files(t, filepath.Dir(secondAggregate.LibraryPath)))
+	assert.NoFileExists(t, firstAggregate.LibraryPath)
 
 	_, hiddenRoot, err := liveSessionSegmentRoots(libraryRoot)
 	require.NoError(t, err)
@@ -349,6 +418,161 @@ func TestPublishLiveSessionMediaAggregateKeepsOneStableVisibleAggregateWhenSessi
 		require.FileExists(t, path)
 		assert.Contains(t, path, liveSessionSegmentsDirName)
 	}
+}
+
+func TestPublishLiveSessionMediaAggregatePreservesRecoveryIdentityWhenArchiveMoveFails(t *testing.T) {
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(_ context.Context, _ string, inputs []string, outputPath string) error {
+		return os.WriteFile(outputPath, []byte(fmt.Sprintf("aggregate-%d", len(inputs))), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(_ context.Context, _ string, inputPath string) (float64, error) {
+		for index, episode := range []string{"S01E0019", "S01E0020", "S01E0021"} {
+			if strings.Contains(inputPath, episode) {
+				return float64(60 + index), nil
+			}
+		}
+		return 0, fmt.Errorf("unexpected input path: %s", inputPath)
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+	libraryRoot := t.TempDir()
+	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第一段内容")
+	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 21, "第二段内容")
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:identity-archive-rollback",
+		LiveSessionID: "identity-archive-rollback",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "later-1", SourceID: knowledgeSourceID(libraryRoot, firstLibraryPath), LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath},
+			{TaskID: "later-2", SourceID: knowledgeSourceID(libraryRoot, secondLibraryPath), LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	firstAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	manifestPath := knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID)
+
+	earlierLibraryPath, earlierMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "迟到的更早分段")
+	manifest.Sources = append(manifest.Sources, knowledgeSessionManifestSource{
+		TaskID:       "earlier",
+		SourceID:     knowledgeSourceID(libraryRoot, earlierLibraryPath),
+		LibraryPath:  earlierLibraryPath,
+		MetadataPath: earlierMetadataPath,
+	})
+
+	oldSidecarRename := liveSessionSidecarRename
+	liveSessionSidecarRename = func(oldPath, newPath string) error {
+		if strings.Contains(newPath, string(filepath.Separator)+".aggregate_versions"+string(filepath.Separator)) && strings.HasSuffix(oldPath, ".nfo") {
+			return errors.New("injected old aggregate archive failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	t.Cleanup(func() { liveSessionSidecarRename = oldSidecarRename })
+
+	secondAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.Error(t, err)
+	assert.Nil(t, secondAggregate)
+	assert.Contains(t, err.Error(), "injected old aggregate archive failure")
+	assert.NotEqual(t, firstAggregate.LibraryPath, manifest.AggregatePath)
+	assert.Equal(t, firstAggregate.LibraryPath, manifest.PreviousAggregatePath)
+	require.FileExists(t, firstAggregate.LibraryPath)
+	reloaded, loadErr := loadKnowledgeSessionManifest(manifestPath)
+	require.NoError(t, loadErr)
+	assert.Equal(t, manifest.AggregatePath, reloaded.AggregatePath)
+	assert.Equal(t, firstAggregate.LibraryPath, reloaded.PreviousAggregatePath)
+	require.FileExists(t, earlierLibraryPath)
+}
+
+func TestPublishLiveSessionMediaAggregateRecoversPersistedIdentitySwitchAfterRetry(t *testing.T) {
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(_ context.Context, _ string, inputs []string, outputPath string) error {
+		return os.WriteFile(outputPath, []byte(fmt.Sprintf("aggregate-%d", len(inputs))), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(_ context.Context, _ string, inputPath string) (float64, error) {
+		for index, episode := range []string{"S01E0019", "S01E0020", "S01E0021"} {
+			if strings.Contains(inputPath, episode) {
+				return float64(60 + index), nil
+			}
+		}
+		return 0, fmt.Errorf("unexpected input path: %s", inputPath)
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+
+	libraryRoot := t.TempDir()
+	firstPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第一段")
+	secondPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 21, "第二段")
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:identity-retry",
+		LiveSessionID: "identity-retry",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "later-1", LibraryPath: firstPath, MetadataPath: firstMetadataPath},
+			{TaskID: "later-2", LibraryPath: secondPath, MetadataPath: secondMetadataPath},
+		},
+	}
+	firstAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+
+	earlierPath, earlierMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "迟到分段")
+	manifest.Sources = append(manifest.Sources, knowledgeSessionManifestSource{TaskID: "earlier", LibraryPath: earlierPath, MetadataPath: earlierMetadataPath})
+	inputs, err := knowledgeSessionInputsFromManifest(manifest)
+	require.NoError(t, err)
+	desiredPath, err := liveSessionAggregatePath(inputs)
+	require.NoError(t, err)
+	desiredPath, err = canonicalLiveSessionAggregatePath(desiredPath)
+	require.NoError(t, err)
+
+	// 模拟进程在持久化 old/new 恢复标记后、文件事务完成前退出。
+	manifest.PreviousAggregatePath = firstAggregate.LibraryPath
+	manifest.AggregatePath = desiredPath
+	require.NoError(t, saveKnowledgeSessionManifest(knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID), manifest))
+
+	recovered, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, recovered)
+	assert.Equal(t, desiredPath, recovered.LibraryPath)
+	assert.Empty(t, manifest.PreviousAggregatePath)
+	assert.NoFileExists(t, firstAggregate.LibraryPath)
+	reloaded, err := loadKnowledgeSessionManifest(knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID))
+	require.NoError(t, err)
+	assert.Empty(t, reloaded.PreviousAggregatePath)
+	assert.Equal(t, desiredPath, reloaded.AggregatePath)
+}
+
+func TestPublishLiveSessionMediaAggregateClearsRecoveredIdentityAfterArchiveCommitted(t *testing.T) {
+	stubLiveSessionMedia(t, []float64{60, 70})
+	libraryRoot := t.TempDir()
+	firstPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 19, "第一段")
+	secondPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "第二段")
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:marker-retry",
+		LiveSessionID: "marker-retry",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "first", LibraryPath: firstPath, MetadataPath: firstMetadataPath},
+			{TaskID: "second", LibraryPath: secondPath, MetadataPath: secondMetadataPath},
+		},
+	}
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+
+	// 模拟旧聚合已经归档、但进程尚未来得及清恢复标记。
+	missingPrevious := filepath.Join(filepath.Dir(aggregate.LibraryPath), "已归档旧聚合.mp4")
+	manifest.PreviousAggregatePath = missingPrevious
+	require.NoError(t, saveKnowledgeSessionManifest(knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID), manifest))
+
+	retried, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, retried)
+	assert.Equal(t, aggregate.LibraryPath, retried.LibraryPath)
+	assert.Empty(t, manifest.PreviousAggregatePath)
+	reloaded, err := loadKnowledgeSessionManifest(knowledgeSessionManifestPath(libraryRoot, manifest.LiveSessionID))
+	require.NoError(t, err)
+	assert.Empty(t, reloaded.PreviousAggregatePath)
 }
 
 func TestPublishLiveSessionMediaAggregateKeepsRelativeLibraryRootOutsideMediaLibrary(t *testing.T) {
@@ -892,7 +1116,7 @@ func TestPublishLiveSessionMediaAggregatePreparesIdentityAndCoverBeforeReplacing
 	}
 	liveSessionMediaRename = func(oldPath, newPath string) error {
 		assert.Contains(t, filepath.Base(oldPath), ".tmp.mp4")
-		assert.Contains(t, filepath.Base(newPath), "S01E0032")
+		assert.Contains(t, filepath.Base(newPath), fmt.Sprintf("S01E%d", chronologicalLiveSessionEpisodeIdentity(time.Date(2026, 6, 1, 18, 32, 0, 0, time.UTC))))
 		assert.Contains(t, filepath.Base(newPath), "[同场聚合]")
 		assert.Equal(t, []byte("video"), mustReadStageFile(t, secondLibraryPath), "发布合集视频前必须先准备并发布身份 sidecar")
 		require.FileExists(t, strings.TrimSuffix(newPath, filepath.Ext(newPath))+".nfo")
@@ -1111,8 +1335,8 @@ func TestPublishLiveSessionMediaAggregateDoesNotOverwriteConcurrentVideoUpdateDu
 	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 32, "第一段")
 	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 33, "第二段")
 	aggregatePath, err := liveSessionAggregatePath([]knowledgeSessionPayloadInput{
-		{LibraryPath: firstLibraryPath},
-		{LibraryPath: secondLibraryPath},
+		{LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath, Metadata: mustLoadStageMetadata(t, firstMetadataPath)},
+		{LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath, Metadata: mustLoadStageMetadata(t, secondMetadataPath)},
 	})
 	require.NoError(t, err)
 
@@ -1154,8 +1378,8 @@ func TestPublishLiveSessionMediaAggregateDoesNotPartiallyRollbackWhenSidecarChan
 	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 32, "第一段")
 	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 33, "第二段")
 	aggregatePath, err := liveSessionAggregatePath([]knowledgeSessionPayloadInput{
-		{LibraryPath: firstLibraryPath},
-		{LibraryPath: secondLibraryPath},
+		{LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath, Metadata: mustLoadStageMetadata(t, firstMetadataPath)},
+		{LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath, Metadata: mustLoadStageMetadata(t, secondMetadataPath)},
 	})
 	require.NoError(t, err)
 	aggregateNFOPath := strings.TrimSuffix(aggregatePath, filepath.Ext(aggregatePath)) + ".nfo"
@@ -1197,8 +1421,8 @@ func TestPublishLiveSessionMediaAggregateKeepsAppliedSidecarsWhenVideoRestoreFai
 	firstLibraryPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 32, "第一段")
 	secondLibraryPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "天津蛋哥 6点说车", 33, "第二段")
 	aggregatePath, err := liveSessionAggregatePath([]knowledgeSessionPayloadInput{
-		{LibraryPath: firstLibraryPath},
-		{LibraryPath: secondLibraryPath},
+		{LibraryPath: firstLibraryPath, MetadataPath: firstMetadataPath, Metadata: mustLoadStageMetadata(t, firstMetadataPath)},
+		{LibraryPath: secondLibraryPath, MetadataPath: secondMetadataPath, Metadata: mustLoadStageMetadata(t, secondMetadataPath)},
 	})
 	require.NoError(t, err)
 	aggregatePath, err = canonicalLiveSessionAggregatePath(aggregatePath)
@@ -1512,10 +1736,21 @@ func knowledgeSessionTestContext(taskID int64) *pipeline.PipelineContext {
 	}
 }
 
-func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host string, episode int, text string) (string, string, subtitle.Metadata) {
+func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host string, episode int64, text string) (string, string, subtitle.Metadata) {
+	return writeCompletedKnowledgeSessionSidecarAt(
+		t,
+		libraryRoot,
+		host,
+		episode,
+		time.Date(2026, 6, 1, 18, int(episode), 0, 0, time.UTC),
+		text,
+	)
+}
+
+func writeCompletedKnowledgeSessionSidecarAt(t *testing.T, libraryRoot, host string, episode int64, recordedAt time.Time, text string) (string, string, subtitle.Metadata) {
 	t.Helper()
 
-	base := filepath.Join(libraryRoot, host, "Season 01", fmt.Sprintf("%s.S01E%04d.2026-06-01 - 设计师还在加班画图吗？进来看看！", host, episode))
+	base := filepath.Join(libraryRoot, host, "Season 01", fmt.Sprintf("%s.S01E%04d.%s - 设计师还在加班画图吗？进来看看！", host, episode, recordedAt.Format("2006-01-02")))
 	libraryPath := base + ".mp4"
 	srtPath := base + ".srt"
 	assPath := base + ".ass"
@@ -1525,7 +1760,7 @@ func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host strin
 	require.NoError(t, os.WriteFile(base+".jpg", []byte("cover"), 0o644))
 	require.NoError(t, os.WriteFile(srtPath, []byte(text), 0o644))
 	require.NoError(t, os.WriteFile(assPath, []byte("[Script Info]\n"), 0o644))
-	completedAt := time.Date(2026, 6, 1, 18, episode, 0, 0, time.UTC)
+	completedAt := recordedAt.UTC().Add(time.Hour)
 	metadata := subtitle.Metadata{
 		Status:         subtitle.StatusCompleted,
 		Language:       "zh",
@@ -1535,6 +1770,9 @@ func writeCompletedKnowledgeSessionSidecar(t *testing.T, libraryRoot, host strin
 		RendererStatus: subtitle.StatusCompleted,
 		Segments: []subtitle.Segment{
 			{Index: 1, Start: "00:00:00,000", End: "00:00:03,000", Text: text},
+		},
+		RecordMeta: map[string]any{
+			"start_time": recordedAt.Format(time.RFC3339Nano),
 		},
 		CompletedAt: &completedAt,
 	}
@@ -1554,6 +1792,13 @@ func visibleMP4Files(t *testing.T, dir string) []string {
 		names = append(names, entry.Name())
 	}
 	return names
+}
+
+func mustLoadStageMetadata(t *testing.T, path string) *subtitle.Metadata {
+	t.Helper()
+	metadata, err := subtitle.LoadMetadata(path)
+	require.NoError(t, err)
+	return &metadata
 }
 
 func stubLiveSessionMedia(t *testing.T, durations []float64) {

@@ -44,7 +44,7 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	require.NoError(t, err)
 
 	// Target path must follow the Plex naming convention.
-	expectedPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	expectedPath := filepath.Join(libraryRoot, "主播", "Season 01", fmt.Sprintf("主播.S01E%d.2026-03-20 - 测试标题.mp4", episodeNumberForRecordedAt(referenceTime)))
 	assert.Equal(t, expectedPath, targetPath)
 
 	// File must exist on disk.
@@ -58,13 +58,13 @@ func TestEnsureLibraryHardlink_CreatesNewLink(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, os.SameFile(srcInfo, dstInfo), "source and target must be the same inode")
 
-	nfoText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.nfo"))
+	nfoText, err := os.ReadFile(strings.TrimSuffix(expectedPath, ".mp4") + ".nfo")
 	require.NoError(t, err)
 	assert.Contains(t, string(nfoText), "<title>2026-03-20 - 测试标题</title>")
 	assert.Contains(t, string(nfoText), "<showtitle>主播</showtitle>")
-	assert.Contains(t, string(nfoText), "<episode>1</episode>")
+	assert.Contains(t, string(nfoText), fmt.Sprintf("<episode>%d</episode>", episodeNumberForRecordedAt(referenceTime)))
 	assert.Contains(t, string(nfoText), "<studio>哔哩哔哩</studio>")
-	require.FileExists(t, filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.jpg"))
+	require.FileExists(t, strings.TrimSuffix(expectedPath, ".mp4")+".jpg")
 
 	showNFOText, err := os.ReadFile(filepath.Join(libraryRoot, "主播", "tvshow.nfo"))
 	require.NoError(t, err)
@@ -103,7 +103,7 @@ func TestEnsureLibraryHardlinkRemovesNewEpisodeSidecarsWhenLinkFails(t *testing.
 	require.NoError(t, os.WriteFile(retrySource, []byte("source"), 0o644))
 	retryPath, retryErr := EnsureLibraryHardlink(context.Background(), retrySource, libraryRoot, "主播", referenceTime, "哔哩哔哩")
 	require.NoError(t, retryErr)
-	assert.Contains(t, filepath.Base(retryPath), ".S01E0001.", "失败发布不得占用单集槽位")
+	assert.Contains(t, filepath.Base(retryPath), fmt.Sprintf(".S01E%d.", episodeNumberForRecordedAt(referenceTime)), "失败发布不得占用录制时间身份")
 }
 
 func TestEnsureLibraryHardlinkPreservesConcurrentShowMetadataWhenLinkFails(t *testing.T) {
@@ -186,7 +186,7 @@ func TestEnsureLibraryHardlinkMovesSidecarsToConcurrentSameSourceSlot(t *testing
 	oldLink := libraryHardlinkLink
 	libraryHardlinkLink = func(stagedPath, targetPath string) error {
 		occupiedTarget = targetPath
-		alternateTarget = strings.Replace(targetPath, ".S01E0001.", ".S01E0002.", 1)
+		alternateTarget = strings.Replace(targetPath, fmt.Sprintf(".S01E%d.", episodeNumberForRecordedAt(referenceTime)), fmt.Sprintf(".S01E%d.", episodeNumberForRecordedAt(referenceTime)+1), 1)
 		require.NoError(t, os.WriteFile(targetPath, []byte("external-video"), 0o644))
 		require.NoError(t, os.Link(stagedPath, alternateTarget))
 		return os.ErrExist
@@ -388,7 +388,7 @@ func TestEnsureLibraryHardlink_NormalizesInvisibleShowNameCharacters(t *testing.
 	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "哔哩哔哩")
 	require.NoError(t, err)
 
-	expectedPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	expectedPath := filepath.Join(libraryRoot, "主播", "Season 01", fmt.Sprintf("主播.S01E%d.2026-03-20 - 测试标题.mp4", episodeNumberForRecordedAt(referenceTime)))
 	assert.Equal(t, expectedPath, targetPath)
 	require.NoDirExists(t, filepath.Join(libraryRoot, "主\u200b播"))
 
@@ -437,6 +437,82 @@ func TestEnsureLibraryHardlinkKeepsIncrementalEpisodesInOneNormalizedShow(t *tes
 	assert.Contains(t, showNFOText, `<thumb aspect="poster">poster.jpg</thumb>`)
 }
 
+func TestEnsureLibraryHardlinkNumbersLateRecordingsByExactStartTime(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	location := time.FixedZone("UTC+8", 8*60*60)
+	earlierAt := time.Date(2026, 3, 20, 9, 30, 0, 123456000, location)
+	laterAt := time.Date(2026, 3, 20, 10, 0, 0, 654321000, location)
+	earlierSource := filepath.Join(sourceRoot, "主播 - 2026-03-20 09-30-00 - 较早场次.mp4")
+	laterSource := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 较晚场次.mp4")
+	require.NoError(t, os.WriteFile(earlierSource, []byte("earlier"), 0o644))
+	require.NoError(t, os.WriteFile(laterSource, []byte("later"), 0o644))
+	require.NoError(t, os.Chtimes(earlierSource, laterAt.Add(24*time.Hour), laterAt.Add(24*time.Hour)))
+	require.NoError(t, os.Chtimes(laterSource, earlierAt.Add(-24*time.Hour), earlierAt.Add(-24*time.Hour)))
+
+	// 模拟较晚录制先完成、较早录制后到达。mtime 也故意与录制时间相反。
+	laterPath, err := EnsureLibraryHardlink(context.Background(), laterSource, libraryRoot, "主播", laterAt, "抖音")
+	require.NoError(t, err)
+	earlierPath, err := EnsureLibraryHardlink(context.Background(), earlierSource, libraryRoot, "主播", earlierAt, "抖音")
+	require.NoError(t, err)
+
+	earlierEpisode := episodeNumberFromLibraryPath(earlierPath)
+	laterEpisode := episodeNumberFromLibraryPath(laterPath)
+	assert.Positive(t, earlierEpisode)
+	assert.Less(t, earlierEpisode, laterEpisode, "集号必须按精确录制开始时间递增，而不是按任务完成顺序或 mtime")
+	assert.Equal(t, (laterAt.UnixMicro()-earlierAt.UnixMicro())*chronologicalEpisodeIdentityBase, int64(laterEpisode-earlierEpisode))
+	earlierNFO := string(mustReadFile(t, strings.TrimSuffix(earlierPath, filepath.Ext(earlierPath))+".nfo"))
+	assert.Contains(t, earlierNFO, "<dateadded>2026-03-20 09:30:00</dateadded>")
+}
+
+func TestEnsureLibraryHardlinkPreservesMicrosecondOrder(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	location := time.FixedZone("UTC+8", 8*60*60)
+	earlierAt := time.Date(2026, 3, 20, 9, 30, 0, 123456000, location)
+	laterAt := time.Date(2026, 3, 20, 9, 30, 0, 123789000, location)
+	earlierSource := filepath.Join(sourceRoot, "主播 - 2026-03-20 09-30-00 - 较早微秒场次.mp4")
+	laterSource := filepath.Join(sourceRoot, "主播 - 2026-03-20 09-30-00 - 较晚微秒场次.mp4")
+	for _, source := range []string{earlierSource, laterSource} {
+		require.NoError(t, os.WriteFile(source, []byte(source), 0o644))
+	}
+
+	// 故意按较晚、较早的顺序发布，排除任务完成顺序影响。
+	laterPath, err := EnsureLibraryHardlink(context.Background(), laterSource, libraryRoot, "主播", laterAt, "抖音")
+	require.NoError(t, err)
+	earlierPath, err := EnsureLibraryHardlink(context.Background(), earlierSource, libraryRoot, "主播", earlierAt, "抖音")
+	require.NoError(t, err)
+
+	earlierEpisode := episodeNumberFromLibraryPath(earlierPath)
+	laterEpisode := episodeNumberFromLibraryPath(laterPath)
+	assert.Less(t, earlierEpisode, laterEpisode, "同一毫秒内仍必须按精确微秒排序")
+	assert.Equal(t, int64(333*chronologicalEpisodeIdentityBase), int64(laterEpisode-earlierEpisode))
+}
+
+func TestEnsureLibraryHardlinkUsesBoundedCollisionSlotsForExactTimeIdentity(t *testing.T) {
+	stubCoverExtraction(t)
+	sourceRoot := t.TempDir()
+	libraryRoot := t.TempDir()
+	recordedAt := time.Date(2026, 3, 20, 9, 30, 0, 123456000, time.FixedZone("UTC+8", 8*60*60))
+	firstSource := filepath.Join(sourceRoot, "主播 - 2026-03-20 09-30-00 - 同名场次.mp4")
+	secondSource := filepath.Join(t.TempDir(), "主播 - 2026-03-20 09-30-00 - 同名场次.mp4")
+	require.NoError(t, os.WriteFile(firstSource, []byte("first"), 0o644))
+	require.NoError(t, os.WriteFile(secondSource, []byte("second"), 0o644))
+
+	firstPath, err := EnsureLibraryHardlink(context.Background(), firstSource, libraryRoot, "主播", recordedAt, "抖音")
+	require.NoError(t, err)
+	secondPath, err := EnsureLibraryHardlink(context.Background(), secondSource, libraryRoot, "主播", recordedAt, "抖音")
+	require.NoError(t, err)
+	assert.Equal(t, []byte("first"), mustReadFile(t, firstPath))
+	assert.Equal(t, []byte("second"), mustReadFile(t, secondPath))
+	assert.Equal(t, episodeNumberFromLibraryPath(firstPath)+1, episodeNumberFromLibraryPath(secondPath))
+	visible, globErr := filepath.Glob(filepath.Join(filepath.Dir(firstPath), "*.mp4"))
+	require.NoError(t, globErr)
+	assert.ElementsMatch(t, []string{firstPath, secondPath}, visible)
+}
+
 func TestEnsureLibraryHardlinkSerializesConcurrentEpisodePublication(t *testing.T) {
 	oldExtract := extractCoverTo
 	extractCoverTo = func(_ context.Context, sourcePath, targetPath string) (string, error) {
@@ -458,8 +534,9 @@ func TestEnsureLibraryHardlinkSerializesConcurrentEpisodePublication(t *testing.
 	for index := 0; index < recordings; index++ {
 		sourcePath := filepath.Join(sourceRoot, fmt.Sprintf("主播 - 2026-03-20 10-00-%02d - 并发场次 %02d.mp4", index, index))
 		require.NoError(t, os.WriteFile(sourcePath, []byte(fmt.Sprintf("source-%02d", index)), 0o644))
+		startTime := referenceTime.Add(time.Duration(index) * time.Second)
 		go func(source string) {
-			target, err := EnsureLibraryHardlink(context.Background(), source, libraryRoot, "主播", referenceTime, "哔哩哔哩")
+			target, err := EnsureLibraryHardlink(context.Background(), source, libraryRoot, "主播", startTime, "哔哩哔哩")
 			results <- result{source: source, target: target, err: err}
 		}(sourcePath)
 	}
@@ -536,7 +613,7 @@ func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
 	require.NoError(t, err)
 
 	// EnsureLibraryHardlink counts 1 existing mp4 → assigns E0002.
-	expectedTarget := filepath.Join(seasonDir, "主播.S01E0002.2026-03-20 - 测试.mp4")
+	expectedTarget := filepath.Join(seasonDir, fmt.Sprintf("主播.S01E%d.2026-03-20 - 测试.mp4", episodeNumberForRecordedAt(referenceTime)))
 	assert.Equal(t, expectedTarget, returnedPath)
 
 	// E0001 must be untouched.
@@ -552,8 +629,7 @@ func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
 	assert.True(t, os.SameFile(srcInfo, dstInfo))
 }
 
-// TestEnsureLibraryHardlink_EpisodeNumbering verifies that when N mp4 files
-// already exist in Season 01, a new call assigns episode N+1.
+// TestEnsureLibraryHardlink_EpisodeNumbering 验证旧顺序集号不会改变新录制的时间身份。
 func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
@@ -571,7 +647,7 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
-	expectedPath := filepath.Join(seasonDir, "主播.S01E0003.2026-03-20 - 第三集.mp4")
+	expectedPath := filepath.Join(seasonDir, fmt.Sprintf("主播.S01E%d.2026-03-20 - 第三集.mp4", episodeNumberForRecordedAt(referenceTime)))
 	assert.Equal(t, expectedPath, targetPath)
 }
 
@@ -591,7 +667,7 @@ func TestEnsureLibraryHardlink_EpisodeNumberingReservesRangeEpisode(t *testing.T
 	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime.Add(48*time.Hour), "bililive-go")
 	require.NoError(t, err)
 
-	expectedPath := filepath.Join(seasonDir, "主播.S01E0004.2026-03-22 - 第四集.mp4")
+	expectedPath := filepath.Join(seasonDir, fmt.Sprintf("主播.S01E%d.2026-03-22 - 第四集.mp4", episodeNumberForRecordedAt(referenceTime.Add(48*time.Hour))))
 	assert.Equal(t, expectedPath, targetPath)
 }
 
@@ -617,7 +693,7 @@ func TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars(t *testing.T) {
 	targetPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
 
-	expectedPath := filepath.Join(seasonDir, "主播.S01E0002.2026-03-20 - 同名直播.mp4")
+	expectedPath := filepath.Join(seasonDir, fmt.Sprintf("主播.S01E%d.2026-03-20 - 同名直播.mp4", episodeNumberForRecordedAt(referenceTime)))
 	assert.Equal(t, expectedPath, targetPath)
 	_, err = os.Stat(stem + ".mp4")
 	assert.True(t, os.IsNotExist(err), "old sidecar slot must not receive the new video")
@@ -805,11 +881,26 @@ func TestBuildEpisodeFilename_Basic(t *testing.T) {
 // TestParseSourceFilename_Normalized verifies that normalized filenames are
 // parsed correctly.
 func TestParseSourceFilename_Normalized(t *testing.T) {
-	ts := time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local)
-	meta := parseSourceFilename("/some/dir/主播 - 2026-03-20 10-00-00 - 测试标题.mp4", "fallback", ts)
+	meta := parseSourceFilename("/some/dir/主播 - 2026-03-20 10-00-00 - 测试标题.mp4", "fallback", time.Time{})
 	assert.Equal(t, "主播", meta.aliasName)
 	assert.Equal(t, "测试标题", meta.title)
-	assert.Equal(t, "2026-03-20", meta.recordedAt.Format("2006-01-02"))
+	assert.Equal(t, "2026-03-20T10:00:00+08:00", meta.recordedAt.Format(time.RFC3339))
+}
+
+func TestEpisodeNumberForRecordedAtRejectsUnsafeIdentity(t *testing.T) {
+	assert.Negative(t, episodeNumberForRecordedAt(time.Date(2056, 1, 1, 0, 0, 0, 0, time.UTC)))
+	assert.Negative(t, episodeNumberForRecordedAt(time.Date(2500, 1, 1, 0, 0, 0, 0, time.UTC)))
+}
+
+func TestEnsureLibraryHardlinkRejectsMissingReliableRecordedAt(t *testing.T) {
+	stubCoverExtraction(t)
+	sourcePath := filepath.Join(t.TempDir(), "无法解析时间.mp4")
+	require.NoError(t, os.WriteFile(sourcePath, []byte("video"), 0o644))
+
+	target, err := EnsureLibraryHardlink(context.Background(), sourcePath, t.TempDir(), "主播", time.Time{}, "抖音")
+	require.Error(t, err)
+	assert.Empty(t, target)
+	assert.Contains(t, err.Error(), "no reliable recording start time")
 }
 
 // TestParseSourceFilename_Fallback verifies that unrecognised filenames fall

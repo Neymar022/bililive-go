@@ -20,14 +20,15 @@ import tempfile
 import unicodedata
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 
 EPISODE_RE = re.compile(
-    r"^(?P<alias>.+?)\.S(?P<season>\d{2})E(?P<episode>\d{4})"
-    r"(?:-S\d{2}E\d{4})?\.(?P<date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$"
+    r"^(?P<alias>.+?)\.S(?P<season>\d{2})E(?P<episode>\d+)"
+    r"(?:-S\d{2}E\d+)?\.(?P<date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$"
 )
+SOURCE_RECORDED_AT_RE = re.compile(r" - (?P<recorded_at>\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}) - ")
 SIDECAR_SUFFIXES = (
     ".mp4",
     ".nfo",
@@ -37,6 +38,10 @@ SIDECAR_SUFFIXES = (
     ".subtitle.json",
     ".transcript.json",
 )
+CHRONOLOGICAL_EPISODE_IDENTITY_BASE = 8
+CHRONOLOGICAL_EPISODE_EPOCH = datetime(2020, 1, 1, tzinfo=timezone.utc)
+MAX_SAFE_EPISODE_IDENTITY = 9_007_199_254_740_991
+MEDIA_LIBRARY_TIMEZONE = timezone(timedelta(hours=8))
 
 
 @dataclass(frozen=True)
@@ -48,6 +53,48 @@ class Episode:
     date: str
     alias: str
     title: str
+
+
+@dataclass(frozen=True)
+class ChronologicalEpisodeMove:
+    source: Path
+    target: Path
+    recorded_at: datetime
+    episode: int
+
+
+@dataclass(frozen=True)
+class ChronologicalFileMove:
+    source: Path
+    target: Path
+
+
+@dataclass(frozen=True)
+class ChronologicalNFOEdit:
+    path: Path
+    fields: dict[str, tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class ChronologicalJSONEdit:
+    path: Path
+    pointer: str
+    old: str
+    new: str
+
+
+@dataclass(frozen=True)
+class ChronologicalReferenceSimulation:
+    old_references: int
+    new_references: int
+
+
+@dataclass(frozen=True)
+class ChronologicalMediaConservation:
+    before_count: int
+    before_bytes: int
+    after_count: int
+    after_bytes: int
 
 
 def normalize_component(value: str) -> str:
@@ -86,6 +133,294 @@ def parse_episode(path: Path, library_root: Path) -> Episode | None:
         alias=normalize_component(match.group("alias")) or normalize_component(path.parent.parent.name) or "未分类主播",
         title=normalize_component(match.group("title")) or "未命名直播",
     )
+
+
+def episode_recorded_at(ep: Episode) -> datetime:
+    metadata_path = ep.path.with_suffix(".subtitle.json")
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        metadata = {}
+    value = (metadata.get("record_meta") or {}).get("start_time")
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.year >= 2000:
+                return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=MEDIA_LIBRARY_TIMEZONE)
+        except ValueError:
+            pass
+    for key in ("source_path", "output_path"):
+        candidate = metadata.get(key)
+        match = SOURCE_RECORDED_AT_RE.search(candidate) if isinstance(candidate, str) else None
+        if match:
+            return datetime.strptime(match.group("recorded_at"), "%Y-%m-%d %H-%M-%S").replace(
+                tzinfo=MEDIA_LIBRARY_TIMEZONE
+            )
+    raise ValueError(f"no reliable recorded_at: {ep.path}")
+
+
+def chronological_episode_identity(recorded_at: datetime, collision: int = 0) -> int:
+    utc = recorded_at.astimezone(timezone.utc)
+    delta = utc - CHRONOLOGICAL_EPISODE_EPOCH
+    microseconds = (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+    if microseconds <= 0:
+        raise ValueError(f"recorded_at predates chronological identity epoch: {recorded_at.isoformat()}")
+    if not 0 <= collision < CHRONOLOGICAL_EPISODE_IDENTITY_BASE:
+        raise ValueError(f"recorded_at collision space exhausted: {recorded_at.isoformat()}")
+    identity = microseconds * CHRONOLOGICAL_EPISODE_IDENTITY_BASE + collision
+    if identity > MAX_SAFE_EPISODE_IDENTITY:
+        raise ValueError(f"recorded_at exceeds safe episode identity range: {recorded_at.isoformat()}")
+    return identity
+
+
+def plan_chronological_episode_renumber(
+    library_root: Path,
+    episodes: list[Episode],
+) -> list[ChronologicalEpisodeMove]:
+    root = library_root.resolve()
+    planned: list[ChronologicalEpisodeMove] = []
+    sources = {ep.path.resolve() for ep in episodes}
+    targets: set[Path] = set()
+    by_recorded_at: dict[tuple[Path, datetime], list[Episode]] = {}
+    for ep in episodes:
+        recorded_at = episode_recorded_at(ep)
+        by_recorded_at.setdefault((ep.show_dir.resolve(), recorded_at), []).append(ep)
+
+    numbered: list[tuple[Episode, datetime, int]] = []
+    for (_, recorded_at), grouped in sorted(by_recorded_at.items(), key=lambda item: str(item[0])):
+        grouped.sort(key=lambda ep: (ep.episode, str(ep.path)))
+        for collision, ep in enumerate(grouped):
+            numbered.append((ep, recorded_at, chronological_episode_identity(recorded_at, collision)))
+
+    for ep, recorded_at, episode_number in numbered:
+        stem = f"{ep.alias}.S{ep.season:02d}E{episode_number:04d}.{recorded_at.strftime('%Y-%m-%d')} - {ep.title}"
+        target = ep.path.with_name(stem + ep.path.suffix).resolve()
+        try:
+            target.relative_to(root)
+        except ValueError as exc:
+            raise ValueError(f"target outside library root: {target}") from exc
+        if target in targets:
+            raise ValueError(f"duplicate target: {target}")
+        if target.exists() and target not in sources:
+            raise ValueError(f"target conflict: {target}")
+        targets.add(target)
+        planned.append(ChronologicalEpisodeMove(ep.path.resolve(), target, recorded_at, episode_number))
+
+    for show_dir, show_moves in _group_chronological_moves(planned).items():
+        ordered = sorted(show_moves, key=lambda item: (item.recorded_at, str(item.source)))
+        if any(
+            left.recorded_at < right.recorded_at and left.episode >= right.episode
+            for left, right in zip(ordered, ordered[1:])
+        ):
+            raise ValueError(f"non-monotonic episode identity: {show_dir}")
+    return planned
+
+
+def _group_chronological_moves(
+    moves: list[ChronologicalEpisodeMove],
+) -> dict[Path, list[ChronologicalEpisodeMove]]:
+    grouped: dict[Path, list[ChronologicalEpisodeMove]] = {}
+    for move in moves:
+        grouped.setdefault(move.source.parent.parent, []).append(move)
+    return grouped
+
+
+def plan_chronological_file_moves(
+    library_root: Path,
+    episode_moves: list[ChronologicalEpisodeMove],
+) -> list[ChronologicalFileMove]:
+    root = library_root.resolve()
+    planned: list[ChronologicalFileMove] = []
+    sources: set[Path] = set()
+    targets: set[Path] = set()
+    for episode_move in episode_moves:
+        for suffix in SIDECAR_SUFFIXES:
+            source = episode_move.source.with_suffix(suffix).resolve()
+            if not source.exists():
+                continue
+            target = episode_move.target.with_suffix(suffix).resolve()
+            target.relative_to(root)
+            if source in sources:
+                raise ValueError(f"duplicate source: {source}")
+            sources.add(source)
+            planned.append(ChronologicalFileMove(source, target))
+
+    for move in planned:
+        if move.target in targets:
+            raise ValueError(f"duplicate target: {move.target}")
+        if move.target.exists() and move.target not in sources:
+            raise ValueError(f"target conflict: {move.target}")
+        targets.add(move.target)
+    return planned
+
+
+def chronological_reference_audit(
+    search_roots: list[Path],
+    file_moves: list[ChronologicalFileMove],
+) -> tuple[int, dict[str, int]]:
+    mapping = {str(move.source): str(move.target) for move in file_moves if move.source != move.target}
+    parsed_json = 0
+    matched_references = {source: 0 for source in mapping}
+
+    def count_paths(value: object) -> None:
+        if isinstance(value, str):
+            if value in matched_references:
+                matched_references[value] += 1
+            return
+        if isinstance(value, list):
+            for item in value:
+                count_paths(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                count_paths(item)
+
+    for search_root in search_roots:
+        if not search_root.exists():
+            continue
+        for path in search_root.rglob("*.json"):
+            try:
+                content = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise ValueError(f"invalid JSON reference file: {path}: {exc}") from exc
+            parsed_json += 1
+            count_paths(content)
+    return parsed_json, matched_references
+
+
+def _xml_field_values(path: Path, tags: tuple[str, ...]) -> dict[str, str]:
+    try:
+        root = ET.fromstring(path.read_text(encoding="utf-8"))
+    except (OSError, ET.ParseError) as exc:
+        raise ValueError(f"invalid episode NFO: {path}: {exc}") from exc
+    return {tag: (root.findtext(tag) or "").strip() for tag in tags}
+
+
+def plan_chronological_nfo_edits(
+    episode_moves: list[ChronologicalEpisodeMove],
+) -> list[ChronologicalNFOEdit]:
+    edits: list[ChronologicalNFOEdit] = []
+    tags = ("episode", "sorttitle", "aired", "dateadded", "plot")
+    for move in episode_moves:
+        source = move.source.with_suffix(".nfo")
+        if not source.exists():
+            raise ValueError(f"missing episode NFO: {source}")
+        episode = parse_episode(move.source, move.source.parent.parent.parent)
+        if episode is None:
+            raise ValueError(f"cannot parse planned episode: {move.source}")
+        old = _xml_field_values(source, tags)
+        precise_time = move.recorded_at.strftime("%Y-%m-%d %H-%M-%S.%f")
+        studio = existing_studio(source)
+        expected = {
+            "episode": str(move.episode),
+            "sorttitle": f"{episode.alias} - {precise_time}",
+            "aired": move.recorded_at.strftime("%Y-%m-%d"),
+            "dateadded": move.recorded_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "plot": f"{studio} | 主播: {episode.alias} | 标题: {episode.title} | 录制时间: {precise_time}",
+        }
+        changed = {tag: (old[tag], expected[tag]) for tag in tags if old[tag] != expected[tag]}
+        if changed:
+            edits.append(ChronologicalNFOEdit(source.resolve(), changed))
+    return edits
+
+
+def _json_pointer_token(value: object) -> str:
+    return str(value).replace("~", "~0").replace("/", "~1")
+
+
+def plan_chronological_json_edits(
+    search_roots: list[Path],
+    file_moves: list[ChronologicalFileMove],
+) -> list[ChronologicalJSONEdit]:
+    mapping = {str(move.source): str(move.target) for move in file_moves if move.source != move.target}
+    edits: list[ChronologicalJSONEdit] = []
+
+    def visit(path: Path, value: object, pointer: str) -> None:
+        if isinstance(value, str):
+            target = mapping.get(value)
+            if target is not None:
+                edits.append(ChronologicalJSONEdit(path, pointer or "/", value, target))
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(path, item, f"{pointer}/{index}")
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                visit(path, item, f"{pointer}/{_json_pointer_token(key)}")
+
+    for search_root in search_roots:
+        if not search_root.exists():
+            continue
+        for path in search_root.rglob("*.json"):
+            try:
+                content = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise ValueError(f"invalid JSON reference file: {path}: {exc}") from exc
+            visit(path.resolve(), content, "")
+    return edits
+
+
+def simulate_chronological_json_references(
+    search_roots: list[Path],
+    file_moves: list[ChronologicalFileMove],
+) -> ChronologicalReferenceSimulation:
+    mapping = {str(move.source): str(move.target) for move in file_moves if move.source != move.target}
+    old_references = 0
+    new_references = 0
+
+    def count(value: object) -> None:
+        nonlocal old_references, new_references
+        if isinstance(value, str):
+            old_references += int(value in mapping)
+            new_references += int(value in mapping.values())
+            return
+        if isinstance(value, list):
+            for item in value:
+                count(item)
+            return
+        if isinstance(value, dict):
+            for item in value.values():
+                count(item)
+
+    def simulate(value: object) -> object:
+        if isinstance(value, str):
+            return mapping.get(value, value)
+        if isinstance(value, list):
+            return [simulate(item) for item in value]
+        if isinstance(value, dict):
+            return {key: simulate(item) for key, item in value.items()}
+        return value
+
+    for search_root in search_roots:
+        if not search_root.exists():
+            continue
+        for path in search_root.rglob("*.json"):
+            try:
+                content = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise ValueError(f"invalid JSON reference file: {path}: {exc}") from exc
+            count(simulate(content))
+    return ChronologicalReferenceSimulation(
+        old_references=old_references,
+        new_references=new_references,
+    )
+
+
+def chronological_media_conservation(
+    library_root: Path,
+    file_moves: list[ChronologicalFileMove],
+) -> ChronologicalMediaConservation:
+    root = library_root.resolve()
+    media_moves = [move for move in file_moves if move.source.suffix.lower() == ".mp4"]
+    before_paths = [path.resolve() for path in root.rglob("*.mp4")]
+    sources = {move.source for move in media_moves}
+    after_paths = [path for path in before_paths if path not in sources]
+    after_paths.extend(move.target for move in media_moves)
+    before_bytes = sum(path.stat().st_size for path in before_paths)
+    after_bytes = sum(move.source.stat().st_size for move in media_moves)
+    after_bytes += sum(path.stat().st_size for path in before_paths if path not in sources)
+    return ChronologicalMediaConservation(len(before_paths), before_bytes, len(after_paths), after_bytes)
 
 
 def existing_studio(nfo_path: Path) -> str:
@@ -584,6 +919,11 @@ def main() -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--only-show", default="")
     parser.add_argument(
+        "--plan-chronological-renumber",
+        action="store_true",
+        help="print a read-only bijective rename plan using exact recorded_at; never writes files",
+    )
+    parser.add_argument(
         "--fail-on-duplicate-shows",
         action="store_true",
         help="return a non-zero status when one normalized show identity maps to multiple directories",
@@ -613,6 +953,57 @@ def main() -> int:
             for ep in episodes
             if ep.alias == only_show or normalize_component(ep.show_dir.name) == only_show
         ]
+    if args.plan_chronological_renumber:
+        if args.apply or args.merge_duplicate_shows:
+            parser.error("--plan-chronological-renumber is read-only and cannot be combined with apply modes")
+        plan = plan_chronological_episode_renumber(root, episodes)
+        file_plan = plan_chronological_file_moves(root, plan)
+        search_roots = [root]
+        knowledge_sessions = root.parent / ".knowledge_sessions"
+        if knowledge_sessions.exists():
+            search_roots.append(knowledge_sessions)
+        hidden_segments = root.parent / ".live_session_segments"
+        if hidden_segments.exists():
+            search_roots.append(hidden_segments)
+        parsed_json, references_by_source = chronological_reference_audit(search_roots, file_plan)
+        matched_references = sum(references_by_source.values())
+        nfo_edits = plan_chronological_nfo_edits(plan)
+        json_edits = plan_chronological_json_edits(search_roots, file_plan)
+        simulated_refs = simulate_chronological_json_references(search_roots, file_plan)
+        conservation = chronological_media_conservation(root, file_plan)
+        if simulated_refs.old_references != 0:
+            raise ValueError("chronological plan leaves old JSON references after simulation")
+        expected_new_references = sum(references_by_source.values())
+        if simulated_refs.new_references < expected_new_references:
+            raise ValueError("chronological plan does not preserve every JSON reference")
+        if conservation.before_count != conservation.after_count or conservation.before_bytes != conservation.after_bytes:
+            raise ValueError("chronological plan does not preserve media count and bytes")
+        changed = [item for item in plan if item.source != item.target]
+        for item in changed:
+            print(
+                "[chronological-renumber] "
+                f"recorded_at={item.recorded_at.isoformat()} episode={item.episode} "
+                f"source={item.source} target={item.target}"
+            )
+        for item in nfo_edits:
+            print(f"[chronological-nfo] path={item.path} fields={json.dumps(item.fields, ensure_ascii=False, sort_keys=True)}")
+        for item in json_edits:
+            print(
+                "[chronological-json] "
+                f"path={item.path} pointer={item.pointer} old={item.old} new={item.new}"
+            )
+        print(
+            f"chronological-renumber dry-run: episodes={len(plan)} changed={len(changed)} "
+            f"unique_sources={len({item.source for item in plan})} "
+            f"unique_targets={len({item.target for item in plan})} "
+            f"files={len(file_plan)} json={parsed_json} references={matched_references} "
+            f"nfo_edits={len(nfo_edits)} json_edits={len(json_edits)} "
+            f"post_old_refs={simulated_refs.old_references} post_new_refs={simulated_refs.new_references} "
+            f"media_before={conservation.before_count}/{conservation.before_bytes} "
+            f"media_after={conservation.after_count}/{conservation.after_bytes} "
+            "conflicts=0 monotonic=true"
+        )
+        return 0
 
     moved_episodes = 0
     moved_files = 0

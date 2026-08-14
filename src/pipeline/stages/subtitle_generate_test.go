@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/pipeline"
@@ -987,8 +988,11 @@ func TestSubtitleGenerateSelfSufficientCreatesHardlink(t *testing.T) {
 	require.NoError(t, err)
 
 	output, err := stage.Execute(&pipeline.PipelineContext{
-		Logger:     livelogger.New(livelogger.DefaultBufferSize, nil),
-		RecordInfo: pipeline.RecordInfo{HostName: "主播"},
+		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
+		RecordInfo: pipeline.RecordInfo{
+			HostName:  "主播",
+			StartTime: time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local),
+		},
 	}, []pipeline.FileInfo{
 		{Path: sourcePath, Type: pipeline.FileTypeVideo},
 	})
@@ -997,7 +1001,7 @@ func TestSubtitleGenerateSelfSufficientCreatesHardlink(t *testing.T) {
 	require.Len(t, output, 3)
 
 	// Verify the auto-created library path follows Plex naming convention.
-	expectedLibraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E0001.2026-03-20 - 测试标题.mp4")
+	expectedLibraryPath := filepath.Join(libraryRoot, "主播", "Season 01", "主播.S01E1569081600000000.2026-03-20 - 测试标题.mp4")
 	assert.Equal(t, expectedLibraryPath, output[0].Path)
 	assert.Equal(t, pipeline.FileTypeVideo, output[0].Type)
 

@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import stat
 import subprocess
@@ -73,6 +74,188 @@ class RepairLibrarySidecarsTest(unittest.TestCase):
                 module.normalize_component(f"天津蛋哥{separator}6点说车"),
             )
         self.assertEqual("主播", module.normalize_component("主\u200b播"))
+
+    def test_chronological_plan_is_bijective_monotonic_and_uses_exact_recorded_at(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            later = season / "主播.S01E0001.2026-06-12 - 较晚场次.mp4"
+            earlier = season / "主播.S01E0099.2026-06-12 - 较早场次.mp4"
+            later.write_bytes(b"later")
+            earlier.write_bytes(b"earlier")
+            later.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-06-12T19:00:00.123789+08:00"}}',
+                encoding="utf-8",
+            )
+            earlier.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-06-12T19:00:00.123456+08:00"}}',
+                encoding="utf-8",
+            )
+            earlier.with_suffix(".nfo").write_text(
+                "<episodedetails>"
+                "<sorttitle>旧顺序</sorttitle><episode>99</episode>"
+                "<aired>2026-06-12</aired><dateadded>2026-06-12 00:00:00</dateadded>"
+                "<plot>旧录制时间</plot></episodedetails>",
+                encoding="utf-8",
+            )
+            later.with_suffix(".nfo").write_text(
+                "<episodedetails>"
+                "<sorttitle>旧顺序</sorttitle><episode>1</episode>"
+                "<aired>2026-06-12</aired><dateadded>2026-06-12 00:00:00</dateadded>"
+                "<plot>旧录制时间</plot></episodedetails>",
+                encoding="utf-8",
+            )
+            later.touch()
+
+            module = self.load_script_module()
+            plan = module.plan_chronological_episode_renumber(root.resolve(), module.collect_episodes(root.resolve()))
+
+            self.assertEqual(2, len(plan))
+            self.assertEqual(2, len({item.source for item in plan}))
+            self.assertEqual(2, len({item.target for item in plan}))
+            ordered = sorted(plan, key=lambda item: item.recorded_at)
+            self.assertLess(ordered[0].episode, ordered[1].episode)
+
+            file_plan = module.plan_chronological_file_moves(root.resolve(), plan)
+            self.assertEqual(6, len(file_plan))
+            self.assertEqual(6, len({item.source for item in file_plan}))
+            self.assertEqual(6, len({item.target for item in file_plan}))
+
+            manifest_root = root.parent / ".knowledge_sessions"
+            manifest_root.mkdir()
+            hidden_root = root.parent / ".live_session_segments"
+            hidden_root.mkdir()
+            manifest = manifest_root / "session.json"
+            earlier_source = next(item.source for item in file_plan if item.source.name == earlier.name)
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "sources": [{"library_path": str(earlier_source)}],
+                        "unrelated": str(next(item.target for item in file_plan if item.source == earlier_source)),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hidden_metadata = hidden_root / "aggregate.subtitle.json"
+            hidden_metadata.write_text(
+                json.dumps({"record_meta": {"live_session_media_superseded_by": str(earlier_source)}}),
+                encoding="utf-8",
+            )
+            parsed_json, references_by_source = module.chronological_reference_audit(
+                [root.resolve(), manifest_root.resolve(), hidden_root.resolve()], file_plan
+            )
+            self.assertEqual(4, parsed_json)
+            self.assertEqual(2, sum(references_by_source.values()))
+            self.assertEqual(2, references_by_source[str(earlier_source)])
+
+            nfo_edits = module.plan_chronological_nfo_edits(plan)
+            self.assertEqual(2, len(nfo_edits))
+            earlier_edit = next(item for item in nfo_edits if item.path == earlier.with_suffix(".nfo").resolve())
+            self.assertEqual(str(ordered[0].episode), earlier_edit.fields["episode"][1])
+            self.assertEqual("2026-06-12 19:00:00", earlier_edit.fields["dateadded"][1])
+            self.assertIn("19-00-00.123456", earlier_edit.fields["sorttitle"][1])
+
+            json_edits = module.plan_chronological_json_edits(
+                [root.resolve(), manifest_root.resolve(), hidden_root.resolve()], file_plan
+            )
+            self.assertEqual(2, len(json_edits))
+            self.assertEqual(
+                {"/sources/0/library_path", "/record_meta/live_session_media_superseded_by"},
+                {item.pointer for item in json_edits},
+            )
+            self.assertEqual({str(earlier_source)}, {item.old for item in json_edits})
+            post_refs = module.simulate_chronological_json_references(
+                [root.resolve(), manifest_root.resolve(), hidden_root.resolve()], file_plan
+            )
+            self.assertEqual(0, post_refs.old_references)
+            self.assertEqual(3, post_refs.new_references)
+
+            conservation = module.chronological_media_conservation(root.resolve(), file_plan)
+            self.assertEqual(2, conservation.before_count)
+            self.assertEqual(conservation.before_count, conservation.after_count)
+            self.assertEqual(conservation.before_bytes, conservation.after_bytes)
+
+    def test_chronological_plan_refuses_target_conflicts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "主播.S01E0001.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-06-12T19:00:00.123456+08:00"}}',
+                encoding="utf-8",
+            )
+            module = self.load_script_module()
+            episode = next(item for item in module.collect_episodes(root.resolve()) if item.episode == 1)
+            identity = module.chronological_episode_identity(module.episode_recorded_at(episode))
+            conflict = season / f"主播.S01E{identity:04d}.2026-06-12 - 场次.mp4"
+            conflict.write_bytes(b"user-file")
+            with self.assertRaisesRegex(ValueError, "target conflict"):
+                module.plan_chronological_episode_renumber(
+                    root.resolve(),
+                    [episode],
+                )
+
+    def test_chronological_plan_refuses_missing_episode_nfo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "主播.S01E0001.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-06-12T19:00:00.123456+08:00"}}',
+                encoding="utf-8",
+            )
+            module = self.load_script_module()
+            plan = module.plan_chronological_episode_renumber(root.resolve(), module.collect_episodes(root.resolve()))
+            with self.assertRaisesRegex(ValueError, "missing episode NFO"):
+                module.plan_chronological_nfo_edits(plan)
+
+    def test_chronological_plan_allows_exact_time_ties_without_reversing_time(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            for episode, title in ((9, "同场上半段"), (2, "同场下半段")):
+                video = season / f"主播.S01E{episode:04d}.2026-06-12 - {title}.mp4"
+                video.write_bytes(title.encode())
+                video.with_suffix(".subtitle.json").write_text(
+                    '{"record_meta":{"start_time":"2026-06-12T19:00:00.123456+08:00"}}',
+                    encoding="utf-8",
+                )
+
+            module = self.load_script_module()
+            plan = module.plan_chronological_episode_renumber(root.resolve(), module.collect_episodes(root.resolve()))
+
+            self.assertEqual(2, len(plan))
+            self.assertEqual(2, len({item.target for item in plan}))
+            ordered = sorted(plan, key=lambda item: item.source)
+            self.assertNotEqual(ordered[0].episode, ordered[1].episode)
+            self.assertEqual(1, abs(ordered[0].episode - ordered[1].episode))
+
+    def test_chronological_identity_uses_explicit_plus_eight_fallback_and_safe_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "主播.S01E0001.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                json.dumps({"source_path": "/source/主播 - 2026-06-12 19-00-00 - 场次.mp4"}),
+                encoding="utf-8",
+            )
+
+            module = self.load_script_module()
+            episode = module.collect_episodes(root.resolve())[0]
+            recorded_at = module.episode_recorded_at(episode)
+            self.assertEqual("2026-06-12T19:00:00+08:00", recorded_at.isoformat())
+            with self.assertRaisesRegex(ValueError, "safe episode identity range"):
+                module.chronological_episode_identity(
+                    module.datetime(2056, 1, 1, tzinfo=module.timezone.utc)
+                )
 
     def test_repairs_missing_cover_and_nfo_with_configurable_ffmpeg(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
