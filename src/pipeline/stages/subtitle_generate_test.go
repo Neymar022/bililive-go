@@ -991,7 +991,7 @@ func TestSubtitleGenerateSelfSufficientCreatesHardlink(t *testing.T) {
 		Logger: livelogger.New(livelogger.DefaultBufferSize, nil),
 		RecordInfo: pipeline.RecordInfo{
 			HostName:  "主播",
-			StartTime: time.Date(2026, 3, 20, 10, 0, 0, 0, time.Local),
+			StartTime: time.Date(2026, 3, 20, 10, 0, 0, 0, time.FixedZone("UTC+8", 8*60*60)),
 		},
 	}, []pipeline.FileInfo{
 		{Path: sourcePath, Type: pipeline.FileTypeVideo},
