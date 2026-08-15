@@ -32,9 +32,9 @@ var normalizedFilenamePattern = regexp.MustCompile(
 	`^(?P<alias_name>.+?) - (?P<recorded_at>\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}) - (?P<title>.+)$`,
 )
 
-var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d{4})(?:-S\d{2}E(\d{4}))?\.`)
+var libraryEpisodeSlotPattern = regexp.MustCompile(`\.S01E(\d+)(?:-S\d{2}E(\d+))?\.`)
 var libraryEpisodeFilenamePattern = regexp.MustCompile(
-	`^(?P<alias_name>.+?)\.S\d{2}E\d{4}(?:-S\d{2}E\d{4})?\.(?P<recorded_date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$`,
+	`^(?P<alias_name>.+?)\.S\d{2}E\d+(?:-S\d{2}E\d+)?\.(?P<recorded_date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$`,
 )
 
 // invalidFilenameChars mirrors INVALID_FILENAME_CHARS in bililive_media_organizer.py.
@@ -45,6 +45,13 @@ var libraryHardlinkLink = os.Link
 var librarySidecarLink = os.Link
 var libraryEpisodePublishLocks keyedPathLocks
 var libraryShowPosterLocks keyedPathLocks
+var mediaLibraryLocation = time.FixedZone("UTC+8", 8*60*60)
+
+const (
+	chronologicalEpisodeIdentityBase int64 = 8
+	chronologicalEpisodeEpochUnix    int64 = 1_577_836_800 // 2020-01-01T00:00:00Z
+	maxSafeEpisodeIdentity           int64 = 9_007_199_254_740_991
+)
 
 type keyedPathLockEntry struct {
 	mutex sync.Mutex
@@ -116,9 +123,9 @@ func truncateUTF8(s string, maxBytes int) string {
 }
 
 // buildEpisodeFilename constructs the Plex-style episode filename.
-// Format: <aliasName>.S01E####.<YYYY-MM-DD> - <title><extension>
+// 格式：<aliasName>.S01E<identity>.<YYYY-MM-DD> - <title><extension>。
 // Mirrors build_episode_filename() in bililive_tv_library_builder.py.
-func buildEpisodeFilename(aliasName string, episodeNumber int, recordedAt time.Time, title, extension string) string {
+func buildEpisodeFilename(aliasName string, episodeNumber int64, recordedAt time.Time, title, extension string) string {
 	aliasName = sanitizeComponent(aliasName)
 	if aliasName == "" {
 		aliasName = "未分类主播"
@@ -142,7 +149,7 @@ func buildEpisodeFilename(aliasName string, episodeNumber int, recordedAt time.T
 	return prefix + displayTitle + extension
 }
 
-func buildEpisodeNFO(aliasName string, episodeNumber int, recordedAt time.Time, title, platform string) string {
+func buildEpisodeNFO(aliasName string, episodeNumber int64, recordedAt time.Time, title, platform string) string {
 	aliasName = sanitizeComponent(aliasName)
 	if aliasName == "" {
 		aliasName = "未分类主播"
@@ -224,50 +231,54 @@ func xmlEscape(s string) string {
 	return replacer.Replace(s)
 }
 
-// nextAvailableEpisodeNumber returns the first S01E slot not already used by
-// any file in the season directory. Sidecars reserve slots too, because a stale
-// .srt/.ass/.subtitle.json without an mp4 must not be matched to a new source.
-func nextAvailableEpisodeNumber(dir string) int {
+func episodeNumberForRecordedAt(recordedAt time.Time) int64 {
+	microseconds := recordedAt.UnixMicro() - chronologicalEpisodeEpochUnix*1_000_000
+	if recordedAt.IsZero() || microseconds <= 0 {
+		return 0
+	}
+	if microseconds > maxSafeEpisodeIdentity/chronologicalEpisodeIdentityBase {
+		return -1
+	}
+	identity := microseconds * chronologicalEpisodeIdentityBase
+	return identity
+}
+
+func episodeNumberReserved(dir string, target int64) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return 1
+		return false, err
 	}
-	used := make(map[int]struct{}, len(entries))
-	for _, e := range entries {
-		if e.IsDir() {
+	for _, entry := range entries {
+		if entry.IsDir() {
 			continue
 		}
-		match := libraryEpisodeSlotPattern.FindStringSubmatch(e.Name())
+		match := libraryEpisodeSlotPattern.FindStringSubmatch(entry.Name())
 		if match == nil {
 			continue
 		}
-		episodeNumber, err := strconv.Atoi(match[1])
+		first, err := strconv.ParseInt(match[1], 10, 64)
 		if err != nil {
 			continue
 		}
-		lastEpisodeNumber := episodeNumber
+		last := first
 		if len(match) > 2 && match[2] != "" {
-			if parsed, parseErr := strconv.Atoi(match[2]); parseErr == nil && parsed >= episodeNumber {
-				lastEpisodeNumber = parsed
+			if parsed, parseErr := strconv.ParseInt(match[2], 10, 64); parseErr == nil && parsed >= first {
+				last = parsed
 			}
 		}
-		for number := episodeNumber; number <= lastEpisodeNumber; number++ {
-			used[number] = struct{}{}
+		if target >= first && target <= last {
+			return true, nil
 		}
 	}
-	for episodeNumber := 1; ; episodeNumber++ {
-		if _, ok := used[episodeNumber]; !ok {
-			return episodeNumber
-		}
-	}
+	return false, nil
 }
 
-func episodeNumberFromLibraryPath(path string) int {
+func episodeNumberFromLibraryPath(path string) int64 {
 	match := libraryEpisodeSlotPattern.FindStringSubmatch(filepath.Base(path))
 	if match == nil {
 		return 0
 	}
-	episodeNumber, err := strconv.Atoi(match[1])
+	episodeNumber, err := strconv.ParseInt(match[1], 10, 64)
 	if err != nil {
 		return 0
 	}
@@ -300,9 +311,12 @@ func parseSourceFilename(sourcePath, fallbackHost string, fallbackTime time.Time
 	recordedAtStr := m[normalizedFilenamePattern.SubexpIndex("recorded_at")]
 	title := sanitizeComponent(m[normalizedFilenamePattern.SubexpIndex("title")])
 
-	recordedAt, err := time.ParseInLocation("2006-01-02 15-04-05", recordedAtStr, time.Local)
-	if err != nil {
-		recordedAt = fallbackTime
+	recordedAt := fallbackTime
+	if recordedAt.IsZero() {
+		parsed, err := time.ParseInLocation("2006-01-02 15-04-05", recordedAtStr, mediaLibraryLocation)
+		if err == nil {
+			recordedAt = parsed
+		}
 	}
 	if aliasName == "" {
 		aliasName = sanitizeComponent(fallbackHost)
@@ -461,7 +475,7 @@ func writeFileAtomically(path string, content []byte, mode os.FileMode) error {
 	return os.Rename(tempPath, path)
 }
 
-func episodeNFOIsComplete(path, aliasName string, episodeNumber int, recordedAt time.Time, title, platform string) bool {
+func episodeNFOIsComplete(path, aliasName string, episodeNumber int64, recordedAt time.Time, title, platform string) bool {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -1011,14 +1025,13 @@ func restoreValidatedLibraryShowFiles(before, applied []libraryFileSnapshot) err
 // EnsureLibraryHardlink creates a Plex-style hard-link for sourcePath inside
 // libraryRoot when the normal host-side organizer cron hasn't run yet.
 //
-// Path constructed: <libraryRoot>/<aliasName>/Season 01/<aliasName>.S01E####.<date> - <title>.mp4
+// 目标路径：<libraryRoot>/<aliasName>/Season 01/<aliasName>.S01E<identity>.<date> - <title>.mp4。
 //
 // Idempotent: if any file inside Season 01 already shares the same inode as
 // sourcePath, that path is returned as-is — no new file is created.
 //
-// Episode numbering: first free S01E slot in Season 01, considering sidecars
-// as slot reservations. This avoids attaching stale subtitles to a newer
-// recording after the rendered video was removed.
+// 集号由 2020 年以来的微秒数和小型碰撞槽组成，保留精确顺序并限制在
+// JavaScript 安全整数范围内。
 //
 // 同进程内按季度目录串行发布；最终无覆盖硬链接只会占用选定槽位，
 // 或在外部冲突时拒绝发布该单集的暂存 sidecar。
@@ -1058,145 +1071,160 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 		return "", fmt.Errorf("EnsureLibraryHardlink: mkdirAll %s: %w", seasonDir, err)
 	}
 
-	// Step 2: compute the first episode slot not reserved by videos or sidecars.
-	episodeNumber := nextAvailableEpisodeNumber(seasonDir)
+	// 第二步：从真实录制开始时间推导稳定且有序的身份。
+	episodeNumber := episodeNumberForRecordedAt(meta.recordedAt)
+	if episodeNumber < 0 {
+		return "", fmt.Errorf("EnsureLibraryHardlink: recording time exceeds safe episode identity range: %s", meta.recordedAt.Format(time.RFC3339Nano))
+	}
+	if episodeNumber == 0 {
+		return "", fmt.Errorf("EnsureLibraryHardlink: no reliable recording start time: %s", sourcePath)
+	}
+	identityEnd := episodeNumber + chronologicalEpisodeIdentityBase
+	for episodeNumber < identityEnd {
+		reserved, reserveErr := episodeNumberReserved(seasonDir, episodeNumber)
+		if reserveErr != nil {
+			return "", fmt.Errorf("EnsureLibraryHardlink: scan recording-time identity: %w", reserveErr)
+		}
+		if !reserved {
+			break
+		}
+		episodeNumber++
+	}
+	if episodeNumber == identityEnd {
+		return "", fmt.Errorf("EnsureLibraryHardlink: recording-time identity collision space exhausted: %s", seasonDir)
+	}
 
-	for {
-		targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
-		targetPath := filepath.Join(seasonDir, targetName)
+	targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
+	targetPath := filepath.Join(seasonDir, targetName)
 
-		if _, statErr := os.Stat(targetPath); statErr == nil {
-			// The exact slot is already occupied by a different inode. Try the
-			// next episode number without touching its sidecars.
-			episodeNumber++
-			continue
-		} else if !os.IsNotExist(statErr) {
-			return "", fmt.Errorf("EnsureLibraryHardlink: stat %s: %w", targetPath, statErr)
-		}
+	if _, statErr := os.Stat(targetPath); statErr == nil {
+		return "", fmt.Errorf("EnsureLibraryHardlink: recording-time identity already occupied: %s", targetPath)
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("EnsureLibraryHardlink: stat %s: %w", targetPath, statErr)
+	}
 
-		stagedPath, cleanupStaging, err := newLibraryPublishStagingPath(libraryRoot, targetPath)
-		if err != nil {
-			return "", fmt.Errorf("EnsureLibraryHardlink: prepare staging for %s: %w", targetPath, err)
+	stagedPath, cleanupStaging, err := newLibraryPublishStagingPath(libraryRoot, targetPath)
+	if err != nil {
+		return "", fmt.Errorf("EnsureLibraryHardlink: prepare staging for %s: %w", targetPath, err)
+	}
+	if err := os.Link(sourcePath, stagedPath); err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("EnsureLibraryHardlink: stage hardlink %s → %s: %w", sourcePath, stagedPath, err)
+	}
+	showDir := filepath.Dir(seasonDir)
+	showBefore, err := snapshotLibraryShowFiles(showDir)
+	if err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("EnsureLibraryHardlink: snapshot show metadata: %w", err)
+	}
+	if err := persistLibraryShowSnapshots(filepath.Dir(stagedPath), showBefore); err != nil {
+		cleanupStaging()
+		return "", fmt.Errorf("EnsureLibraryHardlink: persist show metadata snapshot: %w", err)
+	}
+	stagedNFOPath, stagedCoverPath, prepareErr := prepareLibraryEpisodePublication(
+		ctx,
+		sourcePath,
+		stagedPath,
+		targetPath,
+		meta,
+		platform,
+	)
+	showApplied, snapshotErr := snapshotLibraryShowFiles(showDir)
+	if prepareErr != nil || snapshotErr != nil {
+		var recoveryErr error
+		if snapshotErr == nil {
+			recoveryErr = restoreLibraryShowFiles(showBefore, showApplied)
 		}
-		if err := os.Link(sourcePath, stagedPath); err != nil {
+		if recoveryErr != nil || snapshotErr != nil {
+			return "", fmt.Errorf(
+				"%w; show metadata rollback failed: %v; preserved staging: %s",
+				errors.Join(prepareErr, snapshotErr),
+				recoveryErr,
+				filepath.Dir(stagedPath),
+			)
+		}
+		cleanupStaging()
+		return "", prepareErr
+	}
+
+	var published []libraryPublishedHardlink
+	rollbackPublication := func() error {
+		if recoveryErr := validateLibraryPublishedHardlinks(published); recoveryErr != nil {
+			return recoveryErr
+		}
+		showValidationErr := validateLibraryShowFiles(showBefore, showApplied)
+		if recoveryErr := removeLibraryPublishedHardlinks(published); recoveryErr != nil {
+			return recoveryErr
+		}
+		recoveryErr := showValidationErr
+		if recoveryErr == nil {
+			recoveryErr = restoreValidatedLibraryShowFiles(showBefore, showApplied)
+		}
+		if recoveryErr == nil {
 			cleanupStaging()
-			return "", fmt.Errorf("EnsureLibraryHardlink: stage hardlink %s → %s: %w", sourcePath, stagedPath, err)
 		}
-		showDir := filepath.Dir(seasonDir)
-		showBefore, err := snapshotLibraryShowFiles(showDir)
-		if err != nil {
-			cleanupStaging()
-			return "", fmt.Errorf("EnsureLibraryHardlink: snapshot show metadata: %w", err)
+		return recoveryErr
+	}
+	recoverPublication := func(primary error) error {
+		if recoveryErr := rollbackPublication(); recoveryErr != nil {
+			return fmt.Errorf("%w; publication rollback failed: %v; preserved staging: %s", primary, recoveryErr, filepath.Dir(stagedPath))
 		}
-		if err := persistLibraryShowSnapshots(filepath.Dir(stagedPath), showBefore); err != nil {
-			cleanupStaging()
-			return "", fmt.Errorf("EnsureLibraryHardlink: persist show metadata snapshot: %w", err)
-		}
-		stagedNFOPath, stagedCoverPath, prepareErr := prepareLibraryEpisodePublication(
-			ctx,
-			sourcePath,
-			stagedPath,
-			targetPath,
-			meta,
-			platform,
-		)
-		showApplied, snapshotErr := snapshotLibraryShowFiles(showDir)
-		if prepareErr != nil || snapshotErr != nil {
-			var recoveryErr error
-			if snapshotErr == nil {
-				recoveryErr = restoreLibraryShowFiles(showBefore, showApplied)
+		return primary
+	}
+
+	targetStem := sidecarStem(targetPath)
+	targetNFOPath := targetStem + ".nfo"
+	publishedNFO, err := captureLibraryPublishedHardlink(stagedNFOPath, targetNFOPath)
+	if err != nil {
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: capture staged episode NFO: %w", err))
+	}
+	if err := librarySidecarLink(stagedNFOPath, targetNFOPath); err != nil {
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish episode NFO %s: %w", targetNFOPath, err))
+	}
+	published = append(published, publishedNFO)
+	targetCoverPath := targetStem + ".jpg"
+	publishedCover, err := captureLibraryPublishedHardlink(stagedCoverPath, targetCoverPath)
+	if err != nil {
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: capture staged episode cover: %w", err))
+	}
+	if err := librarySidecarLink(stagedCoverPath, targetCoverPath); err != nil {
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish episode cover %s: %w", targetCoverPath, err))
+	}
+	published = append(published, publishedCover)
+
+	// 第三步：全部身份 sidecar 就绪后，最后再让 MP4 可见。
+	err = libraryHardlinkLink(stagedPath, targetPath)
+	if os.IsExist(err) {
+		existingLink, scanErr := findExistingHardlinkInDir(sourcePath, seasonDir)
+		if scanErr == nil && existingLink != "" {
+			sameTarget, pathErr := sameCleanPath(existingLink, targetPath)
+			if pathErr == nil && sameTarget {
+				cleanupStaging()
+				return existingLink, nil
 			}
-			if recoveryErr != nil || snapshotErr != nil {
+			if recoveryErr := rollbackPublication(); recoveryErr != nil {
 				return "", fmt.Errorf(
-					"%w; show metadata rollback failed: %v; preserved staging: %s",
-					errors.Join(prepareErr, snapshotErr),
+					"EnsureLibraryHardlink: target occupied during publication: %s; publication rollback failed: %v; preserved staging: %s",
+					targetPath,
 					recoveryErr,
 					filepath.Dir(stagedPath),
 				)
 			}
-			cleanupStaging()
-			return "", prepareErr
-		}
-
-		var published []libraryPublishedHardlink
-		rollbackPublication := func() error {
-			if recoveryErr := validateLibraryPublishedHardlinks(published); recoveryErr != nil {
-				return recoveryErr
+			if sidecarErr := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingLink, meta, platform); sidecarErr != nil {
+				return "", sidecarErr
 			}
-			showValidationErr := validateLibraryShowFiles(showBefore, showApplied)
-			if recoveryErr := removeLibraryPublishedHardlinks(published); recoveryErr != nil {
-				return recoveryErr
-			}
-			recoveryErr := showValidationErr
-			if recoveryErr == nil {
-				recoveryErr = restoreValidatedLibraryShowFiles(showBefore, showApplied)
-			}
-			if recoveryErr == nil {
-				cleanupStaging()
-			}
-			return recoveryErr
+			return existingLink, nil
 		}
-		recoverPublication := func(primary error) error {
-			if recoveryErr := rollbackPublication(); recoveryErr != nil {
-				return fmt.Errorf("%w; publication rollback failed: %v; preserved staging: %s", primary, recoveryErr, filepath.Dir(stagedPath))
-			}
-			return primary
-		}
-
-		targetStem := sidecarStem(targetPath)
-		targetNFOPath := targetStem + ".nfo"
-		publishedNFO, err := captureLibraryPublishedHardlink(stagedNFOPath, targetNFOPath)
-		if err != nil {
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: capture staged episode NFO: %w", err))
-		}
-		if err := librarySidecarLink(stagedNFOPath, targetNFOPath); err != nil {
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish episode NFO %s: %w", targetNFOPath, err))
-		}
-		published = append(published, publishedNFO)
-		targetCoverPath := targetStem + ".jpg"
-		publishedCover, err := captureLibraryPublishedHardlink(stagedCoverPath, targetCoverPath)
-		if err != nil {
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: capture staged episode cover: %w", err))
-		}
-		if err := librarySidecarLink(stagedCoverPath, targetCoverPath); err != nil {
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish episode cover %s: %w", targetCoverPath, err))
-		}
-		published = append(published, publishedCover)
-
-		// 第三步：全部身份 sidecar 就绪后，最后再让 MP4 可见。
-		err = libraryHardlinkLink(stagedPath, targetPath)
-		if os.IsExist(err) {
-			existingLink, scanErr := findExistingHardlinkInDir(sourcePath, seasonDir)
-			if scanErr == nil && existingLink != "" {
-				sameTarget, pathErr := sameCleanPath(existingLink, targetPath)
-				if pathErr == nil && sameTarget {
-					cleanupStaging()
-					return existingLink, nil
-				}
-				if recoveryErr := rollbackPublication(); recoveryErr != nil {
-					return "", fmt.Errorf(
-						"EnsureLibraryHardlink: target occupied during publication: %s; publication rollback failed: %v; preserved staging: %s",
-						targetPath,
-						recoveryErr,
-						filepath.Dir(stagedPath),
-					)
-				}
-				if sidecarErr := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingLink, meta, platform); sidecarErr != nil {
-					return "", sidecarErr
-				}
-				return existingLink, nil
-			}
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: target occupied during publication: %s", targetPath))
-		}
-		if err != nil {
-			return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish hardlink %s → %s: %w", stagedPath, targetPath, err))
-		}
-		cleanupStaging()
-		logrus.WithFields(logrus.Fields{
-			"source":  sourcePath,
-			"target":  targetPath,
-			"episode": episodeNumber,
-		}).Info("EnsureLibraryHardlink: 已为源文件创建字幕库硬链接（未等待 cron）")
-		return targetPath, nil
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: target occupied during publication: %s", targetPath))
 	}
+	if err != nil {
+		return "", recoverPublication(fmt.Errorf("EnsureLibraryHardlink: publish hardlink %s → %s: %w", stagedPath, targetPath, err))
+	}
+	cleanupStaging()
+	logrus.WithFields(logrus.Fields{
+		"source":  sourcePath,
+		"target":  targetPath,
+		"episode": episodeNumber,
+	}).Info("EnsureLibraryHardlink: 已为源文件创建字幕库硬链接（未等待 cron）")
+	return targetPath, nil
 }

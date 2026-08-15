@@ -47,12 +47,20 @@ var liveSessionSyncDirectory = syncLiveSessionDirectory
 var liveSessionLinkFile = os.Link
 var liveSessionRemoveFile = os.Remove
 
-var libraryMediaEpisodePattern = regexp.MustCompile(`^(.+?)\.S(\d{2})E(\d{4})(?:-S\d{2}E\d{4})?\.(\d{4}-\d{2}-\d{2}) - (.+)\.[^.]+$`)
+var libraryMediaEpisodePattern = regexp.MustCompile(`^(.+?)\.S(\d{2})E(\d+)(?:-S\d{2}E\d+)?\.(\d{4}-\d{2}-\d{2}) - (.+)\.[^.]+$`)
+var normalizedLiveSessionSourcePattern = regexp.MustCompile(` - (\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}) - `)
+var mediaLibraryLocation = time.FixedZone("UTC+8", 8*60*60)
+
+const (
+	chronologicalEpisodeIdentityBase int64 = 8
+	chronologicalEpisodeEpochUnix    int64 = 1_577_836_800 // 2020-01-01T00:00:00Z
+	chronologicalEpisodeIdentityMin  int64 = 1_000_000_000_000
+)
 
 type liveSessionMediaEpisode struct {
 	Alias     string
 	Season    string
-	Episode   int
+	Episode   int64
 	Date      string
 	Title     string
 	SeasonDir string
@@ -135,23 +143,34 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		return nil, nil
 	}
 
-	sort.SliceStable(inputs, func(i, j int) bool {
-		return filepath.ToSlash(inputs[i].LibraryPath) < filepath.ToSlash(inputs[j].LibraryPath)
-	})
+	if err := sortLiveSessionInputsByRecordedAt(inputs); err != nil {
+		return nil, err
+	}
 
+	desiredAggregatePath, err := liveSessionAggregatePath(inputs)
+	if err != nil {
+		return nil, err
+	}
+	desiredAggregatePath, err = canonicalLiveSessionAggregatePath(desiredAggregatePath)
+	if err != nil {
+		return nil, err
+	}
 	aggregatePath := strings.TrimSpace(manifest.AggregatePath)
-	if aggregatePath == "" {
-		aggregatePath, err = liveSessionAggregatePath(inputs)
-		if err != nil {
-			return nil, err
-		}
-		aggregatePath, err = canonicalLiveSessionAggregatePath(aggregatePath)
-		if err != nil {
-			return nil, err
-		}
+	oldAggregatePath := strings.TrimSpace(manifest.PreviousAggregatePath)
+	if oldAggregatePath == "" {
+		oldAggregatePath = aggregatePath
+	}
+	manifestPath := knowledgeSessionManifestPath(absoluteLibraryRoot, manifest.LiveSessionID)
+	identityChanged := aggregatePath != "" && !sameCleanPath(aggregatePath, desiredAggregatePath)
+	if manifest.PreviousAggregatePath != "" {
+		identityChanged = true
+	}
+	if aggregatePath == "" || !sameCleanPath(aggregatePath, desiredAggregatePath) {
+		manifest.PreviousAggregatePath = oldAggregatePath
+		aggregatePath = desiredAggregatePath
 		manifest.AggregatePath = aggregatePath
-		manifestPath := knowledgeSessionManifestPath(absoluteLibraryRoot, manifest.LiveSessionID)
 		if err := saveKnowledgeSessionManifest(manifestPath, *manifest); err != nil {
+			manifest.AggregatePath = oldAggregatePath
 			return nil, fmt.Errorf("persist live session aggregate identity: %w", err)
 		}
 	} else if err := validateLiveSessionAggregatePath(absoluteLibraryRoot, aggregatePath, inputs); err != nil {
@@ -172,6 +191,17 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	if metadataExists &&
 		aggregateMetadata.RecordMeta["live_session_media_content_hash"] != knowledgeSessionManifestContentHash(*manifest) {
 		metadataExists = false
+	}
+	if metadataExists && manifest.PreviousAggregatePath != "" {
+		if fileExists(manifest.PreviousAggregatePath) {
+			if err := archiveDistinctLiveSessionAggregateVersion(absoluteLibraryRoot, manifest, manifest.PreviousAggregatePath, aggregatePath); err != nil {
+				return nil, err
+			}
+		}
+		manifest.PreviousAggregatePath = ""
+		if err := saveKnowledgeSessionManifest(manifestPath, *manifest); err != nil {
+			return nil, fmt.Errorf("complete live session aggregate identity recovery: %w", err)
+		}
 	}
 	if !metadataExists {
 		segmentPaths, err := liveSessionSegmentVideoPaths(inputs)
@@ -231,6 +261,15 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		if err := sidecarStage.archivePreviousAggregateVersion(absoluteLibraryRoot, manifest, aggregatePath, videoBackup); err != nil {
 			return nil, recoverLiveSessionAggregateWithSegments(err, segmentTransaction, sidecarStage, aggregatePath, videoBackup)
 		}
+		if identityChanged {
+			if err := archiveDistinctLiveSessionAggregateVersion(absoluteLibraryRoot, manifest, oldAggregatePath, aggregatePath); err != nil {
+				return nil, recoverLiveSessionAggregateWithSegments(err, segmentTransaction, sidecarStage, aggregatePath, videoBackup)
+			}
+		}
+		manifest.PreviousAggregatePath = ""
+		if err := saveKnowledgeSessionManifest(manifestPath, *manifest); err != nil {
+			return nil, recoverLiveSessionAggregateWithSegments(fmt.Errorf("commit live session aggregate identity: %w", err), segmentTransaction, sidecarStage, aggregatePath, videoBackup)
+		}
 		if segmentTransaction != nil {
 			segmentTransaction.commit()
 		}
@@ -268,14 +307,185 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	}, nil
 }
 
+func archiveDistinctLiveSessionAggregateVersion(
+	libraryRoot string,
+	manifest *knowledgeSessionManifest,
+	oldAggregatePath string,
+	newAggregatePath string,
+) error {
+	if strings.TrimSpace(oldAggregatePath) == "" || sameCleanPath(oldAggregatePath, newAggregatePath) {
+		return nil
+	}
+	if !fileExists(oldAggregatePath) {
+		return nil
+	}
+
+	oldStem := strings.TrimSuffix(oldAggregatePath, filepath.Ext(oldAggregatePath))
+	oldMetadataPath := oldStem + ".subtitle.json"
+	metadataContent, err := os.ReadFile(oldMetadataPath)
+	if err != nil {
+		return fmt.Errorf("read previous aggregate metadata: %w", err)
+	}
+	versionHash := sha256.Sum256(metadataContent)
+	hiddenPath, err := hiddenLiveSessionSegmentPath(libraryRoot, manifest, oldAggregatePath, oldAggregatePath)
+	if err != nil {
+		return err
+	}
+	archiveDir := filepath.Join(
+		filepath.Dir(hiddenPath),
+		".aggregate_versions",
+		hex.EncodeToString(versionHash[:])[:16],
+	)
+	archiveParent := filepath.Dir(archiveDir)
+	if err := os.MkdirAll(archiveParent, 0o700); err != nil {
+		return err
+	}
+	if fileExists(archiveDir) {
+		archivedVideoPath := filepath.Join(archiveDir, filepath.Base(oldAggregatePath))
+		archivedMetadataPath := strings.TrimSuffix(archivedVideoPath, filepath.Ext(archivedVideoPath)) + ".subtitle.json"
+		metadata, metadataErr := subtitle.LoadMetadata(archivedMetadataPath)
+		supersededBy, _ := metadata.RecordMeta["live_session_media_superseded_by"].(string)
+		if metadataErr == nil && sameCleanPath(supersededBy, newAggregatePath) {
+			return nil
+		}
+		return fmt.Errorf("previous aggregate archive conflict: %s", archiveDir)
+	}
+	if err := os.Mkdir(archiveDir, 0o700); err != nil {
+		return err
+	}
+
+	type aggregateMove struct {
+		source string
+		target string
+		video  bool
+	}
+	moves := make([]aggregateMove, 0, 6)
+	for _, extension := range []string{".srt", ".ass", ".nfo", ".jpg", ".transcript.json", ".subtitle.json", filepath.Ext(oldAggregatePath)} {
+		source := oldStem + extension
+		if extension == filepath.Ext(oldAggregatePath) {
+			source = oldAggregatePath
+		}
+		if !fileExists(source) {
+			continue
+		}
+		moves = append(moves, aggregateMove{
+			source: source,
+			target: filepath.Join(archiveDir, filepath.Base(source)),
+			video:  sameCleanPath(source, oldAggregatePath),
+		})
+	}
+
+	moved := 0
+	metadataBackup := ""
+	rollback := func(primary error) error {
+		var recoveryErr error
+		archivedMetadataPath := filepath.Join(archiveDir, filepath.Base(oldMetadataPath))
+		if metadataBackup != "" && fileExists(metadataBackup) {
+			if fileExists(archivedMetadataPath) {
+				if err := os.Remove(archivedMetadataPath); err != nil && recoveryErr == nil {
+					recoveryErr = err
+				}
+			}
+			if recoveryErr == nil {
+				if err := os.Rename(metadataBackup, archivedMetadataPath); err != nil {
+					recoveryErr = err
+				}
+			}
+		}
+		for index := moved - 1; index >= 0 && recoveryErr == nil; index-- {
+			move := moves[index]
+			if err := os.Rename(move.target, move.source); err != nil {
+				recoveryErr = err
+			}
+		}
+		if recoveryErr == nil {
+			_ = os.RemoveAll(archiveDir)
+			_ = syncLiveSessionDirectory(archiveParent)
+			return primary
+		}
+		return fmt.Errorf("%w; previous aggregate recovery failed: %v; preserved archive: %s", primary, recoveryErr, archiveDir)
+	}
+
+	for _, move := range moves {
+		rename := liveSessionSidecarRename
+		if move.video {
+			rename = liveSessionMediaRename
+		}
+		if err := rename(move.source, move.target); err != nil {
+			return rollback(err)
+		}
+		moved++
+	}
+	if err := syncLiveSessionDirectory(filepath.Dir(oldAggregatePath)); err != nil {
+		return rollback(err)
+	}
+
+	archivedVideoPath := filepath.Join(archiveDir, filepath.Base(oldAggregatePath))
+	archivedStem := strings.TrimSuffix(archivedVideoPath, filepath.Ext(archivedVideoPath))
+	archivedMetadataPath := archivedStem + ".subtitle.json"
+	metadata, err := subtitle.LoadMetadata(archivedMetadataPath)
+	if err != nil {
+		return rollback(err)
+	}
+	metadata.OutputPath = archivedVideoPath
+	if fileExists(archivedStem + ".ass") {
+		metadata.ASSPath = archivedStem + ".ass"
+	}
+	if fileExists(archivedStem + ".srt") {
+		metadata.SRTPath = archivedStem + ".srt"
+	}
+	metadata.RecordMeta = copyRecordMeta(metadata.RecordMeta)
+	metadata.RecordMeta["live_session_media_role"] = "aggregate_version"
+	metadata.RecordMeta["live_session_media_superseded_by"] = newAggregatePath
+	stagedMetadataPath := archivedMetadataPath + ".new"
+	if err := subtitle.SaveMetadata(stagedMetadataPath, metadata); err != nil {
+		return rollback(err)
+	}
+	metadataBackup = archivedMetadataPath + ".original"
+	if err := os.Rename(archivedMetadataPath, metadataBackup); err != nil {
+		_ = os.Remove(stagedMetadataPath)
+		return rollback(err)
+	}
+	if err := os.Rename(stagedMetadataPath, archivedMetadataPath); err != nil {
+		return rollback(err)
+	}
+	if err := syncLiveSessionDirectory(archiveDir); err != nil {
+		return rollback(err)
+	}
+	if err := syncLiveSessionDirectory(archiveParent); err != nil {
+		return rollback(err)
+	}
+	_ = os.Remove(metadataBackup)
+	metadataBackup = ""
+	_ = syncLiveSessionDirectory(archiveDir)
+	return nil
+}
+
 func liveSessionAggregatePath(inputs []knowledgeSessionPayloadInput) (string, error) {
 	if len(inputs) == 0 {
 		return "", fmt.Errorf("live session media aggregate has no inputs")
+	}
+	if err := sortLiveSessionInputsByRecordedAt(inputs); err != nil {
+		return "", err
 	}
 	target, ok := parseLiveSessionMediaEpisode(inputs[0].LibraryPath)
 	if !ok {
 		return "", fmt.Errorf("cannot parse library episode path: %s", inputs[0].LibraryPath)
 	}
+	recordedAt, ok := liveSessionInputRecordedAt(inputs[0])
+	if !ok {
+		return "", fmt.Errorf("live session aggregate has no reliable recording start time: %s", inputs[0].LibraryPath)
+	}
+	baseIdentity := chronologicalLiveSessionEpisodeIdentity(recordedAt)
+	if baseIdentity <= 0 {
+		return "", fmt.Errorf("live session aggregate recording time exceeds safe episode identity range: %s", recordedAt.Format(time.RFC3339Nano))
+	}
+	existingIdentity := target.Episode
+	target.Episode = baseIdentity
+	if existingIdentity >= baseIdentity && existingIdentity < baseIdentity+chronologicalEpisodeIdentityBase {
+		target.Episode = existingIdentity
+	}
+	target.Date = recordedAt.Format("2006-01-02")
 	identityAlias := target.Alias
 	identitySeason := target.Season
 	identitySeasonDir := target.SeasonDir
@@ -289,14 +499,93 @@ func liveSessionAggregatePath(inputs []knowledgeSessionPayloadInput) (string, er
 			!sameCleanPath(parsed.SeasonDir, identitySeasonDir) {
 			return "", fmt.Errorf("live session input identity mismatch: %s", input.LibraryPath)
 		}
-		if parsed.Episode < target.Episode {
-			target = parsed
-		}
 	}
 
 	episodeText := fmt.Sprintf("S%sE%04d", target.Season, target.Episode)
 	name := fmt.Sprintf("%s.%s.%s - %s [同场聚合].mp4", target.Alias, episodeText, target.Date, target.Title)
 	return filepath.Join(target.SeasonDir, name), nil
+}
+
+func chronologicalLiveSessionEpisodeIdentity(recordedAt time.Time) int64 {
+	microseconds := recordedAt.UnixMicro() - chronologicalEpisodeEpochUnix*1_000_000
+	if recordedAt.IsZero() || microseconds <= 0 || microseconds > math.MaxInt64/chronologicalEpisodeIdentityBase {
+		return -1
+	}
+	identity := microseconds * chronologicalEpisodeIdentityBase
+	if identity > 9_007_199_254_740_991 {
+		return -1
+	}
+	return identity
+}
+
+func liveSessionInputRecordedAt(input knowledgeSessionPayloadInput) (time.Time, bool) {
+	if input.Metadata != nil && input.Metadata.RecordMeta != nil {
+		switch value := input.Metadata.RecordMeta["start_time"].(type) {
+		case string:
+			if parsed, err := time.Parse(time.RFC3339Nano, value); err == nil && !parsed.IsZero() {
+				return parsed, true
+			}
+		case time.Time:
+			if !value.IsZero() {
+				return value, true
+			}
+		}
+	}
+	if input.Metadata != nil {
+		for _, path := range []string{input.Metadata.SourcePath, input.Metadata.OutputPath} {
+			stem := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			match := normalizedLiveSessionSourcePattern.FindStringSubmatch(stem)
+			if match == nil {
+				continue
+			}
+			if parsed, err := time.ParseInLocation("2006-01-02 15-04-05", match[1], mediaLibraryLocation); err == nil {
+				return parsed, true
+			}
+		}
+	}
+	episode, ok := parseLiveSessionMediaEpisode(input.LibraryPath)
+	if !ok {
+		return time.Time{}, false
+	}
+	if episode.Episode >= chronologicalEpisodeIdentityMin {
+		microseconds := chronologicalEpisodeEpochUnix*1_000_000 + episode.Episode/chronologicalEpisodeIdentityBase
+		return time.UnixMicro(microseconds), true
+	}
+	return time.Time{}, false
+}
+
+func sortLiveSessionInputsByRecordedAt(inputs []knowledgeSessionPayloadInput) error {
+	recordedAt := make(map[string]time.Time, len(inputs))
+	for index, input := range inputs {
+		value, ok := liveSessionInputRecordedAt(input)
+		if !ok {
+			if input.Metadata != nil || input.MetadataPath != "" {
+				return fmt.Errorf("live session input %d has no reliable recording start time: %s", index, input.LibraryPath)
+			}
+			episode, parsed := parseLiveSessionMediaEpisode(input.LibraryPath)
+			if !parsed {
+				return fmt.Errorf("cannot parse library episode path: %s", input.LibraryPath)
+			}
+			if episode.Episode >= chronologicalEpisodeIdentityMin {
+				microseconds := chronologicalEpisodeEpochUnix*1_000_000 + episode.Episode/chronologicalEpisodeIdentityBase
+				value = time.UnixMicro(microseconds)
+			} else {
+				// 旧四位集号只用于兼容没有 sidecar 的既有调用；它保持原集号顺序，
+				// 不把路径或 mtime 伪装成真实录制时间。
+				value = time.UnixMicro(episode.Episode)
+			}
+		}
+		recordedAt[input.MetadataPath+"\x00"+input.LibraryPath] = value
+	}
+	sort.SliceStable(inputs, func(i, j int) bool {
+		left := recordedAt[inputs[i].MetadataPath+"\x00"+inputs[i].LibraryPath]
+		right := recordedAt[inputs[j].MetadataPath+"\x00"+inputs[j].LibraryPath]
+		if !left.Equal(right) {
+			return left.Before(right)
+		}
+		return filepath.ToSlash(inputs[i].LibraryPath) < filepath.ToSlash(inputs[j].LibraryPath)
+	})
+	return nil
 }
 
 func validateLiveSessionAggregatePath(libraryRoot, aggregatePath string, inputs []knowledgeSessionPayloadInput) error {
@@ -353,7 +642,7 @@ func parseLiveSessionMediaEpisode(path string) (liveSessionMediaEpisode, bool) {
 	if match == nil {
 		return liveSessionMediaEpisode{}, false
 	}
-	episode, err := strconv.Atoi(match[3])
+	episode, err := strconv.ParseInt(match[3], 10, 64)
 	if err != nil {
 		return liveSessionMediaEpisode{}, false
 	}
@@ -804,6 +1093,16 @@ func (stage *liveSessionSidecarStage) archivePreviousAggregateVersion(
 	if err := os.MkdirAll(archiveParent, 0o700); err != nil {
 		return err
 	}
+	if fileExists(archiveDir) {
+		archivedVideoPath := filepath.Join(archiveDir, filepath.Base(aggregatePath))
+		archivedMetadataPath := strings.TrimSuffix(archivedVideoPath, filepath.Ext(archivedVideoPath)) + ".subtitle.json"
+		metadata, metadataErr := subtitle.LoadMetadata(archivedMetadataPath)
+		supersededBy, _ := metadata.RecordMeta["live_session_media_superseded_by"].(string)
+		if metadataErr == nil && sameCleanPath(supersededBy, aggregatePath) {
+			return nil
+		}
+		return fmt.Errorf("previous aggregate archive conflict: %s", archiveDir)
+	}
 	if err := os.Mkdir(archiveDir, 0o700); err != nil {
 		return err
 	}
@@ -1062,7 +1361,10 @@ func writeLiveSessionEpisodeNFO(aggregatePath string, inputs []knowledgeSessionP
 	if !ok {
 		return nil
 	}
-	recordedAt := parseEpisodeDate(episode.Date)
+	recordedAt, ok := liveSessionInputRecordedAt(inputs[0])
+	if !ok {
+		recordedAt = parseEpisodeDate(episode.Date)
+	}
 	platform := aggregatePlatform(inputs)
 	title := fmt.Sprintf("%s - %s", episode.Date, episode.Title)
 	plot := fmt.Sprintf("%s | 主播: %s | 标题: %s | 同场直播聚合成品", platform, episode.Alias, episode.Title)

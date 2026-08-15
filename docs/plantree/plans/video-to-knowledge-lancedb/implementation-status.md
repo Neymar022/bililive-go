@@ -462,3 +462,17 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
   - 需要提交/PR/CI/合并并发布新 `latest` 后，NAS 再拉取验证。
   - 当前 NAS latest 仍是会删除媒体库 MP4 的版本，不能继续用它跑自动截图验收，否则会制造新的历史缺失记录。
   - 已被任务 `683` 删除的 `小司说钢构.S01E0004...mp4` 需要后续按是否有源文件/备份单独恢复；没有 MP4 时无法补回截图，只能用已有 `.jpg` 回填封面。
+
+## 2026-08-14 直播合集时间排序 checkpoint
+
+- 状态：源码防复发与历史只读计划已完成，本地验证为绿；生产历史重编号与部署尚未执行。
+- 根因：旧媒体发布按第一个空闲 `S01E` 分配，任务完成顺序会覆盖真实录制顺序；UGREEN 主要按 season/episode 展示，因此晚到任务造成 UI 逆序。
+- 普通发布以精确 `recordedAt` 生成稳定 `int64` episode identity，优先 `record_meta.start_time/RecordInfo.StartTime`，可靠回退为固定 `UTC+8` 的规范文件名时间；不使用 mtime 或路径字典序。
+- 同场聚合按最早真实录制时间排序并继承 `start_time/dateadded`；晚到更早分段会迁移 aggregate identity，旧 aggregate 及 sidecar 归档到媒体库外。manifest 的 `previous_aggregate_path` 保存中断恢复点，失败或进程重试都不会遗失旧聚合身份。
+- 历史工具的 `--plan-chronological-renumber` 仍是只读模式，现在输出完整文件双射、NFO 字段变化、媒体库/manifest/库外隐藏 sidecar 的 JSON Pointer old/new 引用，并实际模拟替换后验证 old refs=0、new refs 守恒及 MP4 count/bytes 不变；缺 NFO 时拒绝生成成功计划。
+- 2026-08-15 当前生产最终 dry-run 已以 root 只读运行并通过：`episodes/unique_sources/unique_targets=399/399/399`、`files=2346`、`json=1319`、`references/json_edits=2100/2100`、`post_old_refs=0`、`media_before=media_after=400/787776233209`、`conflicts=0`、`monotonic=true`；压缩报告 SHA-256 为 `c55b83f80ffec0e06cdd5195577a37c37478f62d8827080b2aeeab9a4e59a8bb`。首次非 root 试跑把 root-only sidecar 的 `PermissionError` 收敛成“缺可信时间”，不作为数据 RED；root 权威运行证明 Geek徐Sir E0062 的 sidecar 时间可读且计划完整。
+- 同期轻量门禁为 active recordings `0`、pipeline running/pending `0/2`、update `idle`、短时媒体写入 `0`。两项 pending 是 `not_before=2026-08-16 02:00 +08:00` 的字幕任务，输入都在 `srt_video`，与当前 399 集重编号集合及 2100 条引用交集为 `0`；但旧生产版本在其完成后仍可能发布新四位集号，所以最终 apply fixed point 必须等待其自然完成后重新生成，不能复用当前快照直接写入。
+- 本地验证：`go test ./src/subtitle ./src/pipeline/stages -count=1`、Python 14 tests、Linux `386` compile-only、`make dev`、`make test`、`make lint`、`git diff --check` 均通过。
+- 下一门：实时满足录制 0、pipeline 0/0、update idle 后，先备份媒体/sidecar/manifest 和 UGREEN 三表，再审核最终双射计划；历史原子重编号及生产镜像部署需要在该门后执行，并验证 UGREEN 对长 episode number 的实际解析。任何目标冲突 fail closed，禁止删除 MP4。
+- 持续授权：本次精确录制时间排序范围内，可在每次生产写入前重新通过轻量门禁后，连续完成历史重编号、必要 DB/引用修复、源码提交与中文 PR/CI/合并、镜像发布及最小生产部署；不得删除 MP4、覆盖冲突目标或扩大到无关清理，任何非双射、引用断裂或媒体不守恒均 fail closed 并回滚。
+- Goal 完成门禁：阶段性 dry-run、fixed point、计划任务等待、PR 或部署都不是完成；只有生产历史修复与后验、源码合并发布、必要 NAS 部署和最终验收全部完成，并将 closure 写回本状态后才可结束。

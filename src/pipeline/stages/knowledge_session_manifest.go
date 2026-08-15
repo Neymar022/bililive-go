@@ -21,13 +21,14 @@ const knowledgeSessionManifestDir = ".knowledge_sessions"
 var knowledgeSessionManifestMu sync.Mutex
 
 type knowledgeSessionManifest struct {
-	SourceID          string                           `json:"source_id"`
-	LiveSessionID     string                           `json:"live_session_id"`
-	UpdatedAt         time.Time                        `json:"updated_at"`
-	PostedContentHash string                           `json:"posted_content_hash,omitempty"`
-	PostedAt          *time.Time                       `json:"posted_at,omitempty"`
-	AggregatePath     string                           `json:"aggregate_path,omitempty"`
-	Sources           []knowledgeSessionManifestSource `json:"sources"`
+	SourceID              string                           `json:"source_id"`
+	LiveSessionID         string                           `json:"live_session_id"`
+	UpdatedAt             time.Time                        `json:"updated_at"`
+	PostedContentHash     string                           `json:"posted_content_hash,omitempty"`
+	PostedAt              *time.Time                       `json:"posted_at,omitempty"`
+	AggregatePath         string                           `json:"aggregate_path,omitempty"`
+	PreviousAggregatePath string                           `json:"previous_aggregate_path,omitempty"`
+	Sources               []knowledgeSessionManifestSource `json:"sources"`
 }
 
 type knowledgeSessionManifestSource struct {
