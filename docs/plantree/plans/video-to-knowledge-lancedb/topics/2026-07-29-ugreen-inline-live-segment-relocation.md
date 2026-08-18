@@ -196,3 +196,13 @@ GREEN
 - 当前门禁为 active recordings `0`、pipeline `running=0`、`pending=2`、update `idle`。两项计划字幕任务的输入位于 `srt_video`，与当前重编号 source/target/JSON 引用交集为 0；它们不会被 apply 改名，但旧生产版本完成任务后可能新增四位集号，因此不强跑、不取消，等待其自然完成后重新固定最终 apply 快照。
 - 历史 apply 前必须重新满足录制 0、pipeline running/pending 0/0、update idle；随后备份目标 MP4/NFO/字幕/JSON/manifest 映射及 `file_info/ug_video_info/ug_television_episode`，并用临时名和原子 rename 处理换名环，任何目标冲突拒绝覆盖。
 - 回滚必须按 journal 逆序恢复文件名与 JSON/NFO 原件，再核对 MP4 数量、字节和引用；不得删除任何 MP4。部署新 episode identity 后还需单独验证 UGREEN 对长 episode number 的真实兼容性。
+
+## 2026-08-19 旧路径恢复与日期校正验收
+
+- PR #43 已合并并部署 app `62ebec4ed62c3cf0519228d27441f9f1aec4a623`。task `1183/1184` 在不回退到缺失 FLV、不删除分段的前提下完成；session `734` 的 11 个 manifest sources 与 aggregate metadata mapping 一一对应，11 个唯一 output 全部位于库外 hidden root 且存在，content hash 一致，恢复标记为空。
+- task `1203` 自然调度完成，episode `1673386692282296` 与精确 `record_meta.start_time` 的 recordedAt identity 一致；文件、NFO、manifest 和 UGREEN episode 关系均通过，所属合集没有时间倒退。写前等待 `1208..1212` 自然完成，最终门禁为 active `0`、pipeline `0/0`、update `idle`、ffmpeg `0`，没有强跑或取消任务。
+- 5 个历史 NFO/UGREEN 名称只校正日期前缀，不改标题正文、文件名或 episode identity。备份根 `/volume2/docker/bililive-go/backups/recorded-at-date-correction-20260819-044422/` 保存原 NFO、数据库 custom dump、前后行与 SHA-256；NFO 原子替换后 watcher 未更新名称，才以精确旧值和 `5 rows` 断言执行最小事务。
+- 后验：目标新值 `5`、旧值 `0`，JSON parse errors `0`，媒体 apply 前后为可见 `423 / 825377880762 bytes`、hidden `273 / 150985881365 bytes`；inline filesystem/DB/建筑师电影三断言仍为 `0/0/0`。app 与 worker API 均为 HTTP `200`，日期修复没有触发容器或 UGREEN video 服务重启。
+- 只删除已确认无引用的临时 app tar；保留所有 Docker rollback/local 镜像。`p6-monitor-http` 的 bind source 虽缺失，但停止容器仍引用其 local worker image，owner 未证明废弃，因此不清理。735GB chronological-renumber 恢复备份继续保留。
+
+回滚日期校正时，只从新备份根恢复 5 个 NFO，并按 `rows-before.psv` 对 5 个 episode ID 做带当前值条件的反向事务；不得恢复整表、改 episode identity 或删除 MP4。
