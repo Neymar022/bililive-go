@@ -487,3 +487,15 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 下一门：实时满足录制 0、pipeline 0/0、update idle 后，先备份媒体/sidecar/manifest 和 UGREEN 三表，再审核最终双射计划；历史原子重编号及生产镜像部署需要在该门后执行，并验证 UGREEN 对长 episode number 的实际解析。任何目标冲突 fail closed，禁止删除 MP4。
 - 持续授权：本次精确录制时间排序范围内，可在每次生产写入前重新通过轻量门禁后，连续完成历史重编号、必要 DB/引用修复、源码提交与中文 PR/CI/合并、镜像发布及最小生产部署；不得删除 MP4、覆盖冲突目标或扩大到无关清理，任何非双射、引用断裂或媒体不守恒均 fail closed 并回滚。
 - Goal 完成门禁：阶段性 dry-run、fixed point、计划任务等待、PR 或部署都不是完成；只有生产历史修复与后验、源码合并发布、必要 NAS 部署和最终验收全部完成，并将 closure 写回本状态后才可结束。
+
+## 2026-08-19 live-session 旧路径与展示日期 closure
+
+- 源码与发布已闭环：第二批最小修复由中文 PR #43 合并为 `master=62ebec4ed62c3cf0519228d27441f9f1aec4a623`；CI 的 build、test、lint、AI 指令检查与 Playwright E2E 均通过，Docker workflow `32128093746` 成功发布。生产仅更新 `bililive`，`GET /api/info` 返回 HTTP `200` 和同一 git hash；活动 UGREEN Compose 仍使用 `neymar022/bililive-go-app:latest` / `neymar022/bililive-go-subtitle-worker:latest`，checksum 为 `3aa98320570ee6a7d3ca2c98cbcb00833d7afed635942bf3bc5ddcf255a015a5`。
+- 历史恢复已闭环：task `1183/1184` 分别于 `2026-08-18 19:37:24` / `19:39:03 +08` 完成。session `734` manifest 为 11 个 sources，aggregate metadata 同样有 11 个唯一 hidden output，11/11 均存在且位于媒体库外；manifest content hash 与 metadata hash 一致，`previous_aggregate_path` 为空。旧 manifest 的四位 `library_path/metadata_path` 继续作为兼容 key 保留，由受限 hidden mapping 恢复，不改写或猜测历史路径。
+- 自然增量验证已闭环：task `1203` 于 `2026-08-19 02:44:48 +08` 完成；生成 episode `1673386692282296` 精确等于 `record_meta.start_time=2026-08-18T07:42:16.535287952+08:00` 的 recordedAt identity。MP4/NFO/JPG/SRT/ASS/subtitle JSON 齐全，UGREEN file/category/episode 关系一致，`陶-琛霸` 10 集按 episode/dateadded 无相邻倒退。随后 `1208..1212` 也自然完成，写入固定点重新达到 active `0`、pipeline `0/0`、update `idle`、ffmpeg `0`。
+- 5 个已确认展示日期已按 recordedAt 定向校正：episode ID `15162/15167/15332/15337/15443` 的 NFO `<title>` 日期前缀与 `ug_television_episode.name` 分别改为 `2026-07-29/2026-08-03/2026-08-06/2026-08-12/2026-07-04`。NFO 使用 XML parser、同目录临时文件、fsync 与 `os.replace`；UGREEN watcher 观察 90 秒未更新名称后，使用精确旧值条件且强制影响 5 行的单事务更新。文件名、房间标题后缀、season/episode identity、MP4 均未改变。
+- 日期修复回滚根为 `/volume2/docker/bililive-go/backups/recorded-at-date-correction-20260819-044422/`，包含 5 个原 NFO、`ug_television_episode` custom dump/list、前后 5 行、门禁、媒体/manifest/runtime/清理后验和完整 SHA-256 清单。回滚优先从 `files/video/...` 原子恢复 5 个 NFO，并按 `rows-before.psv` 的 ID 与当前值条件反向更新 5 行；不要无条件整表覆盖。
+- 最终后验为绿：NFO/DB 新值 `5/5`、旧名称 `0`、inline filesystem MP4 `0`、UGREEN inline `file_info` `0`、建筑师 inline movie relation `0`、1374 个 JSON 解析错误 `0`。日期 apply 前后媒体严格守恒：可见根 `423 / 825377880762 bytes`，外置 hidden 根 `273 / 150985881365 bytes`；session `734/752` 的当前或兼容恢复引用均可解析到现存文件。
+- 最终运行态：app HTTP `200`、SHA `62ebec4...`、restart `0`；worker OpenAPI HTTP `200`、运行 revision `e5bafd...`，夜间批次期间累计 restart count 为 `1`，当前 running。没有因日期修复重启容器或 UGREEN video 服务。
+- 清理按保守边界完成：仅删除无进程占用、未被 Compose/容器引用的 `/tmp/bililive-app-62ebec4.tar`。`p6-monitor-http` 虽无 Compose/owner labels 且 bind source 已不存在，但停止容器仍唯一引用 `local/bililive-go-subtitle-worker:p6-mac-mlx-20260507`，因此容器和镜像保留；其它历史 local/sha/rollback 镜像 provenance 不足，也未删除。`chronological-renumber-20260815-082317` 约 735GB 恢复备份继续保留。
+- 当前 Goal 完成：源码 TDD/focused/正式双轴 review、PR/CI/合并与必要 app 部署、1183/1184 安全恢复、1203 自然增量验证、5 行日期校正、生产后验、保守清理及 plan-tree closure 均已完成；没有删除任何 MP4。
