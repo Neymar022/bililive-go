@@ -965,6 +965,9 @@ def main() -> int:
         hidden_segments = root.parent / ".live_session_segments"
         if hidden_segments.exists():
             search_roots.append(hidden_segments)
+        srt_video = root.parent / "srt_video"
+        if srt_video.exists():
+            search_roots.append(srt_video)
         parsed_json, references_by_source = chronological_reference_audit(search_roots, file_plan)
         matched_references = sum(references_by_source.values())
         nfo_edits = plan_chronological_nfo_edits(plan)

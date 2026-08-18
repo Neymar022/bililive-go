@@ -658,20 +658,89 @@ func parseLiveSessionMediaEpisode(path string) (liveSessionMediaEpisode, bool) {
 
 func liveSessionSegmentVideoPaths(inputs []knowledgeSessionPayloadInput) ([]string, error) {
 	paths := make([]string, 0, len(inputs))
-	for _, input := range inputs {
-		path := ""
-		if input.Metadata != nil {
-			path = strings.TrimSpace(input.Metadata.OutputPath)
+	for index := range inputs {
+		path, err := resolveLiveSessionSegmentVideoPath(inputs[index])
+		if err != nil {
+			return nil, err
 		}
-		if path == "" {
-			path = input.LibraryPath
-		}
-		if !fileExists(path) {
-			return nil, fmt.Errorf("live session segment video missing: %s", path)
+		if inputs[index].Metadata != nil {
+			inputs[index].Metadata.OutputPath = path
 		}
 		paths = append(paths, path)
 	}
 	return paths, nil
+}
+
+func resolveLiveSessionSegmentVideoPath(input knowledgeSessionPayloadInput) (string, error) {
+	candidates := make([]string, 0, 3)
+	if input.Metadata != nil {
+		if input.Metadata.RecordMeta != nil {
+			if hiddenPath, ok := input.Metadata.RecordMeta["live_session_segment_hidden_path"].(string); ok {
+				candidates = append(candidates, hiddenPath)
+			}
+		}
+		candidates = append(candidates, input.Metadata.OutputPath)
+	}
+	candidates = append(candidates, input.LibraryPath)
+
+	missingPath := ""
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		cleaned := filepath.Clean(candidate)
+		if _, exists := seen[cleaned]; exists {
+			continue
+		}
+		seen[cleaned] = struct{}{}
+		if missingPath == "" {
+			missingPath = candidate
+		}
+		if fileExists(candidate) {
+			return candidate, nil
+		}
+	}
+
+	matches := make(map[string]struct{})
+	recordedAt, hasRecordedAt := liveSessionInputRecordedAt(input)
+	expectedBaseIdentity := chronologicalLiveSessionEpisodeIdentity(recordedAt)
+	for candidate := range seen {
+		legacy, ok := parseLiveSessionMediaEpisode(candidate)
+		if !ok || legacy.Episode >= chronologicalEpisodeIdentityMin || !hasRecordedAt || expectedBaseIdentity <= 0 {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Dir(candidate))
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return "", err
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), filepath.Ext(candidate)) {
+				continue
+			}
+			currentPath := filepath.Join(filepath.Dir(candidate), entry.Name())
+			current, parsed := parseLiveSessionMediaEpisode(currentPath)
+			if !parsed || current.Episode < expectedBaseIdentity || current.Episode >= expectedBaseIdentity+chronologicalEpisodeIdentityBase {
+				continue
+			}
+			if current.Alias == legacy.Alias && current.Season == legacy.Season && current.Date == legacy.Date && current.Title == legacy.Title {
+				matches[filepath.Clean(currentPath)] = struct{}{}
+			}
+		}
+	}
+	if len(matches) == 1 {
+		for path := range matches {
+			return path, nil
+		}
+	}
+	if len(matches) > 1 {
+		return "", fmt.Errorf("live session legacy segment path is ambiguous: %s", missingPath)
+	}
+	return "", fmt.Errorf("live session segment video missing: %s", missingPath)
 }
 
 func concatLiveSessionMediaWithFFmpeg(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {

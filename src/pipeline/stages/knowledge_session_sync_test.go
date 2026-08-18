@@ -1724,6 +1724,138 @@ func TestPublishLiveSessionMediaAggregatePreservesSidecarStagingWhenRollbackFail
 	require.Len(t, stagingDirs, 1)
 }
 
+func TestPublishLiveSessionMediaAggregateResolvesUniqueChronologicalPathForLegacyEpisodeReference(t *testing.T) {
+	stubLiveSessionCoverExtraction(t, nil)
+	libraryRoot := t.TempDir()
+	firstRecordedAt := time.Date(2026, 8, 14, 23, 30, 0, 0, mediaLibraryLocation)
+	secondRecordedAt := time.Date(2026, 8, 15, 1, 51, 24, 0, mediaLibraryLocation)
+	firstIdentity := chronologicalLiveSessionEpisodeIdentity(firstRecordedAt)
+	secondIdentity := chronologicalLiveSessionEpisodeIdentity(secondRecordedAt)
+	firstPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", firstIdentity, firstRecordedAt, "第一段")
+	secondPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", secondIdentity, secondRecordedAt, "第二段")
+
+	legacyFirst := filepath.Join(filepath.Dir(firstPath), "伊布讲AI.S01E0024.2026-08-14 - 设计师还在加班画图吗？进来看看！.mp4")
+	legacySecond := filepath.Join(filepath.Dir(secondPath), "伊布讲AI.S01E0025.2026-08-15 - 设计师还在加班画图吗？进来看看！.mp4")
+	firstMetadata.OutputPath = legacyFirst
+	secondMetadata.OutputPath = legacySecond
+	require.NoError(t, subtitle.SaveMetadata(firstMetadataPath, firstMetadata))
+	require.NoError(t, subtitle.SaveMetadata(secondMetadataPath, secondMetadata))
+
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
+		assert.Equal(t, []string{firstPath, secondPath}, inputs)
+		return os.WriteFile(outputPath, []byte("aggregate-video"), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(ctx context.Context, ffmpegPath string, inputPath string) (float64, error) {
+		switch inputPath {
+		case firstPath:
+			return 120, nil
+		case secondPath:
+			return 90, nil
+		default:
+			return 0, fmt.Errorf("unexpected input path: %s", inputPath)
+		}
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:734",
+		LiveSessionID: "734",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-1183", SourceID: knowledgeSourceID(libraryRoot, legacyFirst), LibraryPath: legacyFirst, MetadataPath: firstMetadataPath},
+			{TaskID: "bililive-go-1184", SourceID: knowledgeSourceID(libraryRoot, legacySecond), LibraryPath: legacySecond, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	assert.NoFileExists(t, legacyFirst)
+	assert.NoFileExists(t, legacySecond)
+	assert.NoFileExists(t, firstPath)
+	assert.NoFileExists(t, secondPath)
+	for _, metadataPath := range []string{firstMetadataPath, secondMetadataPath} {
+		metadata, loadErr := subtitle.LoadMetadata(metadataPath)
+		require.NoError(t, loadErr)
+		require.FileExists(t, metadata.OutputPath)
+		assert.Contains(t, metadata.OutputPath, liveSessionSegmentsDirName)
+	}
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsAmbiguousLegacyEpisodeReference(t *testing.T) {
+	libraryRoot := t.TempDir()
+	recordedAt := time.Date(2026, 8, 14, 23, 30, 0, 0, mediaLibraryLocation)
+	identity := chronologicalLiveSessionEpisodeIdentity(recordedAt)
+	firstPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", identity, recordedAt, "第一段")
+	secondPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", identity+2, recordedAt.Add(time.Minute), "第二段")
+	legacyFirst := filepath.Join(filepath.Dir(firstPath), "伊布讲AI.S01E0024.2026-08-14 - 设计师还在加班画图吗？进来看看！.mp4")
+	legacySecond := filepath.Join(filepath.Dir(secondPath), "伊布讲AI.S01E0025.2026-08-14 - 设计师还在加班画图吗？进来看看！.mp4")
+	firstMetadata.OutputPath = legacyFirst
+	secondMetadata.OutputPath = legacySecond
+	require.NoError(t, subtitle.SaveMetadata(firstMetadataPath, firstMetadata))
+	require.NoError(t, subtitle.SaveMetadata(secondMetadataPath, secondMetadata))
+	duplicatePath := strings.Replace(firstPath, fmt.Sprintf("S01E%d", identity), fmt.Sprintf("S01E%d", identity+1), 1)
+	require.NoError(t, os.WriteFile(duplicatePath, []byte("other-video"), 0o644))
+
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:734-ambiguous",
+		LiveSessionID: "734-ambiguous",
+		Sources: []knowledgeSessionManifestSource{
+			{LibraryPath: legacyFirst, MetadataPath: firstMetadataPath},
+			{LibraryPath: legacySecond, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.ErrorContains(t, err, "legacy segment path is ambiguous")
+	assert.Nil(t, aggregate)
+	assert.Equal(t, []byte("video"), mustReadStageFile(t, firstPath))
+	assert.Equal(t, []byte("other-video"), mustReadStageFile(t, duplicatePath))
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsUniqueLegacyMappingOutsideRecordedAtIdentity(t *testing.T) {
+	libraryRoot := t.TempDir()
+	recordedAt := time.Date(2026, 8, 14, 23, 30, 0, 0, mediaLibraryLocation)
+	wrongIdentity := chronologicalLiveSessionEpisodeIdentity(recordedAt.Add(-time.Hour))
+	firstPath, firstMetadataPath, firstMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", wrongIdentity, recordedAt, "第一段")
+	secondPath, secondMetadataPath, secondMetadata := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", chronologicalLiveSessionEpisodeIdentity(recordedAt.Add(time.Hour)), recordedAt.Add(time.Hour), "第二段")
+	legacyFirst := filepath.Join(filepath.Dir(firstPath), "伊布讲AI.S01E0024.2026-08-14 - 设计师还在加班画图吗？进来看看！.mp4")
+	legacySecond := filepath.Join(filepath.Dir(secondPath), "伊布讲AI.S01E0025.2026-08-15 - 设计师还在加班画图吗？进来看看！.mp4")
+	firstMetadata.OutputPath = legacyFirst
+	secondMetadata.OutputPath = legacySecond
+	require.NoError(t, subtitle.SaveMetadata(firstMetadataPath, firstMetadata))
+	require.NoError(t, subtitle.SaveMetadata(secondMetadataPath, secondMetadata))
+
+	concatCalled := false
+	oldConcat := liveSessionMediaConcat
+	liveSessionMediaConcat = func(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
+		concatCalled = true
+		return errors.New("unexpected concat")
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+	})
+
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:734-recorded-at-mismatch",
+		LiveSessionID: "734-recorded-at-mismatch",
+		Sources: []knowledgeSessionManifestSource{
+			{LibraryPath: legacyFirst, MetadataPath: firstMetadataPath},
+			{LibraryPath: legacySecond, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.ErrorContains(t, err, "live session segment video missing")
+	assert.False(t, concatCalled)
+	assert.Nil(t, aggregate)
+	assert.Equal(t, []byte("video"), mustReadStageFile(t, firstPath))
+}
+
 func knowledgeSessionTestContext(taskID int64) *pipeline.PipelineContext {
 	return &pipeline.PipelineContext{
 		TaskID: taskID,

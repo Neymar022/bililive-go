@@ -463,6 +463,14 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
   - 当前 NAS latest 仍是会删除媒体库 MP4 的版本，不能继续用它跑自动截图验收，否则会制造新的历史缺失记录。
   - 已被任务 `683` 删除的 `小司说钢构.S01E0004...mp4` 需要后续按是否有源文件/备份单独恢复；没有 MP4 时无法补回截图，只能用已有 `.jpg` 回填封面。
 
+## 2026-08-18 live-session 旧路径兼容续修
+
+- Goal 保持 active：修复历史四位集号路径在 live-session manifest/sidecar 中残留导致的聚合失败，安全恢复 task `1183/1184`，验证 task `1203` 自然执行，再定向统一已确认的 5 个历史 NFO/UGREEN 展示日期；完成源码、生产、发布部署和清理闭环后才结束。
+- 授权与边界：写前必须重新满足轻量门禁并备份；不删除 MP4、不覆盖冲突目标。`p6-monitor-http` 及其唯一引用的 local worker 镜像在 owner/用途未确认前不得删除；`chronological-renumber-20260815-082317` 约 735GB 恢复备份继续保留。
+- 新鲜 RED：task `1183/1184` 均在同场聚合阶段引用已不存在的 `伊布讲AI.S01E0024.2026-08-14 - Seedance2.5 实战答疑现场.mp4`，最终报 `live session segment video missing`。源码 seam 已用 `publishLiveSessionMediaAggregate` 回归复现：metadata 与 manifest 同时残留旧四位路径、同目录只存在唯一 recordedAt 长 identity 成品时，当前 master 直接失败。
+- 当前源码 fixed point：隔离 worktree 基于 `origin/master=e5bafd69837f3be324afbe62c717b932fa568376`。最小修复只对旧四位 identity 启用同目录、同主播/季/日期/标题/扩展名，且落在 `record_meta.start_time` 对应 `base..base+7` 的唯一长 identity 映射；显式隐藏路径与仍存在的 output/library path 优先，多候选、无候选、缺可信时间或唯一但 recordedAt 不匹配均继续 fail closed。上述 RED 已转 GREEN。
+- 下一步：完成 focused/build/正式审查；取得安全 NAS SSH 认证后只读生成 task `734` 实际映射与引用修复 dry-run，在写门禁清空后备份并原子修正引用、部署新 app、重试 `1183/1184`。task `1203` 不阻止现在的源码和 dry-run 工作。
+
 ## 2026-08-14 直播合集时间排序 checkpoint
 
 - 状态：源码防复发与历史只读计划已完成，本地验证为绿；生产历史重编号与部署尚未执行。
