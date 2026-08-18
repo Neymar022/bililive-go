@@ -198,6 +198,35 @@ class RepairLibrarySidecarsTest(unittest.TestCase):
                     [episode],
                 )
 
+    def test_chronological_plan_includes_srt_video_task_references(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "伊布讲AI" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "伊布讲AI.S01E0024.2026-08-14 - Seedance2.5 实战答疑现场.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-08-14T23:30:00.123456+08:00"}}',
+                encoding="utf-8",
+            )
+            video.with_suffix(".nfo").write_text(
+                "<episodedetails><episode>24</episode><aired>2026-08-14</aired></episodedetails>",
+                encoding="utf-8",
+            )
+            srt_video = root.parent / "srt_video" / "伊布讲AI"
+            srt_video.mkdir(parents=True)
+            task_sidecar = srt_video / "task-1183.subtitle.json"
+            task_sidecar.write_text(
+                json.dumps({"output_path": str(video.resolve())}),
+                encoding="utf-8",
+            )
+
+            result = self.run_script(root, "--plan-chronological-renumber")
+
+            self.assertEqual(0, result.returncode, result.stderr)
+            self.assertIn(f"path={task_sidecar.resolve()} pointer=/output_path", result.stdout)
+            self.assertIn("references=1", result.stdout)
+
     def test_chronological_plan_refuses_missing_episode_nfo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "video"
