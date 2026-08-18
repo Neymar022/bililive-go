@@ -1856,6 +1856,351 @@ func TestPublishLiveSessionMediaAggregateRejectsUniqueLegacyMappingOutsideRecord
 	assert.Equal(t, []byte("video"), mustReadStageFile(t, firstPath))
 }
 
+func TestPublishLiveSessionMediaAggregateRecoversStaleSegmentPathFromExistingAggregateMetadata(t *testing.T) {
+	stubLiveSessionCoverExtraction(t, nil)
+	libraryRoot := t.TempDir()
+	firstRecordedAt := time.Date(2026, 8, 14, 23, 58, 41, 711438378, mediaLibraryLocation)
+	secondRecordedAt := time.Date(2026, 8, 15, 0, 30, 0, 0, mediaLibraryLocation)
+	firstPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", 24, firstRecordedAt, "第一段")
+	secondPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", 25, secondRecordedAt, "第二段")
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:734",
+		LiveSessionID: "734",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-1174", LibraryPath: firstPath, MetadataPath: firstMetadataPath},
+			{TaskID: "bililive-go-1176", LibraryPath: secondPath, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	concatCalls := 0
+	var secondConcatInputs []string
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
+		concatCalls++
+		if concatCalls == 2 {
+			secondConcatInputs = append([]string(nil), inputs...)
+		}
+		return os.WriteFile(outputPath, []byte("aggregate-video"), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(ctx context.Context, ffmpegPath string, inputPath string) (float64, error) {
+		return 60, nil
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+
+	firstAggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, firstAggregate)
+	firstHiddenPath := mustLoadStageMetadata(t, firstMetadataPath).OutputPath
+	secondHiddenPath := mustLoadStageMetadata(t, secondMetadataPath).OutputPath
+	require.FileExists(t, firstHiddenPath)
+	require.FileExists(t, secondHiddenPath)
+
+	for metadataPath, stalePath := range map[string]string{
+		firstMetadataPath:  firstPath,
+		secondMetadataPath: secondPath,
+	} {
+		metadata := mustLoadStageMetadata(t, metadataPath)
+		metadata.OutputPath = stalePath
+		delete(metadata.RecordMeta, "live_session_media_role")
+		delete(metadata.RecordMeta, "live_session_media_aggregate_path")
+		delete(metadata.RecordMeta, "live_session_segment_hidden_path")
+		require.NoError(t, subtitle.SaveMetadata(metadataPath, *metadata))
+	}
+
+	thirdRecordedAt := time.Date(2026, 8, 15, 2, 15, 44, 682232077, mediaLibraryLocation)
+	fourthRecordedAt := time.Date(2026, 8, 15, 2, 18, 10, 348844018, mediaLibraryLocation)
+	thirdPath, thirdMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", chronologicalLiveSessionEpisodeIdentity(thirdRecordedAt), thirdRecordedAt, "第三段")
+	fourthPath, fourthMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(t, libraryRoot, "伊布讲AI", chronologicalLiveSessionEpisodeIdentity(fourthRecordedAt), fourthRecordedAt, "第四段")
+	manifest.Sources = append(manifest.Sources,
+		knowledgeSessionManifestSource{TaskID: "bililive-go-1183", LibraryPath: thirdPath, MetadataPath: thirdMetadataPath},
+		knowledgeSessionManifestSource{TaskID: "bililive-go-1184", LibraryPath: fourthPath, MetadataPath: fourthMetadataPath},
+	)
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	require.Len(t, secondConcatInputs, 4)
+	assert.Equal(t, firstHiddenPath, secondConcatInputs[0])
+	assert.Equal(t, secondHiddenPath, secondConcatInputs[1])
+	assert.Equal(t, 2, concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateRecoversStaleSegmentPathWhenIdentityChanges(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	earlierRecordedAt := time.Date(2026, 8, 14, 22, 15, 0, 0, mediaLibraryLocation)
+	earlierPath, earlierMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(
+		t,
+		fixture.libraryRoot,
+		"伊布讲AI",
+		chronologicalLiveSessionEpisodeIdentity(earlierRecordedAt),
+		earlierRecordedAt,
+		"迟到的更早分段",
+	)
+	fixture.manifest.Sources = append(fixture.manifest.Sources, knowledgeSessionManifestSource{
+		TaskID:       "bililive-go-1173",
+		LibraryPath:  earlierPath,
+		MetadataPath: earlierMetadataPath,
+	})
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	assert.NotEqual(t, fixture.aggregate.LibraryPath, aggregate.LibraryPath)
+	require.Len(t, *fixture.secondConcatInputs, 3)
+	assert.Equal(t, fixture.hiddenPaths[0], (*fixture.secondConcatInputs)[1])
+	assert.Equal(t, fixture.hiddenPaths[1], (*fixture.secondConcatInputs)[2])
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsAmbiguousExistingAggregateMetadataMapping(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	metadata := mustLoadStageMetadata(t, fixture.aggregate.MetadataPath)
+	sources := metadata.RecordMeta["live_session_media_sources"].([]any)
+	firstSource := sources[0].(map[string]any)
+	conflictingPath := fixture.hiddenPaths[0] + ".conflict.mp4"
+	require.NoError(t, os.WriteFile(conflictingPath, []byte("conflict"), 0o644))
+	conflictingSource := map[string]any{
+		"metadata_path": firstSource["metadata_path"],
+		"library_path":  firstSource["library_path"],
+		"output_path":   conflictingPath,
+	}
+	metadata.RecordMeta["live_session_media_sources"] = append(sources, conflictingSource)
+	require.NoError(t, subtitle.SaveMetadata(fixture.aggregate.MetadataPath, *metadata))
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "duplicate live session aggregate source mapping")
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsIncompleteExistingAggregateMetadataMapping(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	metadata := mustLoadStageMetadata(t, fixture.aggregate.MetadataPath)
+	sources := metadata.RecordMeta["live_session_media_sources"].([]any)
+	delete(sources[0].(map[string]any), "metadata_path")
+	require.NoError(t, subtitle.SaveMetadata(fixture.aggregate.MetadataPath, *metadata))
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "incomplete live session aggregate source mapping")
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsUnsafeExistingAggregateMetadataPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		outputPath func(t *testing.T, fixture staleLiveSessionAggregateFixture) string
+	}{
+		{
+			name: "missing",
+			outputPath: func(t *testing.T, fixture staleLiveSessionAggregateFixture) string {
+				return filepath.Join(filepath.Dir(fixture.hiddenPaths[0]), "missing.mp4")
+			},
+		},
+		{
+			name: "outside hidden root",
+			outputPath: func(t *testing.T, fixture staleLiveSessionAggregateFixture) string {
+				path := filepath.Join(fixture.libraryRoot, "outside.mp4")
+				require.NoError(t, os.WriteFile(path, []byte("outside"), 0o644))
+				return path
+			},
+		},
+		{
+			name: "file symlink escape",
+			outputPath: func(t *testing.T, fixture staleLiveSessionAggregateFixture) string {
+				outsidePath := filepath.Join(fixture.libraryRoot, "outside-file.mp4")
+				require.NoError(t, os.WriteFile(outsidePath, []byte("outside"), 0o644))
+				linkPath := fixture.hiddenPaths[0] + ".link.mp4"
+				require.NoError(t, os.Symlink(outsidePath, linkPath))
+				return linkPath
+			},
+		},
+		{
+			name: "parent symlink escape",
+			outputPath: func(t *testing.T, fixture staleLiveSessionAggregateFixture) string {
+				outsideDir := t.TempDir()
+				outsidePath := filepath.Join(outsideDir, "outside-parent.mp4")
+				require.NoError(t, os.WriteFile(outsidePath, []byte("outside"), 0o644))
+				linkDir := filepath.Join(filepath.Dir(fixture.hiddenPaths[0]), "linked-parent")
+				require.NoError(t, os.Symlink(outsideDir, linkDir))
+				return filepath.Join(linkDir, filepath.Base(outsidePath))
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newStaleLiveSessionAggregateFixture(t)
+			metadata := mustLoadStageMetadata(t, fixture.aggregate.MetadataPath)
+			sources := metadata.RecordMeta["live_session_media_sources"].([]any)
+			sources[0].(map[string]any)["output_path"] = test.outputPath(t, fixture)
+			require.NoError(t, subtitle.SaveMetadata(fixture.aggregate.MetadataPath, *metadata))
+
+			aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+			require.Error(t, err)
+			assert.Nil(t, aggregate)
+			assert.Contains(t, err.Error(), "unsafe live session aggregate source output path")
+			assert.Equal(t, 1, *fixture.concatCalls)
+		})
+	}
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsExistingAggregatePathFromAnotherSession(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	metadata := mustLoadStageMetadata(t, fixture.aggregate.MetadataPath)
+	sources := metadata.RecordMeta["live_session_media_sources"].([]any)
+	otherSessionDir := filepath.Join(filepath.Dir(filepath.Dir(fixture.hiddenPaths[0])), "other-session")
+	require.NoError(t, os.MkdirAll(otherSessionDir, 0o755))
+	otherSessionPath := filepath.Join(otherSessionDir, filepath.Base(fixture.hiddenPaths[0]))
+	require.NoError(t, os.WriteFile(otherSessionPath, []byte("other-session"), 0o644))
+	sources[0].(map[string]any)["output_path"] = otherSessionPath
+	require.NoError(t, subtitle.SaveMetadata(fixture.aggregate.MetadataPath, *metadata))
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "unsafe live session aggregate source output identity")
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateAcceptsExistingAggregateCollisionPathForSameSession(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	metadata := mustLoadStageMetadata(t, fixture.aggregate.MetadataPath)
+	sources := metadata.RecordMeta["live_session_media_sources"].([]any)
+	collisionPath := strings.TrimSuffix(fixture.hiddenPaths[0], ".mp4") + ".1.mp4"
+	require.NoError(t, os.WriteFile(collisionPath, []byte("collision"), 0o644))
+	sources[0].(map[string]any)["output_path"] = collisionPath
+	require.NoError(t, subtitle.SaveMetadata(fixture.aggregate.MetadataPath, *metadata))
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	assert.Contains(t, liveSessionMetadataSourcePaths(t, aggregate.Metadata), collisionPath)
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsConflictingExistingSidecarHiddenPath(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	makeStaleAggregateFixtureInputResolvable(t, fixture, 1, fixture.hiddenPaths[1])
+	conflictingPath := strings.TrimSuffix(fixture.hiddenPaths[0], ".mp4") + ".1.mp4"
+	require.NoError(t, os.WriteFile(conflictingPath, []byte("wrong"), 0o644))
+	makeStaleAggregateFixtureInputResolvable(t, fixture, 0, conflictingPath)
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "conflicting live session segment hidden path")
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+func TestPublishLiveSessionMediaAggregateRejectsExistingSidecarHiddenPathSymlinkEscape(t *testing.T) {
+	fixture := newStaleLiveSessionAggregateFixture(t)
+	makeStaleAggregateFixtureInputResolvable(t, fixture, 1, fixture.hiddenPaths[1])
+	outsidePath := filepath.Join(fixture.libraryRoot, "outside-sidecar.mp4")
+	require.NoError(t, os.WriteFile(outsidePath, []byte("outside"), 0o644))
+	symlinkPath := fixture.hiddenPaths[0] + ".escape.mp4"
+	require.NoError(t, os.Symlink(outsidePath, symlinkPath))
+	makeStaleAggregateFixtureInputResolvable(t, fixture, 0, symlinkPath)
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", fixture.libraryRoot, &fixture.manifest)
+	require.Error(t, err)
+	assert.Nil(t, aggregate)
+	assert.Contains(t, err.Error(), "unsafe live session segment hidden path")
+	assert.Equal(t, 1, *fixture.concatCalls)
+}
+
+type staleLiveSessionAggregateFixture struct {
+	libraryRoot        string
+	manifest           knowledgeSessionManifest
+	aggregate          *liveSessionMediaAggregate
+	hiddenPaths        []string
+	concatCalls        *int
+	secondConcatInputs *[]string
+}
+
+func newStaleLiveSessionAggregateFixture(t *testing.T) staleLiveSessionAggregateFixture {
+	t.Helper()
+	stubLiveSessionCoverExtraction(t, nil)
+	libraryRoot := t.TempDir()
+	firstRecordedAt := time.Date(2026, 8, 14, 23, 58, 41, 711438378, mediaLibraryLocation)
+	secondRecordedAt := time.Date(2026, 8, 15, 0, 30, 0, 0, mediaLibraryLocation)
+	firstPath, firstMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(
+		t, libraryRoot, "伊布讲AI", chronologicalLiveSessionEpisodeIdentity(firstRecordedAt), firstRecordedAt, "第一段",
+	)
+	secondPath, secondMetadataPath, _ := writeCompletedKnowledgeSessionSidecarAt(
+		t, libraryRoot, "伊布讲AI", chronologicalLiveSessionEpisodeIdentity(secondRecordedAt), secondRecordedAt, "第二段",
+	)
+	manifest := knowledgeSessionManifest{
+		SourceID:      "live-session:734",
+		LiveSessionID: "734",
+		Sources: []knowledgeSessionManifestSource{
+			{TaskID: "bililive-go-1174", LibraryPath: firstPath, MetadataPath: firstMetadataPath},
+			{TaskID: "bililive-go-1176", LibraryPath: secondPath, MetadataPath: secondMetadataPath},
+		},
+	}
+
+	concatCalls := 0
+	secondConcatInputs := make([]string, 0, 3)
+	oldConcat := liveSessionMediaConcat
+	oldProbeDuration := liveSessionMediaProbeDuration
+	liveSessionMediaConcat = func(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
+		concatCalls++
+		if concatCalls == 2 {
+			secondConcatInputs = append(secondConcatInputs, inputs...)
+		}
+		return os.WriteFile(outputPath, []byte("aggregate-video"), 0o644)
+	}
+	liveSessionMediaProbeDuration = func(ctx context.Context, ffmpegPath string, inputPath string) (float64, error) {
+		return 60, nil
+	}
+	t.Cleanup(func() {
+		liveSessionMediaConcat = oldConcat
+		liveSessionMediaProbeDuration = oldProbeDuration
+	})
+
+	aggregate, err := publishLiveSessionMediaAggregate(context.Background(), "", libraryRoot, &manifest)
+	require.NoError(t, err)
+	require.NotNil(t, aggregate)
+	hiddenPaths := []string{
+		mustLoadStageMetadata(t, firstMetadataPath).OutputPath,
+		mustLoadStageMetadata(t, secondMetadataPath).OutputPath,
+	}
+	for metadataPath, stalePath := range map[string]string{
+		firstMetadataPath:  firstPath,
+		secondMetadataPath: secondPath,
+	} {
+		metadata := mustLoadStageMetadata(t, metadataPath)
+		metadata.OutputPath = stalePath
+		delete(metadata.RecordMeta, "live_session_media_role")
+		delete(metadata.RecordMeta, "live_session_media_aggregate_path")
+		delete(metadata.RecordMeta, "live_session_segment_hidden_path")
+		require.NoError(t, subtitle.SaveMetadata(metadataPath, *metadata))
+	}
+
+	return staleLiveSessionAggregateFixture{
+		libraryRoot:        libraryRoot,
+		manifest:           manifest,
+		aggregate:          aggregate,
+		hiddenPaths:        hiddenPaths,
+		concatCalls:        &concatCalls,
+		secondConcatInputs: &secondConcatInputs,
+	}
+}
+
+func makeStaleAggregateFixtureInputResolvable(t *testing.T, fixture staleLiveSessionAggregateFixture, index int, outputPath string) {
+	t.Helper()
+	metadataPath := fixture.manifest.Sources[index].MetadataPath
+	metadata := mustLoadStageMetadata(t, metadataPath)
+	metadata.OutputPath = outputPath
+	metadata.RecordMeta["live_session_segment_hidden_path"] = outputPath
+	require.NoError(t, subtitle.SaveMetadata(metadataPath, *metadata))
+}
+
 func knowledgeSessionTestContext(taskID int64) *pipeline.PipelineContext {
 	return &pipeline.PipelineContext{
 		TaskID: taskID,

@@ -188,6 +188,28 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	if metadataExists && aggregateMetadata.RecordMeta["live_session_media_role"] != "aggregate" {
 		metadataExists = false
 	}
+	if manifest.PreviousAggregatePath != "" &&
+		!sameCleanPath(manifest.PreviousAggregatePath, aggregatePath) &&
+		fileExists(manifest.PreviousAggregatePath) {
+		previousStem := strings.TrimSuffix(manifest.PreviousAggregatePath, filepath.Ext(manifest.PreviousAggregatePath))
+		previousMetadata, previousMetadataExists := loadCompletedSubtitleMetadata(
+			previousStem+".subtitle.json",
+			manifest.PreviousAggregatePath,
+			previousStem+".srt",
+			previousStem+".ass",
+		)
+		if !previousMetadataExists || previousMetadata.RecordMeta["live_session_media_role"] != "aggregate" {
+			return nil, fmt.Errorf("load previous live session aggregate metadata: %s", manifest.PreviousAggregatePath)
+		}
+		if err := restoreLiveSessionSegmentPathsFromAggregateMetadata(absoluteLibraryRoot, manifest, inputs, previousMetadata); err != nil {
+			return nil, fmt.Errorf("restore previous live session aggregate sources: %w", err)
+		}
+	}
+	if metadataExists {
+		if err := restoreLiveSessionSegmentPathsFromAggregateMetadata(absoluteLibraryRoot, manifest, inputs, aggregateMetadata); err != nil {
+			return nil, fmt.Errorf("restore live session aggregate sources: %w", err)
+		}
+	}
 	if metadataExists &&
 		aggregateMetadata.RecordMeta["live_session_media_content_hash"] != knowledgeSessionManifestContentHash(*manifest) {
 		metadataExists = false
@@ -932,6 +954,211 @@ func updateLiveSessionAggregateSourcePaths(metadata *subtitle.Metadata, outputPa
 			}
 		}
 	}
+}
+
+type liveSessionAggregateSourceKey struct {
+	metadataPath string
+	libraryPath  string
+}
+
+func restoreLiveSessionSegmentPathsFromAggregateMetadata(
+	libraryRoot string,
+	manifest *knowledgeSessionManifest,
+	inputs []knowledgeSessionPayloadInput,
+	metadata subtitle.Metadata,
+) error {
+	rawSources, exists := metadata.RecordMeta["live_session_media_sources"]
+	if !exists {
+		return nil
+	}
+	_, hiddenRoot, err := liveSessionSegmentRoots(libraryRoot)
+	if err != nil {
+		return err
+	}
+	inputByKey := make(map[liveSessionAggregateSourceKey]int, len(inputs))
+	currentPaths := make(map[liveSessionAggregateSourceKey]string, len(inputs))
+	currentHiddenPaths := make(map[liveSessionAggregateSourceKey]string, len(inputs))
+	for index, input := range inputs {
+		key := liveSessionAggregateSourceKey{
+			metadataPath: filepath.Clean(strings.TrimSpace(input.MetadataPath)),
+			libraryPath:  filepath.Clean(strings.TrimSpace(input.LibraryPath)),
+		}
+		inputByKey[key] = index
+		if input.Metadata != nil && input.Metadata.RecordMeta != nil {
+			hiddenPath, _ := input.Metadata.RecordMeta["live_session_segment_hidden_path"].(string)
+			hiddenPath = strings.TrimSpace(hiddenPath)
+			if hiddenPath != "" && fileExists(hiddenPath) {
+				resolvedHiddenPath, err := resolveLiveSessionPathInsideRoot(hiddenRoot, hiddenPath)
+				if err != nil {
+					if !sameCleanPath(hiddenPath, input.LibraryPath) {
+						return fmt.Errorf("unsafe live session segment hidden path: %s", hiddenPath)
+					}
+				} else if !liveSessionHiddenPathMatchesInput(libraryRoot, manifest, input, resolvedHiddenPath) {
+					return fmt.Errorf("unsafe live session segment hidden path: %s", hiddenPath)
+				} else {
+					currentHiddenPaths[key] = resolvedHiddenPath
+				}
+			}
+		}
+		currentPath, err := resolveLiveSessionSegmentVideoPath(input)
+		if err != nil {
+			continue
+		}
+		resolvedCurrentPath, insideErr := resolveLiveSessionPathInsideRoot(hiddenRoot, currentPath)
+		if insideErr == nil {
+			if !liveSessionHiddenPathMatchesInput(libraryRoot, manifest, input, resolvedCurrentPath) {
+				return fmt.Errorf("unsafe live session segment path: %s", currentPath)
+			}
+			currentPaths[key] = resolvedCurrentPath
+			currentHiddenPaths[key] = resolvedCurrentPath
+			continue
+		}
+		if !sameCleanPath(currentPath, input.LibraryPath) {
+			return fmt.Errorf("unsafe live session segment path: %s", currentPath)
+		}
+		currentPaths[key] = filepath.Clean(currentPath)
+	}
+
+	sources := make([]map[string]any, 0)
+	switch typedSources := rawSources.(type) {
+	case []map[string]any:
+		sources = append(sources, typedSources...)
+	case []any:
+		for index, rawSource := range typedSources {
+			source, ok := rawSource.(map[string]any)
+			if !ok {
+				return fmt.Errorf("invalid live session aggregate source mapping at index %d", index)
+			}
+			sources = append(sources, source)
+		}
+	default:
+		return fmt.Errorf("invalid live session aggregate source mappings")
+	}
+
+	mappings := make(map[liveSessionAggregateSourceKey]string, len(sources))
+	seenKeys := make(map[liveSessionAggregateSourceKey]struct{}, len(sources))
+	resolvedOutputs := make(map[string]liveSessionAggregateSourceKey, len(sources))
+	for index, source := range sources {
+		outputPath, _ := source["output_path"].(string)
+		metadataPath, _ := source["metadata_path"].(string)
+		libraryPath, _ := source["library_path"].(string)
+		outputPath = strings.TrimSpace(outputPath)
+		metadataPath = strings.TrimSpace(metadataPath)
+		libraryPath = strings.TrimSpace(libraryPath)
+		if outputPath == "" || metadataPath == "" || libraryPath == "" {
+			return fmt.Errorf("incomplete live session aggregate source mapping at index %d", index)
+		}
+		key := liveSessionAggregateSourceKey{
+			metadataPath: filepath.Clean(metadataPath),
+			libraryPath:  filepath.Clean(libraryPath),
+		}
+		if _, duplicate := seenKeys[key]; duplicate {
+			return fmt.Errorf("duplicate live session aggregate source mapping at index %d", index)
+		}
+		seenKeys[key] = struct{}{}
+		resolvedOutput, err := resolveLiveSessionPathInsideRoot(hiddenRoot, outputPath)
+		if err != nil {
+			currentPath, hasCurrentPath := currentPaths[key]
+			knownLegacyPath := sameCleanPath(outputPath, libraryPath) && hasCurrentPath &&
+				(sameCleanPath(currentPath, libraryPath) || currentHiddenPaths[key] != "")
+			if knownLegacyPath {
+				continue
+			}
+			return fmt.Errorf("unsafe live session aggregate source output path at index %d: %w", index, err)
+		}
+		if previousKey, duplicate := resolvedOutputs[resolvedOutput]; duplicate && previousKey != key {
+			return fmt.Errorf("duplicate live session aggregate source output path at index %d", index)
+		}
+		if inputIndex, matched := inputByKey[key]; matched &&
+			!liveSessionHiddenPathMatchesInput(libraryRoot, manifest, inputs[inputIndex], resolvedOutput) {
+			return fmt.Errorf("unsafe live session aggregate source output identity at index %d", index)
+		}
+		mappings[key] = outputPath
+		resolvedOutputs[resolvedOutput] = key
+	}
+
+	for index := range inputs {
+		if inputs[index].Metadata == nil {
+			continue
+		}
+		key := liveSessionAggregateSourceKey{
+			metadataPath: filepath.Clean(strings.TrimSpace(inputs[index].MetadataPath)),
+			libraryPath:  filepath.Clean(strings.TrimSpace(inputs[index].LibraryPath)),
+		}
+		outputPath, ok := mappings[key]
+		if !ok {
+			continue
+		}
+		resolvedOutputPath, err := resolveLiveSessionPathInsideRoot(hiddenRoot, outputPath)
+		if err != nil {
+			return err
+		}
+		if currentPath := currentHiddenPaths[key]; currentPath != "" {
+			if !sameCleanPath(currentPath, resolvedOutputPath) {
+				return fmt.Errorf("conflicting live session segment hidden path: %s", inputs[index].MetadataPath)
+			}
+			continue
+		}
+		inputs[index].Metadata.RecordMeta = copyRecordMeta(inputs[index].Metadata.RecordMeta)
+		inputs[index].Metadata.RecordMeta["live_session_segment_hidden_path"] = outputPath
+	}
+	return nil
+}
+
+func resolveLiveSessionPathInsideRoot(root, path string) (string, error) {
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", err
+	}
+	resolvedPath, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(resolvedPath)
+	if err != nil {
+		return "", err
+	}
+	if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("path is not a regular file: %s", path)
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedPath)
+	if err != nil || relative == "." || relative == ".." ||
+		strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", fmt.Errorf("path resolves outside live session hidden root: %s", path)
+	}
+	return resolvedPath, nil
+}
+
+func liveSessionHiddenPathMatchesInput(
+	libraryRoot string,
+	manifest *knowledgeSessionManifest,
+	input knowledgeSessionPayloadInput,
+	resolvedPath string,
+) bool {
+	if manifest == nil || strings.TrimSpace(resolvedPath) == "" {
+		return false
+	}
+	expectedPath, err := hiddenLiveSessionSegmentPath(libraryRoot, manifest, input.LibraryPath, input.LibraryPath)
+	if err != nil {
+		return false
+	}
+	expectedDir, err := filepath.EvalSymlinks(filepath.Dir(expectedPath))
+	if err != nil || !sameCleanPath(filepath.Dir(resolvedPath), expectedDir) {
+		return false
+	}
+	expectedBase := filepath.Base(expectedPath)
+	resolvedBase := filepath.Base(resolvedPath)
+	if resolvedBase == expectedBase {
+		return true
+	}
+	extension := filepath.Ext(expectedBase)
+	expectedStem := strings.TrimSuffix(expectedBase, extension)
+	resolvedStem := strings.TrimSuffix(resolvedBase, filepath.Ext(resolvedBase))
+	if filepath.Ext(resolvedBase) != extension || !strings.HasPrefix(resolvedStem, expectedStem+".") {
+		return false
+	}
+	collisionIndex, err := strconv.Atoi(strings.TrimPrefix(resolvedStem, expectedStem+"."))
+	return err == nil && collisionIndex > 0
 }
 
 func saveLiveSessionMetadataAtomically(path string, metadata subtitle.Metadata) (bool, error) {
