@@ -2,8 +2,13 @@ package subtitle
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
+)
+
+var chronologicalDisplayFilenamePattern = regexp.MustCompile(
+	`^(?P<alias_name>.+?)\.S\d{2}E\d{10,}(?:-S\d{2}E\d{10,})?\.(?P<recorded_date>\d{4}-\d{2}-\d{2}) - (?P<title>.+)$`,
 )
 
 // MediaDisplayTitle 返回面向用户的录屏标题，并保留原始路径用于身份、关联和文件操作。
@@ -11,9 +16,9 @@ func MediaDisplayTitle(path string) string {
 	base := filepath.Base(path)
 	stem := strings.TrimSuffix(base, filepath.Ext(base))
 
-	if match := libraryEpisodeFilenamePattern.FindStringSubmatch(stem); match != nil {
-		date := match[libraryEpisodeFilenamePattern.SubexpIndex("recorded_date")]
-		title := strings.TrimSpace(match[libraryEpisodeFilenamePattern.SubexpIndex("title")])
+	if match := chronologicalDisplayFilenamePattern.FindStringSubmatch(stem); match != nil {
+		date := match[chronologicalDisplayFilenamePattern.SubexpIndex("recorded_date")]
+		title := strings.TrimSpace(match[chronologicalDisplayFilenamePattern.SubexpIndex("title")])
 		if date != "" && title != "" {
 			return date + " - " + title
 		}

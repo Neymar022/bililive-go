@@ -1663,13 +1663,18 @@ func writeLiveSessionEpisodeNFO(aggregatePath string, inputs []knowledgeSessionP
 	}
 	platform := aggregatePlatform(inputs)
 	title := fmt.Sprintf("%s - %s", episode.Date, episode.Title)
+	sortTitle := fmt.Sprintf(
+		"%s - %s",
+		episode.Alias,
+		recordedAt.In(mediaLibraryLocation).Format("2006-01-02 15-04-05"),
+	)
 	plot := fmt.Sprintf("%s | 主播: %s | 标题: %s | 同场直播聚合成品", platform, episode.Alias, episode.Title)
 	content := strings.Join([]string{
 		`<?xml version="1.0" encoding="UTF-8" standalone="yes"?>`,
 		"<episodedetails>",
 		fmt.Sprintf("  <title>%s</title>", xmlEscape(title)),
 		fmt.Sprintf("  <showtitle>%s</showtitle>", xmlEscape(episode.Alias)),
-		fmt.Sprintf("  <sorttitle>%s</sorttitle>", xmlEscape(filepath.Base(aggregatePath))),
+		fmt.Sprintf("  <sorttitle>%s</sorttitle>", xmlEscape(sortTitle)),
 		"  <season>1</season>",
 		fmt.Sprintf("  <episode>%d</episode>", episode.Episode),
 		fmt.Sprintf("  <plot>%s</plot>", xmlEscape(plot)),

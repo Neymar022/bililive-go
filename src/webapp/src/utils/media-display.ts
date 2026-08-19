@@ -3,7 +3,7 @@ export interface MediaDisplayRecord {
   display_name?: string;
 }
 
-const libraryEpisodeName = /^.+?\.S\d+E\d+(?:-S\d+E\d+)?\.(\d{4}-\d{2}-\d{2})\s+-\s+(.+?)(?:\.[^.]+)?$/;
+const libraryEpisodeName = /^.+?\.S\d+E\d{10,}(?:-S\d+E\d{10,})?\.(\d{4}-\d{2}-\d{2})\s+-\s+(.+?)(?:\.[^.]+)?$/;
 const normalizedRecordingName = /^.+?\s+-\s+(\d{4}-\d{2}-\d{2}\s+\d{2}-\d{2}-\d{2})\s+-\s+(.+?)(?:\.[^.]+)?$/;
 
 export function mediaDisplayTitle(path: string): string {
@@ -17,4 +17,8 @@ export function mediaDisplayTitle(path: string): string {
 
 export function mediaDisplayName(record: MediaDisplayRecord): string {
   return record.display_name || mediaDisplayTitle(record.name);
+}
+
+export function mediaDisplayList(records: MediaDisplayRecord[]): string {
+  return records.map(mediaDisplayName).join('、');
 }

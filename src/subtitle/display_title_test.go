@@ -2,6 +2,7 @@ package subtitle
 
 import (
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -28,6 +29,18 @@ func TestMediaDisplayTitleUsesNormalizedRecordingTime(t *testing.T) {
 
 func TestMediaDisplayTitleKeepsUnmatchedBasename(t *testing.T) {
 	assert.Equal(t, "cover.jpg", MediaDisplayTitle("/video/cover.jpg"))
+}
+
+func TestMediaDisplayTitleDoesNotRewriteLegacyShortEpisodeNumbers(t *testing.T) {
+	path := "/video/主播/Season 01/主播.S01E0047.2026-05-27 - 房间标题.mp4"
+
+	assert.Equal(t, filepath.Base(path), MediaDisplayTitle(path))
+}
+
+func TestMediaDisplayTitleKeepsDotsInsideRoomTitle(t *testing.T) {
+	path := "/video/主播/Season 01/主播.S01E1673386692282296.2026-08-18 - Go1.25 与 AI.mp4"
+
+	assert.Equal(t, "2026-08-18 - Go1.25 与 AI", MediaDisplayTitle(path))
 }
 
 func TestEpisodeNFOSeparatesDisplayTitleFromChronologicalIdentity(t *testing.T) {

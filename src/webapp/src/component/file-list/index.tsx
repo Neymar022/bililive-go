@@ -18,7 +18,7 @@ import Utils from "../../utils/common";
 import './file-list.css';
 import Artplayer from "artplayer";
 import mpegtsjs from "mpegts.js";
-import { mediaDisplayName } from "../../utils/media-display";
+import { mediaDisplayList, mediaDisplayName } from "../../utils/media-display";
 
 const api = new API();
 
@@ -774,7 +774,7 @@ const FileList: React.FC = () => {
                     <div>{confirmContent}</div>
                     {withAss.length > 0 && (
                         <div style={{ marginTop: 8, fontSize: '12px', color: '#8c8c8c' }}>
-                            可烧录: {withAss.map(f => f.name).join('、')}
+                            可烧录: {mediaDisplayList(withAss)}
                         </div>
                     )}
                 </div>

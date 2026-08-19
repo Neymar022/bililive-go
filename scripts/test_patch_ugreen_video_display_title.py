@@ -34,7 +34,7 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
         self.assertIn('(0,r.TI)(i)?a||`${(0,r.WP)(s)}`', patched)
         self.assertIn('t===g.OY?i||(0,r.WP)(a)', patched)
         self.assertIn(
-            'e.isUnRecognizedEpisode(i.episode)?i.ep_name||e.UNRECOGNIZED_EPISODE_TEXT:i.episode',
+            'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
             patched,
         )
         self.assertIn('S01E1673386692282296', patched)

@@ -24,7 +24,7 @@ PATCHES = {
     ),
     "serial": (
         'e.isUnRecognizedEpisode(i.episode)?e.UNRECOGNIZED_EPISODE_TEXT:i.episode',
-        'e.isUnRecognizedEpisode(i.episode)?i.ep_name||e.UNRECOGNIZED_EPISODE_TEXT:i.episode',
+        'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
     ),
 }
 
