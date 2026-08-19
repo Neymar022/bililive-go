@@ -2211,7 +2211,7 @@ func buildKnowledgeLiveSessionAggregateIngestPayload(
 		TaskID:             knowledgeTaskID(ctx),
 		LiveSessionID:      sessionID,
 		Host:               host,
-		Title:              strings.TrimSuffix(filepath.Base(aggregate.LibraryPath), filepath.Ext(aggregate.LibraryPath)),
+		Title:              subtitle.MediaDisplayTitle(aggregate.LibraryPath),
 		Topic:              topic,
 		SourceVideoPath:    aggregate.LibraryPath,
 		SubtitlePath:       aggregate.Metadata.SRTPath,

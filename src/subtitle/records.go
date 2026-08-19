@@ -13,6 +13,7 @@ import (
 
 type Record struct {
 	RelativePath           string     `json:"relative_path"`
+	DisplayTitle           string     `json:"display_title"`
 	VideoPath              string     `json:"video_path"`
 	ASSPath                string     `json:"ass_path,omitempty"`
 	SRTPath                string     `json:"srt_path,omitempty"`
@@ -166,6 +167,7 @@ func buildRecord(videoPath, libraryRoot, sourceRoot string, retentionDays int) (
 
 	record := Record{
 		RelativePath: filepath.ToSlash(relativePath),
+		DisplayTitle: MediaDisplayTitle(videoPath),
 		VideoPath:    videoPath,
 		Status:       StatusIdle,
 	}
@@ -209,6 +211,11 @@ func buildRecord(videoPath, libraryRoot, sourceRoot string, retentionDays int) (
 				record.RecordedAt = &parsed
 			}
 		}
+		recordedAt := time.Time{}
+		if record.RecordedAt != nil {
+			recordedAt = *record.RecordedAt
+		}
+		record.DisplayTitle = RecordDisplayTitle(videoPath, record.RoomName, recordedAt)
 		if metadata.CompletedAt != nil {
 			deadline := metadata.CompletedAt.Add(time.Duration(retentionDays) * 24 * time.Hour)
 			record.RetentionDeadline = &deadline

@@ -59,6 +59,7 @@ func TestListRecordsReadsSidecarMetadata(t *testing.T) {
 	assert.Equal(t, "large-v3-turbo", records[0].ActualModel)
 	assert.Equal(t, "remote-mac", records[0].ActualBurnProvider)
 	assert.Equal(t, "抖音", records[0].Platform)
+	assert.Equal(t, "2025-11-15 - 标题", records[0].DisplayTitle)
 	assert.Equal(t, assPath, records[0].ASSPath)
 	assert.Equal(t, "vizard_classic_cn", records[0].RenderPreset)
 	assert.Equal(t, StatusCompleted, records[0].RendererStatus)

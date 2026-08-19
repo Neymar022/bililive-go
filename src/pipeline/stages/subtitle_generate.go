@@ -112,7 +112,7 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
 				return nil, err
 			}
-			s.logs += fmt.Sprintf("字幕结果已存在，跳过转写: %s\n", filepath.Base(libraryPath))
+			s.logs += fmt.Sprintf("字幕结果已存在，跳过转写: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 			output = append(output,
 				pipeline.FileInfo{
 					Path:       libraryPath,
@@ -214,7 +214,7 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, err
 		}
 
-		s.logs += fmt.Sprintf("字幕生成完成: %s\n", filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("字幕生成完成: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 
 		output = append(output,
 			pipeline.FileInfo{

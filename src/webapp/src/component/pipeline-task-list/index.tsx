@@ -13,6 +13,7 @@ import {
   StopOutlined
 } from '@ant-design/icons';
 import './index.css';
+import { mediaDisplayTitle } from '../../utils/media-display';
 
 const { Text, Paragraph } = Typography;
 const { Panel } = Collapse;
@@ -336,8 +337,7 @@ class PipelineTaskList extends Component<object, PipelineTaskListState> {
 
   formatFileName = (path: string): string => {
     if (!path) return '-';
-    const parts = path.split(/[/\\]/);
-    return parts[parts.length - 1];
+    return mediaDisplayTitle(path);
   };
 
   formatDuration = (startTime: string | undefined, endTime: string | undefined): string => {
