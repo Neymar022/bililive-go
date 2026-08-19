@@ -510,3 +510,11 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 最终运行态为 Bililive `/api/info.git_hash=44e87a42590f54c4892d79a8386f5cd535b15390`、BiliNote backend/frontend OCI revision `cac9e18ff248885de32263e353038f1d7a3ee5e2`；Bililive root、BiliNote health/root 和 worker `:8091/openapi.json` 均 HTTP `200`，所有目标容器 running，app/backend/frontend/nginx restart count 为 `0`。活动 Compose 仍引用 Docker Hub `latest` 且内容与备份一致；运行 app digest 为 `sha256:272f6609...2fa4`。
 - 展示与身份契约后验为绿：Bililive `/api/subtitles/records` 共 `422` 条，`display_title` 长 identity 为 `0`；UGREEN DB 的 `394` 条长 episode number 全部保留，同时 `394` 条 episode name 均为日期标题、含长 identity 的 name 为 `0`。汤山老王样本证明 DB name 为 `2026-05-12 - ...`，底层 file name 仍保留 `S01E1605432872139912`。可见 episode NFO clean title `777`、长 identity title `0`；inline filesystem/UGREEN file_info/建筑师电影关系仍为 `0/0/0`。
 - 媒体与恢复后验为绿：部署前后 MP4 均为 `696` 个、`976,363,762,127` bytes，清单完全一致；没有删除或重命名 MP4。`chronological-renumber-20260815-082317` 约 `735G` 恢复备份继续保留。生产 bundle/API/DB/NFO seam 已证明日期可见且长 identity 不作为 display label；当前仅剩用户端已打开页面可能持有旧缓存，需要重新进入影视中心后做一次视觉确认，不构成生产数据或部署回滚条件。
+
+## 2026-08-19 UGREEN 选集交互与封面复核（执行中）
+
+- 用户真实页面把两个问题固定到不同 seam：序号视图因上一版把超长 episode 标签改成空串而显示成不可判断的灰块；卡片视图的 `HorizontalList` 子组件已发出 `select`，但剧集页父组件未绑定 `handleChangeEpisode`，且通用居中滚动会让首卡停在左侧裁切位置。目标是序号显示 `MM-DD` 且 tooltip 保留完整日期标题、卡片整卡可点击、首卡完整可见，同时继续保留底层 MP4/NFO/DB/JSON/manifest 的长 recordedAt identity。
+- 封面不是媒体缺失：`建筑师 linkai` 的 UGREEN `getTV` 53 集均有同 stem `cover_path`，另有合集 `poster.jpg`；54/54 Bililive 资产和使用当前 UGREEN credential 的 `getImaStream` 均返回可解码 JPEG。页面缓存中的 15 个灰封面使用过期图片授权并返回 `path ... is illegal`，用当前 credential 重放同一路径 15/15 成功。因此本轮不重写 NFO/JPG、不重新抽帧，也不运行历史 sidecar repair。
+- 源码 fixed point 为 `origin/master=5cf730d2b6257c9128d4b411adf34cf9bce6f93a`，隔离分支提交 `2223702650e752d5e0b2dbacb5399e5f24b28378`。patcher 只接受 vendor、已部署 title-v1 或 final 三种完整 bundle 状态，未知混合态 fail closed；对 JS/GZ 先全量预检、备份后原子写入，第二资产失败会回滚全部已尝试资产。
+- 当前验证：Python 回归 `7/7`、真实生产 bundle dry-run、补丁后 `node --check`、`make dev`、使用 Node `24.19.0` 的 `make build-web dev`、`make lint`、`make test` 和 `git diff --check` 均通过。`make test` 首轮唯一 subtitle 重试计数时序失败经同一测试 `10/10` 定向通过后，整套复跑通过，未改动 subtitle 源码。
+- 剩余 rollout：正式 Standards/Spec 双轴 review、中文 PR/CI/合并；生产写前重新确认录制/流水线/update/媒体写入门禁，备份 UGREEN JS/GZ 后只应用前端 vendor patch。最终必须在真实影视中心证明序号日期可见、整卡点击生效、首卡不裁切且 53 集加 poster 封面可见；不得删除或重命名 MP4，也不得清理 `chronological-renumber-20260815-082317` 恢复备份。
