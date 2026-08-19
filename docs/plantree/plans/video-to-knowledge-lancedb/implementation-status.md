@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-07-30
+更新时间：2026-08-19
 
 ## State Ownership
 
@@ -499,3 +499,14 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 最终运行态：app HTTP `200`、SHA `62ebec4...`、restart `0`；worker OpenAPI HTTP `200`、运行 revision `e5bafd...`，夜间批次期间累计 restart count 为 `1`，当前 running。没有因日期修复重启容器或 UGREEN video 服务。
 - 清理按保守边界完成：仅删除无进程占用、未被 Compose/容器引用的 `/tmp/bililive-app-62ebec4.tar`。`p6-monitor-http` 虽无 Compose/owner labels 且 bind source 已不存在，但停止容器仍唯一引用 `local/bililive-go-subtitle-worker:p6-mac-mlx-20260507`，因此容器和镜像保留；其它历史 local/sha/rollback 镜像 provenance 不足，也未删除。`chronological-renumber-20260815-082317` 约 735GB 恢复备份继续保留。
 - 当前 Goal 完成：源码 TDD/focused/正式双轴 review、PR/CI/合并与必要 app 部署、1183/1184 安全恢复、1203 自然增量验证、5 行日期校正、生产后验、保守清理及 plan-tree closure 均已完成；没有删除任何 MP4。
+
+## 2026-08-19 recordedAt 展示标题修复（生产已部署）
+
+- 根因已固定：episode NFO `<title>` 与 UGREEN `ug_television_episode.name` 均为干净的 `YYYY-MM-DD - 房间标题`；长 recordedAt identity 只保留在底层文件名、NFO episode 与 DB episode number。UGREEN 对超长 episode 回退 basename 的 recent/card/serial 三处消费 seam 才会把 identity 暴露给用户。
+- bililive-go 源码发布已完成：PR #45 的统一 Go/Web display-title 契约由 PR #46 补齐聚合 NFO `sorttitle`、批量烧录确认和 UGREEN serial 空副标签，并严格只清理 10 位以上 recordedAt identity。PR #46 合并为 `master=44e87a42590f54c4892d79a8386f5cd535b15390`；build/test/lint/E2E 通过，`claude-review` 仅因仓库未安装 GitHub App 返回 401；Docker workflow `32216325861` 成功发布 `sha-44e87a4` 和 `latest`。
+- BiliNote 源码发布已完成：后端 API 增 `display_title` 而保留 raw title/path/source identity，前端覆盖历史、详情、知识来源/筛选/重建、设置预览和 task polling；新 Markdown 导出清理 heading/标题字段/链接可见标签，但保留完整路径、inline/reference target 和代码内容，不迁移历史 SQLite/raw title/旧导出。前后端共用 display contract fixture；相关 backend `89` 项、frontend `158` 项、typecheck/lint/build、graphify 和最终双轴 review 均通过。PR #59 合并为 `master=cac9e18ff248885de32263e353038f1d7a3ee5e2`；镜像 workflow `32216325041` 于 `2026-08-19 12:59 +08` 成功完成 backend/frontend 多架构发布。
+- 用户于 `2026-08-19 15:12 +08` 明确授权立即部署并保留两项计划任务。写前新鲜门禁为 active `0`、running `0`、update `idle`、最近媒体写入 `0`、ffmpeg `0`；pending `1213/1214` 的 ID、stage、`not_before` 与 `srt_video` 输入在部署前后完全一致，没有强跑、取消或改写。旧等待 driver 仅在 `sleep 300` 子进程中等待，终止该本任务进程及其 sleep 后确认 lock 释放、完成 marker/部署备份均不存在，再启动唯一授权 driver。
+- 生产部署于 `15:16:45 +08` 完成，回滚根为 `/volume2/docker/bililive-go/backups/recorded-at-display-v2-20260819-151449/`。备份包含活动 Bililive/BiliNote Compose、UGREEN 原始 JS/GZ、容器与镜像 inspect、媒体清单、pending 前后快照、patcher 和 before/after 校验。UGREEN 两个资产均原子补丁并复核为 `already-patched`；补丁后 SHA-256 分别为 `211d8a5a...31416` 和 `430ec41e...b620`。只重建 `bililive`、BiliNote backend/frontend；subtitle-worker 与 BiliNote nginx 的 container ID、image 和 StartedAt 全部保持不变。
+- 最终运行态为 Bililive `/api/info.git_hash=44e87a42590f54c4892d79a8386f5cd535b15390`、BiliNote backend/frontend OCI revision `cac9e18ff248885de32263e353038f1d7a3ee5e2`；Bililive root、BiliNote health/root 和 worker `:8091/openapi.json` 均 HTTP `200`，所有目标容器 running，app/backend/frontend/nginx restart count 为 `0`。活动 Compose 仍引用 Docker Hub `latest` 且内容与备份一致；运行 app digest 为 `sha256:272f6609...2fa4`。
+- 展示与身份契约后验为绿：Bililive `/api/subtitles/records` 共 `422` 条，`display_title` 长 identity 为 `0`；UGREEN DB 的 `394` 条长 episode number 全部保留，同时 `394` 条 episode name 均为日期标题、含长 identity 的 name 为 `0`。汤山老王样本证明 DB name 为 `2026-05-12 - ...`，底层 file name 仍保留 `S01E1605432872139912`。可见 episode NFO clean title `777`、长 identity title `0`；inline filesystem/UGREEN file_info/建筑师电影关系仍为 `0/0/0`。
+- 媒体与恢复后验为绿：部署前后 MP4 均为 `696` 个、`976,363,762,127` bytes，清单完全一致；没有删除或重命名 MP4。`chronological-renumber-20260815-082317` 约 `735G` 恢复备份继续保留。生产 bundle/API/DB/NFO seam 已证明日期可见且长 identity 不作为 display label；当前仅剩用户端已打开页面可能持有旧缓存，需要重新进入影视中心后做一次视觉确认，不构成生产数据或部署回滚条件。

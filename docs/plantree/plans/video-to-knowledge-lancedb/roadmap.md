@@ -16,6 +16,7 @@
 - UGREEN 影视中心 inline live-session 历史污染已安全修复：187 个分段 MP4 全部保留并迁到媒体库根同级隐藏目录，195 个有效 JSON 原子更新 402 次引用；UGREEN watcher 自然清理 76 个错误 `file_info` 索引和对应错误电影/重复剧集，无需手写数据库事务。三断言红灯连续两次为 0，详细证据和回滚见 [迁移主题](topics/2026-07-29-ugreen-inline-live-segment-relocation.md)。
 - inline live-session 库外隐藏防复发已通过 PR #37 合并 master 并部署 UGREEN 原生 Docker 项目；运行 SHA、镜像 revision、三断言、187 个媒体、402 个引用和 UGREEN DB 后验均通过，只重建 app 容器，worker 与 video 服务未重启。
 - UGREEN 合集稳定身份与封面续修已通过 PR #39 合并 master 并部署：旭东唯一合集具有有效独立 poster、DB cover 和 NFO poster thumb；天津只剩唯一 NFO category，无 singleton 或错误文件关系。生产运行 SHA 为 `3060d134f39a003bb17aa2ae93d50d371557ead3`，只重建 app，worker 未重建；部署前后 509 个 MP4 无缺失、增加或变更，三断言、JSON 解析和外置引用后验均为 GREEN。
+- recordedAt 展示标题修复已通过 Bililive-go PR #45/#46 与 BiliNote PR #59 合并发布并完成生产部署：底层长 episode identity 与文件路径保持不变，UGREEN/Bililive/BiliNote display label 统一为日期标题；运行 SHA/revision、UGREEN JS/GZ 三 seam、422 条 API 标题、394 条 UGREEN episode name、777 个 NFO title、服务健康、pending 保留及 696 个 MP4 数量/字节守恒均通过。
 
 ## In Progress
 
