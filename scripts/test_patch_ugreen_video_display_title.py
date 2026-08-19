@@ -22,7 +22,10 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
             'getEpisodeTitle(e){const{episode:t,ep_name:i,selectedPath:a}=e;'
             'return t===g.OY?(0,r.WP)(a):i?this.$t("home.currentEpisode",[t])+"："+i:'
             'this.$t("home.currentEpisode",[t])}'
+            'e._l(e.currentGroupEpisodeList,function(i,a){return t("span",'
+            '{attrs:{title:e.getEpisodeTitle(i)}},['
             'e.isUnRecognizedEpisode(i.episode)?e.UNRECOGNIZED_EPISODE_TEXT:i.episode'
+            '])})'
             't("HorizontalList",{ref:"cardView",attrs:{sourceData:e.currentGroupEpisodeList,'
             'imgWidth:182,imgHeight:170,className:"card-list"},scopedSlots:e._u([])})'
             't("div",{staticClass:"card-item"},[])'
@@ -59,10 +62,11 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
         self.assertIn('t===g.OY?i||(0,r.WP)(a)', patched)
         self.assertIn(
             'e.isUnRecognizedEpisode(i.episode)?'
-            '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
-            '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):i.episode',
+            'e.episodeList.findIndex(e=>e.ug_television_episode_id==='
+            'i.ug_television_episode_id)+1||a+1:i.episode',
             patched,
         )
+        self.assertIn('attrs:{title:e.getEpisodeTitle(i)}', patched)
         self.assertIn(
             'className:"card-list"},on:{select:e.handleChangeEpisode},scopedSlots:',
             patched,
@@ -91,12 +95,56 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
         patched, _ = MODULE.patch_javascript(source)
 
         self.assertNotIn('?"":i.episode', patched)
-        self.assertIn('replace(/^\\d{4}-/,""):i.episode', patched)
+        self.assertIn(
+            '?e.episodeList.findIndex(e=>e.ug_television_episode_id==='
+            'i.ug_television_episode_id)+1||a+1:i.episode',
+            patched,
+        )
         self.assertIn(
             'className:"card-list"},on:{select:e.handleChangeEpisode},scopedSlots:',
             patched,
         )
         self.assertIn('S01E1673386692282296', patched)
+
+    def test_upgrades_deployed_date_label_to_stable_list_ordinal(self):
+        source = self.deployed_v1_source().replace(
+            'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
+            'e.isUnRecognizedEpisode(i.episode)?'
+            '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
+            '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):i.episode',
+        )
+
+        patched, state = MODULE.patch_javascript(source)
+
+        self.assertEqual('deployed-date-v2', state)
+        self.assertIn(
+            '?e.episodeList.findIndex(e=>e.ug_television_episode_id==='
+            'i.ug_television_episode_id)+1||a+1:i.episode',
+            patched,
+        )
+        self.assertNotIn('replace(/^\\d{4}-/,"")', patched)
+        self.assertIn('attrs:{title:e.getEpisodeTitle(i)}', patched)
+        self.assertIn('S01E1673386692282296', patched)
+        self.assertIn('className:"card-list"},scopedSlots:', patched)
+        self.assertNotIn('on:{select:e.handleChangeEpisode}', patched)
+        self.assertIn('t("div",{staticClass:"card-item"},[', patched)
+        self.assertNotIn('staticStyle:{cursor:"pointer"}', patched)
+        self.assertNotIn('"card-list"===this.className', patched)
+
+        second, second_state = MODULE.patch_javascript(patched)
+
+        self.assertEqual('deployed-ordinal-v3', second_state)
+        self.assertEqual(patched, second)
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            javascript = root / "app.js"
+            compressed = root / "app.js.gz"
+            javascript.write_text(patched, encoding="utf-8")
+            compressed.write_bytes(gzip.compress(patched.encode(), mtime=0))
+
+            plans = MODULE.prepare_assets([javascript, compressed])
+
+            self.assertEqual({"already-patched"}, {plan.state for plan in plans})
 
     def test_final_patch_is_idempotent(self):
         patched, _ = MODULE.patch_javascript(self.deployed_v1_source())
@@ -137,6 +185,26 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
                 MODULE.prepare_assets([good, bad])
 
             self.assertEqual(before, good.read_bytes())
+
+    def test_fails_closed_for_mixed_terminal_asset_states(self):
+        date_source = self.deployed_v1_source().replace(
+            'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
+            'e.isUnRecognizedEpisode(i.episode)?'
+            '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
+            '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):'
+            'i.episode',
+        )
+        ordinal_only, _ = MODULE.patch_javascript(date_source)
+        full_final, _ = MODULE.patch_javascript(self.source())
+        with tempfile.TemporaryDirectory() as temp:
+            root = pathlib.Path(temp)
+            javascript = root / "app.js"
+            compressed = root / "app.js.gz"
+            javascript.write_text(ordinal_only, encoding="utf-8")
+            compressed.write_bytes(gzip.compress(full_final.encode(), mtime=0))
+
+            with self.assertRaisesRegex(RuntimeError, "mixed bundle states"):
+                MODULE.prepare_assets([javascript, compressed])
 
     def test_rolls_back_all_assets_when_second_write_fails(self):
         with tempfile.TemporaryDirectory() as temp:
