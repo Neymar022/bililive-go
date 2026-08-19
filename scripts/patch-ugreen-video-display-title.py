@@ -30,11 +30,16 @@ PATCHES = {
         "deployed-title-v1": (
             'e.isUnRecognizedEpisode(i.episode)?"":i.episode'
         ),
-        "final": (
+        "deployed-date-v2": (
             'e.isUnRecognizedEpisode(i.episode)?'
             '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
             '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):'
             'i.episode'
+        ),
+        "final": (
+            'e.isUnRecognizedEpisode(i.episode)?'
+            'e.episodeList.findIndex(e=>e.ug_television_episode_id==='
+            'i.ug_television_episode_id)+1||a+1:i.episode'
         ),
     },
     "card-click": {
@@ -93,6 +98,22 @@ KNOWN_BUNDLE_STATES = {
         "card-cursor": "vendor",
         "card-scroll": "vendor",
     },
+    "deployed-date-v2": {
+        "recent": "final",
+        "card-title": "final",
+        "serial": "deployed-date-v2",
+        "card-click": "vendor",
+        "card-cursor": "vendor",
+        "card-scroll": "vendor",
+    },
+    "deployed-ordinal-v3": {
+        "recent": "final",
+        "card-title": "final",
+        "serial": "final",
+        "card-click": "vendor",
+        "card-cursor": "vendor",
+        "card-scroll": "vendor",
+    },
     "final": {
         "recent": "final",
         "card-title": "final",
@@ -102,6 +123,9 @@ KNOWN_BUNDLE_STATES = {
         "card-scroll": "final",
     },
 }
+
+TERMINAL_BUNDLE_STATES = {"deployed-ordinal-v3", "final"}
+PATCH_TARGET_STATES = {"deployed-date-v2": "deployed-ordinal-v3"}
 
 
 def detect_bundle_state(source: str) -> str:
@@ -131,14 +155,15 @@ def detect_bundle_state(source: str) -> str:
 
 def patch_javascript(source: str) -> tuple[str, str]:
     state = detect_bundle_state(source)
-    if state == "final":
+    if state in TERMINAL_BUNDLE_STATES:
         return source, state
 
+    target_state = PATCH_TARGET_STATES.get(state, "final")
     for name, variant in KNOWN_BUNDLE_STATES[state].items():
         current = PATCHES[name][variant]
-        final = PATCHES[name]["final"]
-        if current != final:
-            source = source.replace(current, final, 1)
+        target = PATCHES[name][KNOWN_BUNDLE_STATES[target_state][name]]
+        if current != target:
+            source = source.replace(current, target, 1)
     return source, state
 
 
@@ -166,6 +191,7 @@ class AssetPlan(NamedTuple):
     before: bytes
     after: bytes
     state: str
+    bundle_state: str
 
 
 def prepare_assets(assets: list[Path]) -> list[AssetPlan]:
@@ -175,12 +201,23 @@ def prepare_assets(assets: list[Path]) -> list[AssetPlan]:
         patched, bundle_state = patch_javascript(source)
         before = asset.read_bytes()
         after = encode_asset(patched, compressed)
-        state = "already-patched" if bundle_state == "final" else f"ready:{bundle_state}"
-        plans.append(AssetPlan(asset, patched, compressed, before, after, state))
+        state = (
+            "already-patched"
+            if bundle_state in TERMINAL_BUNDLE_STATES
+            else f"ready:{bundle_state}"
+        )
+        plans.append(
+            AssetPlan(asset, patched, compressed, before, after, state, bundle_state)
+        )
 
     states = {plan.state for plan in plans}
     if len(states) != 1:
         raise RuntimeError(f"assets have mixed patch states: {sorted(states)}")
+    bundle_states = {plan.bundle_state for plan in plans}
+    if len(bundle_states) != 1:
+        raise RuntimeError(f"assets have mixed bundle states: {sorted(bundle_states)}")
+    if len({plan.patched for plan in plans}) != 1:
+        raise RuntimeError("assets differ after decoding and patching")
     return plans
 
 
