@@ -23,21 +23,96 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
             'return t===g.OY?(0,r.WP)(a):i?this.$t("home.currentEpisode",[t])+"："+i:'
             'this.$t("home.currentEpisode",[t])}'
             'e.isUnRecognizedEpisode(i.episode)?e.UNRECOGNIZED_EPISODE_TEXT:i.episode'
+            't("HorizontalList",{ref:"cardView",attrs:{sourceData:e.currentGroupEpisodeList,'
+            'imgWidth:182,imgHeight:170,className:"card-list"},scopedSlots:e._u([])})'
+            't("div",{staticClass:"card-item"},[])'
+            'scrollToActiveTab(){const e=this.$refs.scrollContainerRef,'
+            't=this.$refs.cardItemRefs;if(!e||!t)return;const i=t[this.activeIndex];'
+            'if(!i)return;const a=i.offsetLeft,s=e.clientWidth,'
+            'o=a+i.offsetWidth/2-s/2,n=e.scrollWidth-s,'
+            'l=Math.max(0,Math.min(o,n));e.scrollLeft=l}'
+        )
+
+    def deployed_v1_source(self):
+        return (
+            self.source()
+            .replace(
+                '(0,r.TI)(i)?`${(0,r.WP)(s)}`:a?',
+                '(0,r.TI)(i)?a||`${(0,r.WP)(s)}`:a?',
+            )
+            .replace(
+                't===g.OY?(0,r.WP)(a):i?',
+                't===g.OY?i||(0,r.WP)(a):i?',
+            )
+            .replace(
+                'e.isUnRecognizedEpisode(i.episode)?e.UNRECOGNIZED_EPISODE_TEXT:i.episode',
+                'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
+            )
         )
 
     def test_patches_only_user_visible_fallbacks(self):
         source = self.source()
 
-        patched, counts = MODULE.patch_javascript(source)
+        patched, _ = MODULE.patch_javascript(source)
 
-        self.assertEqual({"recent": 1, "card": 1, "serial": 1}, counts)
         self.assertIn('(0,r.TI)(i)?a||`${(0,r.WP)(s)}`', patched)
         self.assertIn('t===g.OY?i||(0,r.WP)(a)', patched)
         self.assertIn(
+            'e.isUnRecognizedEpisode(i.episode)?'
+            '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
+            '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):i.episode',
+            patched,
+        )
+        self.assertIn(
+            'className:"card-list"},on:{select:e.handleChangeEpisode},scopedSlots:',
+            patched,
+        )
+        self.assertIn(
+            'staticClass:"card-item",staticStyle:{cursor:"pointer"}',
+            patched,
+        )
+        self.assertIn(
+            '"card-list"===this.className',
+            patched,
+        )
+        self.assertIn(
+            'e.style.paddingRight=Math.max(0,l+s-c)+"px"',
+            patched,
+        )
+        self.assertNotIn(
             'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
             patched,
         )
         self.assertIn('S01E1673386692282296', patched)
+
+    def test_upgrades_deployed_empty_serial_label_without_rewriting_identity(self):
+        source = self.deployed_v1_source()
+
+        patched, _ = MODULE.patch_javascript(source)
+
+        self.assertNotIn('?"":i.episode', patched)
+        self.assertIn('replace(/^\\d{4}-/,""):i.episode', patched)
+        self.assertIn(
+            'className:"card-list"},on:{select:e.handleChangeEpisode},scopedSlots:',
+            patched,
+        )
+        self.assertIn('S01E1673386692282296', patched)
+
+    def test_final_patch_is_idempotent(self):
+        patched, _ = MODULE.patch_javascript(self.deployed_v1_source())
+
+        second, _ = MODULE.patch_javascript(patched)
+
+        self.assertEqual(patched, second)
+
+    def test_fails_closed_for_unknown_mixed_patch_state(self):
+        mixed = self.source().replace(
+            '(0,r.TI)(i)?`${(0,r.WP)(s)}`:a?',
+            '(0,r.TI)(i)?a||`${(0,r.WP)(s)}`:a?',
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "known bundle state"):
+            MODULE.patch_javascript(mixed)
 
     def test_fails_closed_when_vendor_bundle_contract_changes(self):
         with self.assertRaisesRegex(RuntimeError, "expected exactly one"):
