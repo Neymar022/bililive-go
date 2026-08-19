@@ -124,7 +124,7 @@ func (s *SubtitleGenerateStage) syncKnowledgeAt(
 			"duration_seconds": durationSeconds,
 			"minimum_seconds":  minDuration.Seconds(),
 		}).Info("subtitle_generate: skipped BiliNote knowledge sync for short video")
-		s.logs += fmt.Sprintf("知识同步已跳过（视频过短 %.2fs <= %.0fs）: %s\n", durationSeconds, minDuration.Seconds(), filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("知识同步已跳过（视频过短 %.2fs <= %.0fs）: %s\n", durationSeconds, minDuration.Seconds(), subtitle.MediaDisplayTitle(libraryPath))
 		return nil
 	}
 
@@ -164,7 +164,7 @@ func (s *SubtitleGenerateStage) syncKnowledgeAt(
 			"task_id":   taskID,
 			"source_id": sourceID,
 		}).Warn("subtitle_generate: BiliNote knowledge sync failed")
-		s.logs += fmt.Sprintf("知识同步失败（不阻塞）: %s\n", filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("知识同步失败（不阻塞）: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 		return nil
 	}
 
@@ -173,7 +173,7 @@ func (s *SubtitleGenerateStage) syncKnowledgeAt(
 	if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
 		logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync queued status")
 	}
-	s.logs += fmt.Sprintf("知识同步已提交: %s\n", filepath.Base(libraryPath))
+	s.logs += fmt.Sprintf("知识同步已提交: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 	return nil
 }
 
@@ -207,7 +207,7 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 		if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
 			logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save aggregate knowledge sync queued status")
 		}
-		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 		return nil
 	}
 	changed, err := registerKnowledgeSessionSource(&manifest, libraryRoot, knowledgeSessionPayloadInput{
@@ -238,7 +238,7 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 			if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
 				logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync wait status")
 			}
-			s.logs += fmt.Sprintf("知识同步等待同场直播聚合: %s\n", filepath.Base(libraryPath))
+			s.logs += fmt.Sprintf("知识同步等待同场直播聚合: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 			return pipeline.NewRetryLaterError(fmt.Errorf("waiting for same live session aggregation"), delay)
 		}
 	}
@@ -271,7 +271,7 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 		if err := subtitle.SaveMetadata(metadataPath, *metadata); err != nil {
 			logrus.WithError(err).WithField("metadata", metadataPath).Warn("subtitle_generate: failed to save knowledge sync queued status")
 		}
-		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("知识同步已由同场直播聚合提交: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 		return nil
 	}
 
@@ -296,7 +296,7 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 			"source_id":       sourceID,
 			"live_session_id": sessionID,
 		}).Warn("subtitle_generate: BiliNote same-live knowledge sync failed")
-		s.logs += fmt.Sprintf("同场直播知识同步失败（不阻塞）: %s\n", filepath.Base(libraryPath))
+		s.logs += fmt.Sprintf("同场直播知识同步失败（不阻塞）: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 		return nil
 	}
 
@@ -309,7 +309,7 @@ func (s *SubtitleGenerateStage) syncLiveSessionKnowledgeAt(
 		return err
 	}
 	markKnowledgeSessionSources(manifest, subtitle.StatusQueued, sourceID, "", now, false)
-	s.logs += fmt.Sprintf("同场直播知识同步已提交: %s\n", filepath.Base(libraryPath))
+	s.logs += fmt.Sprintf("同场直播知识同步已提交: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 	return nil
 }
 
@@ -357,7 +357,7 @@ func buildKnowledgeIngestPayload(
 	}
 
 	sourceID := knowledgeSourceID(libraryRoot, libraryPath)
-	title := strings.TrimSuffix(filepath.Base(libraryPath), filepath.Ext(libraryPath))
+	title := subtitle.MediaDisplayTitle(libraryPath)
 	host := ""
 	topic := ""
 	if ctx != nil {
@@ -416,7 +416,7 @@ func buildKnowledgeSessionIngestPayload(
 	}
 
 	sourceID := "live-session:" + sessionID
-	title := strings.TrimSuffix(filepath.Base(inputs[0].LibraryPath), filepath.Ext(inputs[0].LibraryPath))
+	title := subtitle.MediaDisplayTitle(inputs[0].LibraryPath)
 	format, link, screenshot := cfg.ResolveNoteOptions()
 	payload := knowledgeIngestPayload{
 		SourceID:           sourceID,
@@ -454,7 +454,7 @@ func buildKnowledgeSessionIngestPayload(
 			SourceID:        sourceID,
 			SourceVideoPath: input.LibraryPath,
 			SubtitlePath:    input.Metadata.SRTPath,
-			Title:           strings.TrimSuffix(filepath.Base(input.LibraryPath), filepath.Ext(input.LibraryPath)),
+			Title:           subtitle.MediaDisplayTitle(input.LibraryPath),
 			Offset:          offset,
 		}
 		payload.SourceVideos = append(payload.SourceVideos, sourcePayload)

@@ -14,6 +14,7 @@ interface Segment {
 
 interface SubtitleRecord {
   relative_path: string;
+  display_title: string;
   video_path?: string;
   srt_path?: string;
   source_path?: string;
@@ -189,9 +190,9 @@ const RecordingsPage: React.FC = () => {
     },
     {
       title: '标题',
-      dataIndex: 'room_name',
-      key: 'room_name',
-      render: (value: string) => value || '-',
+      dataIndex: 'display_title',
+      key: 'display_title',
+      render: (value: string, record) => value || record.room_name || '-',
     },
     {
       title: '录制时间',
@@ -284,7 +285,7 @@ const RecordingsPage: React.FC = () => {
       </Card>
 
       <Drawer
-        title={activeRecord?.room_name || '字幕详情'}
+        title={activeRecord?.display_title || activeRecord?.room_name || '字幕详情'}
         placement="right"
         width={960}
         onClose={() => setDetailOpen(false)}

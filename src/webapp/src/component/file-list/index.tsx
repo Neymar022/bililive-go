@@ -18,6 +18,7 @@ import Utils from "../../utils/common";
 import './file-list.css';
 import Artplayer from "artplayer";
 import mpegtsjs from "mpegts.js";
+import { mediaDisplayName } from "../../utils/media-display";
 
 const api = new API();
 
@@ -408,9 +409,11 @@ class DanmakuRenderer {
 type CurrentFolderFile = {
     is_folder: boolean;
     name: string;
+    display_name?: string;
     last_modified: number;
     size: number;
     subtitle_file?: string;
+    subtitle_display_name?: string;
 }
 
 const FileList: React.FC = () => {
@@ -831,7 +834,7 @@ const FileList: React.FC = () => {
             // 仅在跳转时进行编码
             navigate("/fileList/" + encodePathForNav(fullPath));
         } else {
-            setCurrentPlayingName(record.name);
+            setCurrentPlayingName(mediaDisplayName(record));
             setIsPlayerVisible(true);
             currentPlayingRef.current = { record, fullPath };
             playerInitRef.current = true;
@@ -850,7 +853,7 @@ const FileList: React.FC = () => {
                 const art = new Artplayer({
                     container: '#art-container',
                     url: `files/${encodePath(fullPath)}`,
-                    title: record.name,
+                    title: mediaDisplayName(record),
                     volume: 0.7,
                     autoplay: true,
                     pip: true,
@@ -1012,9 +1015,9 @@ const FileList: React.FC = () => {
                 return (
                     <div className="file-name-cell">
                         {record.is_folder ? <FolderOutlined style={{ color: '#1890ff', fontSize: '16px' }} /> : <FileOutlined style={{ fontSize: '16px' }} />}
-                        <span className="name-text">{record.name}</span>
+                        <span className="name-text">{mediaDisplayName(record)}</span>
                         {record.subtitle_file && (
-                            <Tooltip title={`弹幕字幕: ${record.subtitle_file}`}>
+                            <Tooltip title={`弹幕字幕: ${record.subtitle_display_name || record.subtitle_file}`}>
                                 <span style={{ marginLeft: 6, fontSize: 11, color: '#1890ff', background: '#e6f4ff', padding: '1px 6px', borderRadius: 4, cursor: 'default' }}>
                                     弹幕
                                 </span>
@@ -1067,7 +1070,7 @@ const FileList: React.FC = () => {
                         重命名
                     </Button>
                     <Popconfirm
-                        title={`确定要删除${record.is_folder ? '文件夹' : '文件'} "${record.name}" 吗？`}
+                        title={`确定要删除${record.is_folder ? '文件夹' : '文件'} "${mediaDisplayName(record)}" 吗？`}
                         onConfirm={() => handleDelete(record)}
                         okText="确定"
                         cancelText="取消"
@@ -1213,7 +1216,7 @@ const FileList: React.FC = () => {
 
             {/* @ts-ignore */}
             <Modal
-                title={`重命名 ${renameTarget?.is_folder ? '文件夹' : '文件'}`}
+                title={`重命名 ${renameTarget?.is_folder ? '文件夹' : '文件'}：${renameTarget ? mediaDisplayName(renameTarget) : ''}`}
                 open={isRenameModalVisible}
                 onOk={handleRename}
                 onCancel={() => setIsRenameModalVisible(false)}

@@ -35,7 +35,7 @@ jest.mock('antd', () => {
       return <button {...domProps}>{children}</button>;
     },
     Card: ({ children }: any) => <div>{children}</div>,
-    Drawer: ({ children, open }: any) => open ? <div>{children}</div> : null,
+    Drawer: ({ children, open, title }: any) => open ? <div><div>{title}</div>{children}</div> : null,
     Empty: ({ description }: any) => <div>{description}</div>,
     List: ListComp,
     Popconfirm: ({ children, onConfirm, disabled }: any) => React.cloneElement(children, { onClick: disabled ? undefined : onConfirm }),
@@ -72,6 +72,7 @@ test('renders subtitle records from api', async () => {
       data: [
         {
           relative_path: '主播/Season 01/主播.S01E0001.2026-03-20 - 标题.mp4',
+          display_title: '2026-03-20 - 标题',
           host_name: '主播',
           room_name: '标题',
           status: 'completed',
@@ -88,7 +89,7 @@ test('renders subtitle records from api', async () => {
   const view = render(<RecordingsPage />);
 
   expect(await view.findByText('主播')).toBeInTheDocument();
-  expect(view.getByText('标题')).toBeInTheDocument();
+  expect(view.getByText('2026-03-20 - 标题')).toBeInTheDocument();
   expect(view.getByText('completed')).toBeInTheDocument();
   expect(view.getByText('vizard_classic_cn')).toBeInTheDocument();
 });
@@ -103,6 +104,7 @@ test('opens detail drawer and shows transcript segments', async () => {
         data: [
           {
             relative_path: '主播/Season 01/主播.S01E0001.2026-03-20 - 标题.mp4',
+            display_title: '2026-03-20 - 标题',
             host_name: '主播',
             room_name: '标题',
             status: 'completed',
@@ -121,6 +123,7 @@ test('opens detail drawer and shows transcript segments', async () => {
         err_no: 0,
         data: {
           relative_path: '主播/Season 01/主播.S01E0001.2026-03-20 - 标题.mp4',
+          display_title: '2026-03-20 - 标题',
           host_name: '主播',
           room_name: '标题',
           status: 'completed',
@@ -148,6 +151,7 @@ test('opens detail drawer and shows transcript segments', async () => {
   (await view.findByText('详情')).click();
 
   expect(await view.findByText('第一句字幕')).toBeInTheDocument();
+  expect(view.getAllByText('2026-03-20 - 标题').length).toBeGreaterThanOrEqual(2);
   expect(view.getByText('vizard_classic_cn')).toBeInTheDocument();
   expect(view.getByText('字幕卡片渲染失败')).toBeInTheDocument();
   expect(mockFetch).toHaveBeenCalledTimes(2);

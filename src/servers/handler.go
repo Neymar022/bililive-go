@@ -37,6 +37,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders"
+	"github.com/bililive-go/bililive-go/src/subtitle"
 	"github.com/bililive-go/bililive-go/src/tools"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -2142,11 +2143,13 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 	}
 
 	type jsonFile struct {
-		IsFolder     bool   `json:"is_folder"`
-		Name         string `json:"name"`
-		LastModified int64  `json:"last_modified"`
-		Size         int64  `json:"size"`
-		SubtitleFile string `json:"subtitle_file,omitempty"`
+		IsFolder            bool   `json:"is_folder"`
+		Name                string `json:"name"`
+		DisplayName         string `json:"display_name"`
+		LastModified        int64  `json:"last_modified"`
+		Size                int64  `json:"size"`
+		SubtitleFile        string `json:"subtitle_file,omitempty"`
+		SubtitleDisplayName string `json:"subtitle_display_name,omitempty"`
 	}
 
 	// First pass: separate ASS files and build base-name -> ASS file map
@@ -2177,9 +2180,11 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 		jf := jsonFile{
 			IsFolder:     fe.dir.IsDir(),
 			Name:         fe.dir.Name(),
+			DisplayName:  fe.dir.Name(),
 			LastModified: fe.info.ModTime().Unix(),
 		}
 		if !fe.dir.IsDir() {
+			jf.DisplayName = subtitle.MediaDisplayTitle(fe.dir.Name())
 			jf.Size = fe.info.Size()
 			// Check if this file has an associated ASS subtitle
 			baseName := fe.dir.Name()
@@ -2188,6 +2193,7 @@ func getFileInfo(writer http.ResponseWriter, r *http.Request) {
 			}
 			if assName, ok := assFiles[baseName]; ok {
 				jf.SubtitleFile = assName
+				jf.SubtitleDisplayName = subtitle.MediaDisplayTitle(assName)
 			}
 		}
 		jsonFiles = append(jsonFiles, jf)

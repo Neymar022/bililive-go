@@ -156,7 +156,7 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	sourcePath := filepath.Join(sourceRoot, "旭东聊装修 - 2026-05-27 20-00-00 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
 
-	libraryPath := filepath.Join(libraryRoot, "旭东聊装修", "Season 01", "旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
+	libraryPath := filepath.Join(libraryRoot, "旭东聊装修", "Season 01", "旭东聊装修.S01E1673593262559664.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
 	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
 	require.NoError(t, os.Link(sourcePath, libraryPath))
 
@@ -254,11 +254,12 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, "Bearer test-token", capturedAuth)
-	assert.Equal(t, "旭东聊装修/Season 01/旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4", capturedPayload.SourceID)
+	assert.Equal(t, "旭东聊装修/Season 01/旭东聊装修.S01E1673593262559664.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4", capturedPayload.SourceID)
 	assert.Equal(t, "bililive-go", capturedPayload.SourceType)
 	assert.Equal(t, "bililive-go-473", capturedPayload.TaskID)
 	assert.Equal(t, "旭东聊装修", capturedPayload.Host)
-	assert.Equal(t, "旭东聊装修.S01E0047.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官", capturedPayload.Title)
+	assert.Equal(t, "2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官", capturedPayload.Title)
+	assert.Contains(t, capturedPayload.SourceVideoPath, "S01E1673593262559664", "后台路径必须继续保留 recordedAt identity")
 	assert.Equal(t, libraryPath, capturedPayload.SourceVideoPath)
 	assert.Equal(t, srtPath, capturedPayload.SubtitlePath)
 	assert.Equal(t, "zh", capturedPayload.Language)
