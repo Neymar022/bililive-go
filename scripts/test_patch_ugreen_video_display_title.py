@@ -114,6 +114,12 @@ class PatchUGREENVideoDisplayTitleTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "known bundle state"):
             MODULE.patch_javascript(mixed)
 
+    def test_fails_closed_when_known_variants_coexist_for_one_seam(self):
+        mixed = self.source() + '(0,r.TI)(i)?a||`${(0,r.WP)(s)}`:a?'
+
+        with self.assertRaisesRegex(RuntimeError, "known bundle state"):
+            MODULE.patch_javascript(mixed)
+
     def test_fails_closed_when_vendor_bundle_contract_changes(self):
         with self.assertRaisesRegex(RuntimeError, "expected exactly one"):
             MODULE.patch_javascript("getEpisodeTitle changed upstream")

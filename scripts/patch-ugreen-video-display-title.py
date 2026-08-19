@@ -106,14 +106,19 @@ KNOWN_BUNDLE_STATES = {
 
 def detect_bundle_state(source: str) -> str:
     matches: list[str] = []
-    diagnostics: dict[str, dict[str, int]] = {}
-    for state, variants in KNOWN_BUNDLE_STATES.items():
-        counts = {
-            name: source.count(PATCHES[name][variant])
-            for name, variant in variants.items()
+    diagnostics = {
+        name: {
+            variant: source.count(expression)
+            for variant, expression in variants.items()
         }
-        diagnostics[state] = counts
-        if all(count == 1 for count in counts.values()):
+        for name, variants in PATCHES.items()
+    }
+    for state, variants in KNOWN_BUNDLE_STATES.items():
+        if all(
+            diagnostics[name][variant] == 1
+            and sum(diagnostics[name].values()) == 1
+            for name, variant in variants.items()
+        ):
             matches.append(state)
 
     if len(matches) != 1:
