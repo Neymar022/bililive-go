@@ -14,46 +14,132 @@ from typing import NamedTuple
 
 
 PATCHES = {
-    "recent": (
-        '(0,r.TI)(i)?`${(0,r.WP)(s)}`:a?',
-        '(0,r.TI)(i)?a||`${(0,r.WP)(s)}`:a?',
-    ),
-    "card": (
-        't===g.OY?(0,r.WP)(a):i?',
-        't===g.OY?i||(0,r.WP)(a):i?',
-    ),
-    "serial": (
-        'e.isUnRecognizedEpisode(i.episode)?e.UNRECOGNIZED_EPISODE_TEXT:i.episode',
-        'e.isUnRecognizedEpisode(i.episode)?"":i.episode',
-    ),
+    "recent": {
+        "vendor": '(0,r.TI)(i)?`${(0,r.WP)(s)}`:a?',
+        "final": '(0,r.TI)(i)?a||`${(0,r.WP)(s)}`:a?',
+    },
+    "card-title": {
+        "vendor": 't===g.OY?(0,r.WP)(a):i?',
+        "final": 't===g.OY?i||(0,r.WP)(a):i?',
+    },
+    "serial": {
+        "vendor": (
+            'e.isUnRecognizedEpisode(i.episode)?'
+            'e.UNRECOGNIZED_EPISODE_TEXT:i.episode'
+        ),
+        "deployed-title-v1": (
+            'e.isUnRecognizedEpisode(i.episode)?"":i.episode'
+        ),
+        "final": (
+            'e.isUnRecognizedEpisode(i.episode)?'
+            '(e.getEpisodeTitle(i).match(/\\d{4}-\\d{2}-\\d{2}/)||'
+            '[e.UNRECOGNIZED_EPISODE_TEXT])[0].replace(/^\\d{4}-/,""):'
+            'i.episode'
+        ),
+    },
+    "card-click": {
+        "vendor": 'className:"card-list"},scopedSlots:',
+        "final": (
+            'className:"card-list"},on:{select:e.handleChangeEpisode},'
+            'scopedSlots:'
+        ),
+    },
+    "card-cursor": {
+        "vendor": 't("div",{staticClass:"card-item"},[',
+        "final": (
+            't("div",{staticClass:"card-item",'
+            'staticStyle:{cursor:"pointer"}},['
+        ),
+    },
+    "card-scroll": {
+        "vendor": (
+            'scrollToActiveTab(){const e=this.$refs.scrollContainerRef,'
+            't=this.$refs.cardItemRefs;if(!e||!t)return;const i=t[this.activeIndex];'
+            'if(!i)return;const a=i.offsetLeft,s=e.clientWidth,'
+            'o=a+i.offsetWidth/2-s/2,n=e.scrollWidth-s,'
+            'l=Math.max(0,Math.min(o,n));e.scrollLeft=l}'
+        ),
+        "final": (
+            'scrollToActiveTab(){const e=this.$refs.scrollContainerRef,'
+            't=this.$refs.cardItemRefs;if(!e||!t)return;const i=t[this.activeIndex];'
+            'if(!i)return;const a=i.offsetLeft,s=e.clientWidth;'
+            'if("card-list"===this.className){const i=this.cardOffset,'
+            'a=Number(getComputedStyle(t[0]).marginRight.replace("px","")||0),'
+            'o=Math.max(1,Math.floor((s+a)/i)),'
+            'n=Math.max(0,Math.min(this.activeIndex-Math.floor((o-1)/2),'
+            't.length-o)),l=t[n].offsetLeft,r=t[t.length-1],'
+            'c=r.offsetLeft+r.offsetWidth;return e.style.paddingRight='
+            'Math.max(0,l+s-c)+"px",void(e.scrollLeft=l)}'
+            'const o=a+i.offsetWidth/2-s/2,n=e.scrollWidth-s,'
+            'l=Math.max(0,Math.min(o,n));e.scrollLeft=l}'
+        ),
+    },
+}
+
+KNOWN_BUNDLE_STATES = {
+    "vendor": {
+        "recent": "vendor",
+        "card-title": "vendor",
+        "serial": "vendor",
+        "card-click": "vendor",
+        "card-cursor": "vendor",
+        "card-scroll": "vendor",
+    },
+    "deployed-title-v1": {
+        "recent": "final",
+        "card-title": "final",
+        "serial": "deployed-title-v1",
+        "card-click": "vendor",
+        "card-cursor": "vendor",
+        "card-scroll": "vendor",
+    },
+    "final": {
+        "recent": "final",
+        "card-title": "final",
+        "serial": "final",
+        "card-click": "final",
+        "card-cursor": "final",
+        "card-scroll": "final",
+    },
 }
 
 
-def patch_javascript(source: str) -> tuple[str, dict[str, int]]:
-    counts: dict[str, int] = {}
-    states: set[str] = set()
-    for name, (old, new) in PATCHES.items():
-        old_count = source.count(old)
-        new_count = source.count(new)
-        if old_count == 1 and new_count == 0:
-            states.add("unpatched")
-        elif old_count == 0 and new_count == 1:
-            states.add("patched")
-        else:
-            raise RuntimeError(
-                f"{name}: expected exactly one known unpatched or patched expression, "
-                f"found old={old_count} new={new_count}"
-            )
-        counts[name] = old_count
+def detect_bundle_state(source: str) -> str:
+    matches: list[str] = []
+    diagnostics = {
+        name: {
+            variant: source.count(expression)
+            for variant, expression in variants.items()
+        }
+        for name, variants in PATCHES.items()
+    }
+    for state, variants in KNOWN_BUNDLE_STATES.items():
+        if all(
+            diagnostics[name][variant] == 1
+            and sum(diagnostics[name].values()) == 1
+            for name, variant in variants.items()
+        ):
+            matches.append(state)
 
-    if len(states) != 1:
-        raise RuntimeError(f"vendor bundle has a mixed patch state: {sorted(states)}")
-    if states == {"patched"}:
-        return source, counts
+    if len(matches) != 1:
+        raise RuntimeError(
+            "expected exactly one known bundle state, "
+            f"matched={matches}, counts={diagnostics}"
+        )
+    return matches[0]
 
-    for old, new in PATCHES.values():
-        source = source.replace(old, new, 1)
-    return source, counts
+
+def patch_javascript(source: str) -> tuple[str, str]:
+    state = detect_bundle_state(source)
+    if state == "final":
+        return source, state
+
+    for name, variant in KNOWN_BUNDLE_STATES[state].items():
+        current = PATCHES[name][variant]
+        final = PATCHES[name]["final"]
+        if current != final:
+            source = source.replace(current, final, 1)
+    return source, state
 
 
 def read_asset(path: Path) -> tuple[str, bool]:
@@ -86,10 +172,10 @@ def prepare_assets(assets: list[Path]) -> list[AssetPlan]:
     plans: list[AssetPlan] = []
     for asset in assets:
         source, compressed = read_asset(asset)
-        patched, counts = patch_javascript(source)
+        patched, bundle_state = patch_javascript(source)
         before = asset.read_bytes()
         after = encode_asset(patched, compressed)
-        state = "already-patched" if all(value == 0 for value in counts.values()) else "ready"
+        state = "already-patched" if bundle_state == "final" else f"ready:{bundle_state}"
         plans.append(AssetPlan(asset, patched, compressed, before, after, state))
 
     states = {plan.state for plan in plans}
@@ -166,7 +252,7 @@ def main() -> int:
     plans = prepare_assets(args.assets)
     for plan in plans:
         print(f"{plan.path}: {plan.state} sha256={sha256(plan.before)} -> {sha256(plan.after)}")
-    if args.apply and plans[0].state == "ready":
+    if args.apply and plans[0].state.startswith("ready:"):
         apply_assets(plans, args.backup_dir)
     return 0
 

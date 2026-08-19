@@ -20,6 +20,7 @@
 
 ## In Progress
 
+- UGREEN 影视中心选集交互与封面复核：序号日期标签、卡片整卡点击和首卡裁切源码修复已完成本地门禁；封面文件/当前授权链路 54/54 有效，剩余正式审查、PR/CI、最小 vendor 补丁部署和真实页面后验。
 - P0：生产安全闭环。
   - 同源重复入队和 completed metadata 覆盖保护。
   - BiliNote ingest 幂等和机器 token。
