@@ -51,6 +51,8 @@ const (
 	chronologicalEpisodeIdentityBase int64 = 8
 	chronologicalEpisodeEpochUnix    int64 = 1_577_836_800 // 2020-01-01T00:00:00Z
 	maxSafeEpisodeIdentity           int64 = 9_007_199_254_740_991
+	chronologicalEpisodeIdentityMin  int64 = 1_000_000_000_000
+	maxUGREENEpisodeOrdinal          int64 = 9_999
 )
 
 type keyedPathLockEntry struct {
@@ -125,7 +127,7 @@ func truncateUTF8(s string, maxBytes int) string {
 // buildEpisodeFilename constructs the Plex-style episode filename.
 // 格式：<aliasName>.S01E<identity>.<YYYY-MM-DD> - <title><extension>。
 // Mirrors build_episode_filename() in bililive_tv_library_builder.py.
-func buildEpisodeFilename(aliasName string, episodeNumber int64, recordedAt time.Time, title, extension string) string {
+func buildEpisodeFilename(aliasName string, episodeIdentity int64, recordedAt time.Time, title, extension string) string {
 	aliasName = sanitizeComponent(aliasName)
 	if aliasName == "" {
 		aliasName = "未分类主播"
@@ -135,21 +137,21 @@ func buildEpisodeFilename(aliasName string, episodeNumber int64, recordedAt time
 		title = "未命名直播"
 	}
 	displayTitle := fmt.Sprintf("%s - %s", recordedAt.Format("2006-01-02"), title)
-	prefix := fmt.Sprintf("%s.S01E%04d.", aliasName, episodeNumber)
+	prefix := fmt.Sprintf("%s.S01E%04d.", aliasName, episodeIdentity)
 
 	// Respect 255-byte filename limit (like the Python builder).
 	maxBytes := 255 - len([]byte(extension))
 	prefixBytes := len([]byte(prefix))
 	if prefixBytes >= maxBytes {
 		aliasName = truncateUTF8(aliasName, max(24, maxBytes/3))
-		prefix = fmt.Sprintf("%s.S01E%04d.", aliasName, episodeNumber)
+		prefix = fmt.Sprintf("%s.S01E%04d.", aliasName, episodeIdentity)
 		prefixBytes = len([]byte(prefix))
 	}
 	displayTitle = truncateUTF8(displayTitle, max(1, maxBytes-prefixBytes))
 	return prefix + displayTitle + extension
 }
 
-func buildEpisodeNFO(aliasName string, episodeNumber int64, recordedAt time.Time, title, platform string) string {
+func buildEpisodeNFO(aliasName string, episodeOrdinal, recordedAtIdentity int64, recordedAt time.Time, title, platform string) string {
 	aliasName = sanitizeComponent(aliasName)
 	if aliasName == "" {
 		aliasName = "未分类主播"
@@ -176,7 +178,8 @@ func buildEpisodeNFO(aliasName string, episodeNumber int64, recordedAt time.Time
 		fmt.Sprintf("  <showtitle>%s</showtitle>", xmlEscape(aliasName)),
 		fmt.Sprintf("  <sorttitle>%s</sorttitle>", xmlEscape(sortTitle)),
 		"  <season>1</season>",
-		fmt.Sprintf("  <episode>%d</episode>", episodeNumber),
+		fmt.Sprintf("  <episode>%d</episode>", episodeOrdinal),
+		fmt.Sprintf("  <uniqueid type=\"bililive-recorded-at\" default=\"false\">%d</uniqueid>", recordedAtIdentity),
 		fmt.Sprintf("  <plot>%s</plot>", xmlEscape(plot)),
 		fmt.Sprintf("  <studio>%s</studio>", xmlEscape(platform)),
 		"  <genre>直播录屏</genre>",
@@ -231,7 +234,7 @@ func xmlEscape(s string) string {
 	return replacer.Replace(s)
 }
 
-func episodeNumberForRecordedAt(recordedAt time.Time) int64 {
+func episodeIdentityForRecordedAt(recordedAt time.Time) int64 {
 	microseconds := recordedAt.UnixMicro() - chronologicalEpisodeEpochUnix*1_000_000
 	if recordedAt.IsZero() || microseconds <= 0 {
 		return 0
@@ -243,7 +246,235 @@ func episodeNumberForRecordedAt(recordedAt time.Time) int64 {
 	return identity
 }
 
-func episodeNumberReserved(dir string, target int64) (bool, error) {
+func recordedAtForEpisodeIdentity(identity int64) (time.Time, bool) {
+	if identity < chronologicalEpisodeIdentityMin || identity > maxSafeEpisodeIdentity {
+		return time.Time{}, false
+	}
+	microseconds := identity / chronologicalEpisodeIdentityBase
+	recordedAt := time.UnixMicro(chronologicalEpisodeEpochUnix*1_000_000 + microseconds).In(mediaLibraryLocation)
+	base := episodeIdentityForRecordedAt(recordedAt)
+	if base <= 0 || identity < base || identity >= base+chronologicalEpisodeIdentityBase {
+		return time.Time{}, false
+	}
+	return recordedAt, true
+}
+
+func parseEpisodeRecordedAt(text string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02 15:04:05", "2006-01-02 15-04-05"} {
+		if parsed, err := time.ParseInLocation(layout, text, mediaLibraryLocation); err == nil && !parsed.IsZero() {
+			return parsed, true
+		}
+	}
+	return time.Time{}, false
+}
+
+func episodeRecordedAtFromSidecars(stem string) (time.Time, bool) {
+	if metadata, err := LoadMetadata(stem + ".subtitle.json"); err == nil && metadata.RecordMeta != nil {
+		if value, ok := metadata.RecordMeta["start_time"].(string); ok {
+			if parsed, parsedOK := parseEpisodeRecordedAt(value); parsedOK {
+				return parsed, true
+			}
+		}
+	}
+
+	content, err := os.ReadFile(stem + ".nfo")
+	if err != nil {
+		return time.Time{}, false
+	}
+	var nfo struct {
+		XMLName   xml.Name `xml:"episodedetails"`
+		DateAdded string   `xml:"dateadded"`
+	}
+	if err := xml.Unmarshal(content, &nfo); err != nil || nfo.XMLName.Local != "episodedetails" {
+		return time.Time{}, false
+	}
+	return parseEpisodeRecordedAt(strings.TrimSpace(nfo.DateAdded))
+}
+
+func episodeOrdinalFromNFO(path string) (int64, bool) {
+	content, err := os.ReadFile(path)
+	if err != nil {
+		return 0, false
+	}
+	var nfo struct {
+		XMLName xml.Name `xml:"episodedetails"`
+		Episode int64    `xml:"episode"`
+	}
+	if err := xml.Unmarshal(content, &nfo); err != nil || nfo.XMLName.Local != "episodedetails" {
+		return 0, false
+	}
+	if nfo.Episode <= 0 || nfo.Episode > maxUGREENEpisodeOrdinal {
+		return 0, false
+	}
+	return nfo.Episode, true
+}
+
+func libraryEpisodeStem(name string) (string, bool) {
+	for _, suffix := range []string{".subtitle.json", ".transcript.json", ".mp4", ".mkv", ".nfo", ".jpg", ".srt", ".ass"} {
+		if strings.HasSuffix(strings.ToLower(name), suffix) {
+			return name[:len(name)-len(suffix)], true
+		}
+	}
+	return "", false
+}
+
+func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (int64, error) {
+	if recordedAt.IsZero() {
+		return 0, errors.New("no reliable recording start time")
+	}
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return 1, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+
+	type publishedEpisode struct {
+		recordedAt   time.Time
+		recordedDate string
+		identity     int64
+		filename     string
+	}
+	published := make(map[int64]publishedEpisode)
+	var maxEpisodeOrdinal int64
+	seenStems := make(map[string]struct{})
+	for _, entry := range entries {
+		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		match := libraryEpisodeSlotPattern.FindStringSubmatch(entry.Name())
+		if match == nil {
+			continue
+		}
+		first, parseErr := strconv.ParseInt(match[1], 10, 64)
+		if parseErr != nil {
+			continue
+		}
+		last := first
+		if len(match) > 2 && match[2] != "" {
+			if parsed, rangeErr := strconv.ParseInt(match[2], 10, 64); rangeErr == nil && parsed >= first {
+				last = parsed
+			}
+		}
+		stem, known := libraryEpisodeStem(entry.Name())
+		if !known {
+			continue
+		}
+		if _, exists := seenStems[stem]; exists {
+			continue
+		}
+		seenStems[stem] = struct{}{}
+		stemPath := filepath.Join(dir, stem)
+		publicEpisode, hasPublicEpisode := episodeOrdinalFromNFO(stemPath + ".nfo")
+		if !hasPublicEpisode {
+			if last >= chronologicalEpisodeIdentityMin || last > maxUGREENEpisodeOrdinal {
+				return 0, fmt.Errorf("historical recordedAt episode identity requires NFO ordinal migration: %s", entry.Name())
+			}
+			publicEpisode = first
+		}
+		publicEpisodeLast := publicEpisode
+		if !hasPublicEpisode {
+			publicEpisodeLast = last
+		}
+
+		existingRecordedAt, hasExactRecordedAt := recordedAtForEpisodeIdentity(first)
+		if !hasExactRecordedAt {
+			existingRecordedAt, hasExactRecordedAt = episodeRecordedAtFromSidecars(stemPath)
+		}
+		recordedDate := ""
+		if hasExactRecordedAt {
+			recordedDate = existingRecordedAt.Format("2006-01-02")
+		} else if meta, ok := parseLibraryEpisodeFilename(stem + ".mp4"); ok {
+			recordedDate = meta.recordedAt.Format("2006-01-02")
+		}
+		for ordinal := publicEpisode; ordinal <= publicEpisodeLast; ordinal++ {
+			if previous, duplicate := published[ordinal]; duplicate {
+				return 0, fmt.Errorf(
+					"published episode ordinals require repair: duplicate ordinal %d in %s and %s",
+					ordinal,
+					previous.filename,
+					entry.Name(),
+				)
+			}
+			published[ordinal] = publishedEpisode{
+				recordedAt:   existingRecordedAt,
+				recordedDate: recordedDate,
+				identity:     first,
+				filename:     entry.Name(),
+			}
+			if ordinal > maxEpisodeOrdinal {
+				maxEpisodeOrdinal = ordinal
+			}
+		}
+	}
+
+	for ordinal := int64(1); ordinal <= maxEpisodeOrdinal; ordinal++ {
+		current, ok := published[ordinal]
+		if !ok {
+			return 0, fmt.Errorf("published episode ordinals require repair: missing ordinal %d", ordinal)
+		}
+		if ordinal == 1 {
+			continue
+		}
+		previous := published[ordinal-1]
+		if !previous.recordedAt.IsZero() && !current.recordedAt.IsZero() {
+			if current.recordedAt.Before(previous.recordedAt) ||
+				(current.recordedAt.Equal(previous.recordedAt) && current.identity < previous.identity) {
+				return 0, fmt.Errorf(
+					"published episode ordinals require repair: ordinal %d (%s) precedes ordinal %d (%s)",
+					ordinal,
+					current.filename,
+					ordinal-1,
+					previous.filename,
+				)
+			}
+		} else if previous.recordedDate != "" && current.recordedDate != "" && current.recordedDate < previous.recordedDate {
+			return 0, fmt.Errorf(
+				"published episode ordinals require repair: ordinal %d (%s) predates ordinal %d (%s)",
+				ordinal,
+				current.filename,
+				ordinal-1,
+				previous.filename,
+			)
+		}
+	}
+
+	recordedDate := recordedAt.Format("2006-01-02")
+	if lastPublished, ok := published[maxEpisodeOrdinal]; ok {
+		if !lastPublished.recordedAt.IsZero() && recordedAt.Before(lastPublished.recordedAt) {
+			return 0, fmt.Errorf("chronological renumber required: recording %s is earlier than published %s", recordedAt.Format(time.RFC3339Nano), lastPublished.recordedAt.Format(time.RFC3339Nano))
+		}
+		if lastPublished.recordedAt.IsZero() &&
+			(lastPublished.recordedDate > recordedDate || lastPublished.recordedDate == recordedDate) {
+			return 0, fmt.Errorf("chronological renumber required: existing episode date %s has no exact ordering evidence for recording %s", lastPublished.recordedDate, recordedAt.Format(time.RFC3339Nano))
+		}
+	}
+	if maxEpisodeOrdinal >= maxUGREENEpisodeOrdinal {
+		return 0, fmt.Errorf("UGREEN episode ordinal limit reached: %d", maxEpisodeOrdinal)
+	}
+	return maxEpisodeOrdinal + 1, nil
+}
+
+func nextRecordedAtIdentity(dir string, recordedAt time.Time) (int64, error) {
+	base := episodeIdentityForRecordedAt(recordedAt)
+	if base <= 0 {
+		return base, nil
+	}
+	for slot := int64(0); slot < chronologicalEpisodeIdentityBase; slot++ {
+		candidate := base + slot
+		reserved, err := episodeIdentityReserved(dir, candidate)
+		if err != nil {
+			return 0, err
+		}
+		if !reserved {
+			return candidate, nil
+		}
+	}
+	return 0, fmt.Errorf("recordedAt collision slots exhausted: %s", recordedAt.Format(time.RFC3339Nano))
+}
+
+func episodeIdentityReserved(dir string, target int64) (bool, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return false, err
@@ -273,16 +504,16 @@ func episodeNumberReserved(dir string, target int64) (bool, error) {
 	return false, nil
 }
 
-func episodeNumberFromLibraryPath(path string) int64 {
+func episodeIdentityFromLibraryPath(path string) int64 {
 	match := libraryEpisodeSlotPattern.FindStringSubmatch(filepath.Base(path))
 	if match == nil {
 		return 0
 	}
-	episodeNumber, err := strconv.ParseInt(match[1], 10, 64)
+	identity, err := strconv.ParseInt(match[1], 10, 64)
 	if err != nil {
 		return 0
 	}
-	return episodeNumber
+	return identity
 }
 
 // parseSourceFileMeta extracts aliasName, recordedAt, and title from a source
@@ -475,7 +706,7 @@ func writeFileAtomically(path string, content []byte, mode os.FileMode) error {
 	return os.Rename(tempPath, path)
 }
 
-func episodeNFOIsComplete(path, aliasName string, episodeNumber int64, recordedAt time.Time, title, platform string) bool {
+func episodeNFOIsComplete(path, aliasName string, episodeOrdinal, recordedAtIdentity int64, recordedAt time.Time, title, platform string) bool {
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return false
@@ -493,7 +724,8 @@ func episodeNFOIsComplete(path, aliasName string, episodeNumber int64, recordedA
 	return strings.Contains(text, fmt.Sprintf("<title>%s</title>", xmlEscape(displayTitle))) &&
 		strings.Contains(text, fmt.Sprintf("<showtitle>%s</showtitle>", xmlEscape(aliasName))) &&
 		strings.Contains(text, "<season>1</season>") &&
-		strings.Contains(text, fmt.Sprintf("<episode>%d</episode>", episodeNumber)) &&
+		strings.Contains(text, fmt.Sprintf("<episode>%d</episode>", episodeOrdinal)) &&
+		strings.Contains(text, fmt.Sprintf("<uniqueid type=\"bililive-recorded-at\" default=\"false\">%d</uniqueid>", recordedAtIdentity)) &&
 		strings.Contains(text, fmt.Sprintf("<studio>%s</studio>", xmlEscape(platform)))
 }
 
@@ -568,13 +800,27 @@ func ensureLibraryShowNFO(showDir string, meta sourceFileMeta, platform string) 
 	return nil
 }
 
-func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath string, meta sourceFileMeta, platform string) error {
-	episodeNumber := episodeNumberFromLibraryPath(targetPath)
-	if episodeNumber <= 0 {
+func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath string, meta sourceFileMeta, platform string, ordinalOverride ...int64) error {
+	fileEpisodeIdentity := episodeIdentityFromLibraryPath(targetPath)
+	if fileEpisodeIdentity <= 0 {
 		return nil
 	}
 
 	stem := sidecarStem(targetPath)
+	episodeOrdinal, hasPublicEpisode := episodeOrdinalFromNFO(stem + ".nfo")
+	if !hasPublicEpisode {
+		if len(ordinalOverride) > 0 && ordinalOverride[0] > 0 && ordinalOverride[0] <= maxUGREENEpisodeOrdinal {
+			episodeOrdinal = ordinalOverride[0]
+		} else if fileEpisodeIdentity > maxUGREENEpisodeOrdinal {
+			return fmt.Errorf("EnsureLibraryHardlink: historical recordedAt episode identity requires NFO ordinal migration: %s", targetPath)
+		} else {
+			episodeOrdinal = fileEpisodeIdentity
+		}
+	}
+	recordedAtIdentity := fileEpisodeIdentity
+	if recordedAtIdentity <= maxUGREENEpisodeOrdinal {
+		recordedAtIdentity = episodeIdentityForRecordedAt(meta.recordedAt)
+	}
 	seasonDir := filepath.Dir(targetPath)
 	showDir := filepath.Dir(seasonDir)
 	if err := ensureLibraryShowNFO(showDir, meta, platform); err != nil {
@@ -585,8 +831,8 @@ func ensureLibraryEpisodeSidecars(ctx context.Context, sourcePath, targetPath st
 	}
 
 	nfoPath := stem + ".nfo"
-	if !episodeNFOIsComplete(nfoPath, meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform) {
-		nfo := buildEpisodeNFO(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform)
+	if !episodeNFOIsComplete(nfoPath, meta.aliasName, episodeOrdinal, recordedAtIdentity, meta.recordedAt, meta.title, platform) {
+		nfo := buildEpisodeNFO(meta.aliasName, episodeOrdinal, recordedAtIdentity, meta.recordedAt, meta.title, platform)
 		if err := ensureTextFile(nfoPath, nfo); err != nil {
 			return fmt.Errorf("EnsureLibraryHardlink: write NFO %s: %w", nfoPath, err)
 		}
@@ -706,17 +952,18 @@ func prepareLibraryEpisodePublication(
 	targetPath string,
 	meta sourceFileMeta,
 	platform string,
+	episodeOrdinal int64,
+	recordedAtIdentity int64,
 ) (string, string, error) {
-	episodeNumber := episodeNumberFromLibraryPath(targetPath)
-	if episodeNumber <= 0 {
-		return "", "", fmt.Errorf("cannot parse episode number from target: %s", targetPath)
+	if episodeOrdinal <= 0 || recordedAtIdentity <= 0 {
+		return "", "", fmt.Errorf("invalid episode publication identity: ordinal=%d identity=%d", episodeOrdinal, recordedAtIdentity)
 	}
 
 	stagedStem := sidecarStem(stagedVideoPath)
 	nfoPath := stagedStem + ".nfo"
 	if err := writeFileAtomically(
 		nfoPath,
-		[]byte(buildEpisodeNFO(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, platform)),
+		[]byte(buildEpisodeNFO(meta.aliasName, episodeOrdinal, recordedAtIdentity, meta.recordedAt, meta.title, platform)),
 		0o644,
 	); err != nil {
 		return "", "", err
@@ -1025,13 +1272,14 @@ func restoreValidatedLibraryShowFiles(before, applied []libraryFileSnapshot) err
 // EnsureLibraryHardlink creates a Plex-style hard-link for sourcePath inside
 // libraryRoot when the normal host-side organizer cron hasn't run yet.
 //
-// 目标路径：<libraryRoot>/<aliasName>/Season 01/<aliasName>.S01E<identity>.<date> - <title>.mp4。
+// 目标路径：<libraryRoot>/<aliasName>/Season 01/<aliasName>.S01E<recordedAt identity>.<date> - <title>.mp4。
 //
 // Idempotent: if any file inside Season 01 already shares the same inode as
 // sourcePath, that path is returned as-is — no new file is created.
 //
-// 集号由 2020 年以来的微秒数和小型碰撞槽组成，保留精确顺序并限制在
-// JavaScript 安全整数范围内。
+// 文件名、NFO uniqueid 和字幕 sidecar 保留精确录制时间身份；NFO episode
+// 单独使用 UGREEN 兼容的连续小整数。若较早录像晚到，则拒绝静默追加，
+// 交给受控历史重编号。
 //
 // 同进程内按季度目录串行发布；最终无覆盖硬链接只会占用选定槽位，
 // 或在外部冲突时拒绝发布该单集的暂存 sidecar。
@@ -1071,30 +1319,23 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 		return "", fmt.Errorf("EnsureLibraryHardlink: mkdirAll %s: %w", seasonDir, err)
 	}
 
-	// 第二步：从真实录制开始时间推导稳定且有序的身份。
-	episodeNumber := episodeNumberForRecordedAt(meta.recordedAt)
-	if episodeNumber < 0 {
+	// 第二步：保留精确时间身份，但只把兼容的小整数 ordinal 暴露给 UGREEN。
+	recordedAtIdentity, err := nextRecordedAtIdentity(seasonDir, meta.recordedAt)
+	if err != nil {
+		return "", fmt.Errorf("EnsureLibraryHardlink: reserve recording-time identity: %w", err)
+	}
+	if recordedAtIdentity < 0 {
 		return "", fmt.Errorf("EnsureLibraryHardlink: recording time exceeds safe episode identity range: %s", meta.recordedAt.Format(time.RFC3339Nano))
 	}
-	if episodeNumber == 0 {
+	if recordedAtIdentity == 0 {
 		return "", fmt.Errorf("EnsureLibraryHardlink: no reliable recording start time: %s", sourcePath)
 	}
-	identityEnd := episodeNumber + chronologicalEpisodeIdentityBase
-	for episodeNumber < identityEnd {
-		reserved, reserveErr := episodeNumberReserved(seasonDir, episodeNumber)
-		if reserveErr != nil {
-			return "", fmt.Errorf("EnsureLibraryHardlink: scan recording-time identity: %w", reserveErr)
-		}
-		if !reserved {
-			break
-		}
-		episodeNumber++
-	}
-	if episodeNumber == identityEnd {
-		return "", fmt.Errorf("EnsureLibraryHardlink: recording-time identity collision space exhausted: %s", seasonDir)
+	episodeOrdinal, err := compatibleEpisodeOrdinalForRecordedAt(seasonDir, meta.recordedAt)
+	if err != nil {
+		return "", fmt.Errorf("EnsureLibraryHardlink: %w", err)
 	}
 
-	targetName := buildEpisodeFilename(meta.aliasName, episodeNumber, meta.recordedAt, meta.title, ext)
+	targetName := buildEpisodeFilename(meta.aliasName, recordedAtIdentity, meta.recordedAt, meta.title, ext)
 	targetPath := filepath.Join(seasonDir, targetName)
 
 	if _, statErr := os.Stat(targetPath); statErr == nil {
@@ -1128,6 +1369,8 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 		targetPath,
 		meta,
 		platform,
+		episodeOrdinal,
+		recordedAtIdentity,
 	)
 	showApplied, snapshotErr := snapshotLibraryShowFiles(showDir)
 	if prepareErr != nil || snapshotErr != nil {
@@ -1210,7 +1453,7 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 					filepath.Dir(stagedPath),
 				)
 			}
-			if sidecarErr := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingLink, meta, platform); sidecarErr != nil {
+			if sidecarErr := ensureLibraryEpisodeSidecars(ctx, sourcePath, existingLink, meta, platform, episodeOrdinal); sidecarErr != nil {
 				return "", sidecarErr
 			}
 			return existingLink, nil
@@ -1222,9 +1465,10 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 	}
 	cleanupStaging()
 	logrus.WithFields(logrus.Fields{
-		"source":  sourcePath,
-		"target":  targetPath,
-		"episode": episodeNumber,
+		"source":               sourcePath,
+		"target":               targetPath,
+		"episode":              episodeOrdinal,
+		"recorded_at_identity": recordedAtIdentity,
 	}).Info("EnsureLibraryHardlink: 已为源文件创建字幕库硬链接（未等待 cron）")
 	return targetPath, nil
 }

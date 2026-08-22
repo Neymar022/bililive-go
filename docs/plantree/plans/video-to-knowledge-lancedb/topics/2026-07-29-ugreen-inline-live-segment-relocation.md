@@ -206,3 +206,11 @@ GREEN
 - 只删除已确认无引用的临时 app tar；保留所有 Docker rollback/local 镜像。`p6-monitor-http` 的 bind source 虽缺失，但停止容器仍引用其 local worker image，owner 未证明废弃，因此不清理。735GB chronological-renumber 恢复备份继续保留。
 
 回滚日期校正时，只从新备份根恢复 5 个 NFO，并按 `rows-before.psv` 对 5 个 episode ID 做带当前值条件的反向事务；不得恢复整表、改 episode identity 或删除 MP4。
+
+## 2026-08-22 Android TV 公开集号兼容
+
+- Mac 影视中心能展示完整选集而 Android TV 只显示一集，媒体和 UGREEN episode 行均未缺失。真实 A/B canary 证明：只要 NFO `<episode>` 为连续 `1..N`，Android TV 即能识别总集数；长 recordedAt 文件名仍兼容。A 组 `file_path/local_count` treatment 与未 treatment 的 B 组结果相同，不是根因。
+- 稳定契约因此拆成两层：文件名和 `<uniqueid type="bililive-recorded-at">` 保留 recordedAt identity，供排序、引用和 join；UGREEN 消费的 NFO `<episode>` 只发布按 recordedAt 排列的连续 ordinal。晚到更早场次不得静默追加，必须 fail closed 后走受控重编号。
+- 历史 apply 只原子替换 441 个 NFO 的 `<episode>`，不改 MP4、文件名、字幕、JSON 或 manifest。UGREEN watcher 未自然同步既有 DB 值后，先固定 `412` 条文件/episode、`14` 个 category、冲突 `0`，再在同一事务更新 `file_info.episode_num` 与 `ug_television_episode.episode`；触发器仅登记官方增量同步。最终 DB 长公开集号为 `0/0`，NFO、file_info 与 episode 三方一致。
+- 回滚根 `/volume2/docker/bililive-go/backups/ugreen-episode-ordinal-20260822-233003/` 包含原 NFO 硬链接、媒体守恒清单、精确 DB CSV 与双向 SQL。生产后验为 `17` 个 show、`441` 个 NFO、`441 / 854478547076 bytes` 媒体守恒，441 个长 identity 文件名均保留。A/B canary 目录、临时关系、6 个媒体硬链接和 canary 备份已完整删除。
+- 源码防复发由 `EnsureLibraryHardlink` 统一生成 identity 文件名、ordinal NFO 和 identity uniqueid；历史 planner/apply driver 只做 NFO fixed-point，并在缺 NFO、identity 不匹配、目标冲突或媒体变化时拒绝执行。
