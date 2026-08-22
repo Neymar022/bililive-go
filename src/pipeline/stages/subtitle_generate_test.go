@@ -159,6 +159,11 @@ func TestSubtitleGenerateQueuesKnowledgeSyncAfterSubtitleSuccess(t *testing.T) {
 	libraryPath := filepath.Join(libraryRoot, "旭东聊装修", "Season 01", "旭东聊装修.S01E1673593262559664.2026-05-27 - 装修达人。免费连麦解决装修问题。装修知识科普官.mp4")
 	require.NoError(t, os.MkdirAll(filepath.Dir(libraryPath), 0o755))
 	require.NoError(t, os.Link(sourcePath, libraryPath))
+	require.NoError(t, os.WriteFile(
+		strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath))+".nfo",
+		[]byte("<episodedetails><episode>1</episode></episodedetails>"),
+		0o644,
+	))
 
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request subtitle.ProcessRequest

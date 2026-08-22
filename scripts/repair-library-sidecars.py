@@ -97,6 +97,16 @@ class ChronologicalMediaConservation:
     after_bytes: int
 
 
+@dataclass(frozen=True)
+class UGREENEpisodeOrdinal:
+    path: Path
+    nfo_path: Path
+    recorded_at: datetime
+    identity: int
+    old_episode: int
+    ordinal: int
+
+
 def normalize_component(value: str) -> str:
     """Match bililive-go's media-library component cleanup for identity checks."""
     value = "".join(
@@ -213,6 +223,61 @@ def plan_chronological_episode_renumber(
             for left, right in zip(ordered, ordered[1:])
         ):
             raise ValueError(f"non-monotonic episode identity: {show_dir}")
+    return planned
+
+
+def plan_ugreen_episode_ordinals(episodes: list[Episode]) -> list[UGREENEpisodeOrdinal]:
+    """保留 recordedAt 文件身份，只规划按时间连续的公开 NFO 集号。"""
+    grouped: dict[Path, list[tuple[Episode, datetime]]] = {}
+    for episode in episodes:
+        recorded_at = episode_recorded_at(episode)
+        grouped.setdefault(episode.show_dir.resolve(), []).append((episode, recorded_at))
+
+    planned: list[UGREENEpisodeOrdinal] = []
+    for show_dir, show_episodes in sorted(grouped.items(), key=lambda item: str(item[0])):
+        show_episodes.sort(key=lambda item: (item[1], item[0].episode, str(item[0].path)))
+        for ordinal, (episode, recorded_at) in enumerate(show_episodes, start=1):
+            nfo_path = episode.path.with_suffix(".nfo").resolve()
+            if not nfo_path.is_file():
+                raise ValueError(f"missing episode NFO: {nfo_path}")
+            old_text = _xml_field_values(nfo_path, ("episode",))["episode"]
+            try:
+                old_episode = int(old_text)
+            except ValueError as exc:
+                raise ValueError(f"invalid episode ordinal in NFO: {nfo_path}: {old_text!r}") from exc
+            base_identity = chronological_episode_identity(recorded_at)
+            if not base_identity <= episode.episode < base_identity + CHRONOLOGICAL_EPISODE_IDENTITY_BASE:
+                raise ValueError(
+                    f"recordedAt filename identity mismatch: {episode.path}: "
+                    f"expected {base_identity}..{base_identity + CHRONOLOGICAL_EPISODE_IDENTITY_BASE - 1}"
+                )
+            try:
+                nfo_root = ET.fromstring(nfo_path.read_text(encoding="utf-8"))
+            except (OSError, ET.ParseError) as exc:
+                raise ValueError(f"invalid episode NFO: {nfo_path}: {exc}") from exc
+            recorded_at_ids = [
+                (node.text or "").strip()
+                for node in nfo_root.findall("uniqueid")
+                if node.get("type") == "bililive-recorded-at"
+            ]
+            if recorded_at_ids != [str(episode.episode)]:
+                raise ValueError(
+                    f"recordedAt NFO uniqueid mismatch: {nfo_path}: "
+                    f"expected {episode.episode}, got {recorded_at_ids}"
+                )
+            planned.append(
+                UGREENEpisodeOrdinal(
+                    path=episode.path.resolve(),
+                    nfo_path=nfo_path,
+                    recorded_at=recorded_at,
+                    identity=episode.episode,
+                    old_episode=old_episode,
+                    ordinal=ordinal,
+                )
+            )
+
+        if any(item.ordinal != index for index, item in enumerate(planned[-len(show_episodes) :], start=1)):
+            raise ValueError(f"non-contiguous UGREEN episode ordinals: {show_dir}")
     return planned
 
 
@@ -924,6 +989,11 @@ def main() -> int:
         help="print a read-only bijective rename plan using exact recorded_at; never writes files",
     )
     parser.add_argument(
+        "--plan-ugreen-episode-ordinals",
+        action="store_true",
+        help="print read-only chronological NFO episode ordinals without renaming media or sidecars",
+    )
+    parser.add_argument(
         "--fail-on-duplicate-shows",
         action="store_true",
         help="return a non-zero status when one normalized show identity maps to multiple directories",
@@ -941,6 +1011,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.merge_duplicate_shows and not args.apply:
         parser.error("--merge-duplicate-shows requires --apply")
+    if args.plan_chronological_renumber and args.plan_ugreen_episode_ordinals:
+        parser.error("choose only one planning mode")
 
     root = Path(args.root).resolve()
     if root.parent == root:
@@ -1005,6 +1077,27 @@ def main() -> int:
             f"media_before={conservation.before_count}/{conservation.before_bytes} "
             f"media_after={conservation.after_count}/{conservation.after_bytes} "
             "conflicts=0 monotonic=true"
+        )
+        return 0
+    if args.plan_ugreen_episode_ordinals:
+        if args.apply or args.merge_duplicate_shows:
+            parser.error("--plan-ugreen-episode-ordinals is read-only and cannot be combined with apply modes")
+        plan = plan_ugreen_episode_ordinals(episodes)
+        changed = [item for item in plan if item.old_episode != item.ordinal]
+        for item in changed:
+            print(
+                "[ugreen-episode-ordinal] "
+                f"recorded_at={item.recorded_at.isoformat()} identity={item.identity} "
+                f"old_episode={item.old_episode} ordinal={item.ordinal} "
+                f"path={item.path} nfo={item.nfo_path}"
+            )
+        media_count = len(episodes)
+        media_bytes = sum(item.path.stat().st_size for item in plan)
+        print(
+            f"ugreen-episode-ordinals dry-run: shows={len({item.path.parent.parent for item in plan})} "
+            f"episodes={len(plan)} changed={len(changed)} nfo_edits={len(changed)} "
+            f"filenames_changed=0 media_before={media_count}/{media_bytes} "
+            f"media_after={media_count}/{media_bytes} monotonic=true"
         )
         return 0
 

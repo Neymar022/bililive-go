@@ -45,13 +45,14 @@ func TestMediaDisplayTitleKeepsDotsInsideRoomTitle(t *testing.T) {
 
 func TestEpisodeNFOSeparatesDisplayTitleFromChronologicalIdentity(t *testing.T) {
 	recordedAt := time.Date(2026, 8, 18, 7, 42, 16, 0, time.FixedZone("UTC+8", 8*60*60))
-	episode := episodeNumberForRecordedAt(recordedAt)
-	nfo := buildEpisodeNFO("主播", episode, recordedAt, "房间标题", "抖音")
+	identity := episodeIdentityForRecordedAt(recordedAt)
+	nfo := buildEpisodeNFO("主播", 1, identity, recordedAt, "房间标题", "抖音")
 
 	assert.Contains(t, nfo, "<title>2026-08-18 - 房间标题</title>")
 	assert.Contains(t, nfo, "<showtitle>主播</showtitle>")
-	assert.Contains(t, nfo, "<episode>"+fmt.Sprint(episode)+"</episode>")
-	assert.NotContains(t, nfo, "<title>"+fmt.Sprint(episode))
+	assert.Contains(t, nfo, "<episode>1</episode>")
+	assert.Contains(t, nfo, "<uniqueid type=\"bililive-recorded-at\" default=\"false\">"+fmt.Sprint(identity)+"</uniqueid>")
+	assert.NotContains(t, nfo, "<title>"+fmt.Sprint(identity))
 }
 
 func TestRecordDisplayTitleUsesRoomMetadataWithoutChangingIdentityPath(t *testing.T) {

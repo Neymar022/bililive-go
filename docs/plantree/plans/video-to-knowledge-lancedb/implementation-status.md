@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-08-19
+更新时间：2026-08-23
 
 ## State Ownership
 
@@ -36,6 +36,15 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
 
 ## Current Work
+
+### 2026-08-22 UGREEN Android TV 选集兼容修复
+
+- Android TV 真实 A/B canary 最终均显示 `3` 集且可正常选集：A 组保留长 recordedAt 文件名、只把 NFO `<episode>` 改为 `1..3`；B 组文件名和 NFO 都为 `1..3`。A 组额外修改 UGREEN `file_path/local_count` 后与未修改的 B 组表现一致，证明兼容 seam 是 NFO 公开集号，不是文件名或 DB 汇总字段。
+- 源码契约已固定：底层 `S01E<recordedAt identity>` 文件名和 NFO `bililive-recorded-at` uniqueid 继续保留精确身份；NFO `<episode>` 使用按 recordedAt 排列的连续小整数。较早录像晚到、缺可信时间或历史长 NFO 未迁移时 fail closed，不按任务完成顺序静默续号。
+- 生产 NFO fixed point 为 `17` 个合集、`441` 集，`filenames_changed=0`，MP4 `441 / 854478547076 bytes` 前后守恒。`441` 个 NFO 已原子改为每合集 `1..N`；UGREEN DB 中实际索引的 `412` 条、`14` 个合集经零冲突 fixed point 后事务同步 `file_info.episode_num` 与 `ug_television_episode.episode`，长公开集号由 `412/412` 变为 `0/0`。
+- 正式回滚根为 `/volume2/docker/bililive-go/backups/ugreen-episode-ordinal-20260822-233003/`，保留 441 个原 NFO、媒体 inode/size 清单、UGREEN 三表精确 CSV、apply/rollback SQL、driver 与 SHA-256。回滚必须先恢复 NFO，再在空闲门禁下执行带当前值断言的 DB rollback；不得改名或删除 MP4。
+- 新鲜生产后验为 `GREEN`：NFO `441/441` 连续、长 identity 文件名 `441/441` 保留、DB `412/412` 与 NFO ordinal 精确一致，媒体 inode/bytes 未变，Bililive API HTTP `200`、active `0`、update `idle`。两个 canary show、6 个临时硬链接、临时 DB 关系、canary 备份、远端上传副本和本地脚本/cache 已删除，原始媒体与正式回滚根保留。
+- 源码分支已基于最新 master 完成冲突复核、TDD、正式双轴 review 和项目门禁；review 要求的 identity/uniqueid 双校验、已有 ordinal 连续与时间单调校验、rollback 写前全量 NFO/媒体校验均已 GREEN。当前只剩 PR/CI/合并和必要 app 最小部署；生产历史数据修复与 canary 清理已完成。
 
 ### 2026-07-29 UGREEN inline live-session 错误归类修复
 

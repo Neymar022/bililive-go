@@ -227,6 +227,109 @@ class RepairLibrarySidecarsTest(unittest.TestCase):
             self.assertIn(f"path={task_sidecar.resolve()} pointer=/output_path", result.stdout)
             self.assertIn("references=1", result.stdout)
 
+    def test_ugreen_ordinal_plan_keeps_recorded_at_filenames_and_rewrites_only_public_episode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            module = self.load_script_module()
+            timestamps = (
+                module.datetime(2026, 6, 12, 19, 0, 0, 123456, tzinfo=module.MEDIA_LIBRARY_TIMEZONE),
+                module.datetime(2026, 6, 12, 19, 0, 0, 123789, tzinfo=module.MEDIA_LIBRARY_TIMEZONE),
+            )
+            paths: list[Path] = []
+            for index, recorded_at in enumerate(reversed(timestamps), start=1):
+                identity = module.chronological_episode_identity(recorded_at)
+                video = season / f"主播.S01E{identity}.2026-06-12 - 场次{index}.mp4"
+                video.write_bytes(f"video-{index}".encode())
+                video.with_suffix(".subtitle.json").write_text(
+                    json.dumps({"record_meta": {"start_time": recorded_at.isoformat()}}),
+                    encoding="utf-8",
+                )
+                video.with_suffix(".nfo").write_text(
+                    "<episodedetails>"
+                    f"<episode>{identity}</episode>"
+                    f'<uniqueid type="bililive-recorded-at" default="false">{identity}</uniqueid>'
+                    "</episodedetails>",
+                    encoding="utf-8",
+                )
+                paths.append(video.resolve())
+
+            plan = module.plan_ugreen_episode_ordinals(module.collect_episodes(root.resolve()))
+
+            self.assertEqual(paths, [item.path for item in reversed(plan)])
+            self.assertEqual([1, 2], [item.ordinal for item in plan])
+            self.assertEqual(sorted(timestamps), [item.recorded_at for item in plan])
+            self.assertTrue(all(item.identity == item.old_episode for item in plan))
+            self.assertTrue(all(item.path.exists() for item in plan), "dry-run must not rename media")
+
+    def test_ugreen_ordinal_plan_rejects_non_recorded_at_filename_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "主播.S01E0001.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                '{"record_meta":{"start_time":"2026-06-12T19:00:00.123456+08:00"}}',
+                encoding="utf-8",
+            )
+            video.with_suffix(".nfo").write_text(
+                "<episodedetails><episode>1</episode>"
+                '<uniqueid type="bililive-recorded-at" default="false">1</uniqueid>'
+                "</episodedetails>",
+                encoding="utf-8",
+            )
+
+            module = self.load_script_module()
+            with self.assertRaisesRegex(ValueError, "recordedAt filename identity mismatch"):
+                module.plan_ugreen_episode_ordinals(module.collect_episodes(root.resolve()))
+
+    def test_ugreen_ordinal_plan_rejects_mismatched_recorded_at_uniqueid(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            module = self.load_script_module()
+            recorded_at = module.datetime(
+                2026, 6, 12, 19, 0, 0, 123456, tzinfo=module.MEDIA_LIBRARY_TIMEZONE
+            )
+            identity = module.chronological_episode_identity(recorded_at)
+            video = season / f"主播.S01E{identity}.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                json.dumps({"record_meta": {"start_time": recorded_at.isoformat()}}),
+                encoding="utf-8",
+            )
+            video.with_suffix(".nfo").write_text(
+                "<episodedetails>"
+                f"<episode>{identity}</episode>"
+                f'<uniqueid type="bililive-recorded-at" default="false">{identity + 1}</uniqueid>'
+                "</episodedetails>",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "recordedAt NFO uniqueid mismatch"):
+                module.plan_ugreen_episode_ordinals(module.collect_episodes(root.resolve()))
+
+    def test_ugreen_ordinal_plan_fails_closed_without_episode_nfo(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir) / "video"
+            season = root / "主播" / "Season 01"
+            season.mkdir(parents=True)
+            module = self.load_script_module()
+            recorded_at = module.datetime(2026, 6, 12, 19, 0, tzinfo=module.MEDIA_LIBRARY_TIMEZONE)
+            identity = module.chronological_episode_identity(recorded_at)
+            video = season / f"主播.S01E{identity}.2026-06-12 - 场次.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text(
+                json.dumps({"record_meta": {"start_time": recorded_at.isoformat()}}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(ValueError, "missing episode NFO"):
+                module.plan_ugreen_episode_ordinals(module.collect_episodes(root.resolve()))
+
     def test_chronological_plan_refuses_missing_episode_nfo(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir) / "video"
