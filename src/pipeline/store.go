@@ -105,6 +105,14 @@ func (s *SQLiteStore) initSchema() error {
 		state_json TEXT NOT NULL
 	);
 	CREATE INDEX IF NOT EXISTS idx_recording_sessions_live_id ON pipeline_recording_sessions(live_id);
+	CREATE TABLE IF NOT EXISTS recording_runs (
+		live_id TEXT PRIMARY KEY,
+		run_id TEXT NOT NULL,
+		mode TEXT NOT NULL CHECK(mode IN ('once', 'continuous')),
+		state TEXT NOT NULL,
+		session_id TEXT NOT NULL DEFAULT '',
+		pause_reason TEXT NOT NULL DEFAULT ''
+	);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {

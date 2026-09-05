@@ -1,6 +1,7 @@
-import { Modal, Input } from 'antd';
+import { Modal, Input, Radio } from 'antd';
 import React from 'react';
 import API from '../../utils/api';
+import { RecordingMode, recordingModeOptions } from '../../types/recording';
 
 const api = new API();
 
@@ -14,7 +15,8 @@ class AddRoomDialog extends React.Component<Props> {
         ModalText: '请输入直播间的URL地址',
         visible: false,
         confirmLoading: false,
-        textView: ''
+        textView: '',
+        recordingMode: 'once' as RecordingMode,
     };
 
     showModal = () => {
@@ -22,6 +24,7 @@ class AddRoomDialog extends React.Component<Props> {
             ModalText: '请输入直播间的URL地址',
             visible: true,
             confirmLoading: false,
+            recordingMode: 'once',
         });
     };
 
@@ -31,8 +34,8 @@ class AddRoomDialog extends React.Component<Props> {
             confirmLoading: true,
         });
 
-        api.addNewRoom(this.state.textView)
-            .then((rsp) => {
+        api.addNewRoom(this.state.textView, this.state.recordingMode)
+            .then(() => {
                 // 保存设置
                 api.saveSettingsInBackground();
                 this.setState({
@@ -77,6 +80,15 @@ class AddRoomDialog extends React.Component<Props> {
                     onCancel={this.handleCancel}>
                     <p>{ModalText}</p>
                     <Input size="large" value={textView} placeholder="https://" onChange={this.textChange} />
+                    <Radio.Group
+                        aria-label="录制模式"
+                        optionType="button"
+                        options={recordingModeOptions}
+                        value={this.state.recordingMode}
+                        disabled={confirmLoading}
+                        onChange={event => this.setState({ recordingMode: event.target.value })}
+                        style={{ marginTop: 16 }}
+                    />
                 </Modal>
             </div>
         );

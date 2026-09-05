@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Tabs, Button, message, Spin, Input, Switch, InputNumber, Form,
-  Tag, Space, Divider, Alert, Modal, Select,
+  Tag, Space, Divider, Alert, Modal, Select, Radio,
   List, Badge, Tooltip, Card, Collapse
 } from 'antd';
 // @ts-ignore
@@ -18,6 +18,7 @@ import { highlight, languages } from 'prismjs';
 import 'prismjs/components/prism-yaml';
 import 'prismjs/themes/prism.css';
 import API from '../../utils/api';
+import { recordingModeOptions } from '../../types/recording';
 import './config-info.css';
 import './config-gui.css';
 import {
@@ -1797,6 +1798,7 @@ export const RoomConfigForm: React.FC<{
       // 转换 attributes: map -> array
       const displayRoom = {
         ...room,
+        recording_mode: room.recording_mode || 'continuous',
         stream_preference: room.stream_preference ? {
           ...room.stream_preference,
           attributes: room.stream_preference.attributes
@@ -1865,6 +1867,12 @@ export const RoomConfigForm: React.FC<{
       <ConfigField label="启用监控">
         <Form.Item name="is_listening" valuePropName="checked" noStyle>
           <Switch />
+        </Form.Item>
+      </ConfigField>
+
+      <ConfigField label="录制模式">
+        <Form.Item name="recording_mode" noStyle>
+          <Radio.Group aria-label="录制模式" optionType="button" options={recordingModeOptions} />
         </Form.Item>
       </ConfigField>
 

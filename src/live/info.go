@@ -3,6 +3,7 @@ package live
 import (
 	"encoding/json"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/types"
 )
 
@@ -57,6 +58,9 @@ type Info struct {
 	Status               bool // means isLiving, maybe better to rename it
 	Listening, Recording bool
 	RecordingPreparing   bool // 有 recorder 但尚未真正开始录制（重试中）
+	RecordingMode        configs.RecordingMode
+	RecordingState       string
+	RecordingPauseReason string
 	Initializing         bool
 	CustomLiveId         string
 	AudioOnly            bool
@@ -85,6 +89,9 @@ func (i *Info) MarshalJSON() ([]byte, error) {
 		Listening                 bool                   `json:"listening"`
 		Recording                 bool                   `json:"recording"`
 		RecordingPreparing        bool                   `json:"recording_preparing,omitempty"`
+		RecordingMode             configs.RecordingMode  `json:"recording_mode"`
+		RecordingState            string                 `json:"recording_state"`
+		RecordingPauseReason      string                 `json:"recording_pause_reason,omitempty"`
 		Initializing              bool                   `json:"initializing"`
 		LastStartTime             string                 `json:"last_start_time,omitempty"`
 		LastStartTimeUnix         int64                  `json:"last_start_time_unix,omitempty"`
@@ -103,6 +110,9 @@ func (i *Info) MarshalJSON() ([]byte, error) {
 		Listening:                 i.Listening,
 		Recording:                 i.Recording,
 		RecordingPreparing:        i.RecordingPreparing,
+		RecordingMode:             i.RecordingMode,
+		RecordingState:            i.RecordingState,
+		RecordingPauseReason:      i.RecordingPauseReason,
 		Initializing:              i.Initializing,
 		AudioOnly:                 i.AudioOnly,
 		NickName:                  i.Live.GetOptions().NickName,

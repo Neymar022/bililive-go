@@ -1077,13 +1077,14 @@ func SetLiveRoomId(url string, id types.LiveID) (*Config, error) {
 }
 
 type LiveRoom struct {
-	Url         string       `yaml:"url" json:"url"`
-	IsListening bool         `yaml:"is_listening" json:"is_listening"`
-	LiveId      types.LiveID `yaml:"-" json:"live_id,omitempty"`
-	Quality     int          `yaml:"quality,omitempty" json:"quality,omitempty"`
-	AudioOnly   bool         `yaml:"audio_only,omitempty" json:"audio_only,omitempty"`
-	NickName    string       `yaml:"nick_name,omitempty" json:"nick_name,omitempty"`
-	SchemeUrl   string       `yaml:"scheme" json:"scheme,omitempty"`
+	Url           string        `yaml:"url" json:"url"`
+	IsListening   bool          `yaml:"is_listening" json:"is_listening"`
+	LiveId        types.LiveID  `yaml:"-" json:"live_id,omitempty"`
+	Quality       int           `yaml:"quality,omitempty" json:"quality,omitempty"`
+	AudioOnly     bool          `yaml:"audio_only,omitempty" json:"audio_only,omitempty"`
+	NickName      string        `yaml:"nick_name,omitempty" json:"nick_name,omitempty"`
+	SchemeUrl     string        `yaml:"scheme" json:"scheme,omitempty"`
+	RecordingMode RecordingMode `yaml:"recording_mode,omitempty" json:"recording_mode,omitempty"`
 
 	// 房间级可覆盖配置
 	OverridableConfig `yaml:",inline" json:",inline"` // 房间级配置覆盖
@@ -1317,6 +1318,11 @@ func (c *Config) Verify() error {
 	}
 	if err := c.Subtitle.Verify(c.OutPutPath); err != nil {
 		return err
+	}
+	for _, room := range c.LiveRooms {
+		if err := room.RecordingMode.Validate(); err != nil {
+			return err
+		}
 	}
 
 	// 验证平台配置

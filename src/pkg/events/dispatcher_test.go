@@ -73,3 +73,16 @@ func TestOrderedEventsPreserveLifecycleWithoutBlockingOtherRooms(t *testing.T) {
 		t.Fatal("开播登记后关播事件未继续")
 	}
 }
+
+func TestWaitForOrderedEventsHonorsRoomAndCancellation(t *testing.T) {
+	d := NewDispatcher(context.Background())
+	release := make(chan struct{})
+	d.AddEventListener("stop", NewEventListener(func(*Event) { <-release }))
+	d.DispatchEvent(NewOrderedEvent("stop", nil, "room"))
+	assert.NoError(t, WaitForOrderedEvents(context.Background(), d, "other"))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	assert.ErrorIs(t, WaitForOrderedEvents(ctx, d, "room"), context.DeadlineExceeded)
+	close(release)
+	assert.NoError(t, WaitForOrderedEvents(context.Background(), d, "room"))
+}

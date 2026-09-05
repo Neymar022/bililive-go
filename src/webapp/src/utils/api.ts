@@ -6,6 +6,7 @@
 
 import Utils from './common';
 import { StreamPreferenceV2 } from '../types/stream';
+import { RecordingMode } from '../types/recording';
 
 const utils = new Utils();
 
@@ -30,11 +31,12 @@ class API {
      * 添加新的直播间
      * @param url URL
      */
-    addNewRoom(url: string) {
+    addNewRoom(url: string, recordingMode: RecordingMode = 'continuous') {
         const reqBody = [
             {
                 "url": url,
-                "listen": true
+                "listen": true,
+                "recording_mode": recordingMode,
             }
         ];
         return utils.requestPost(`${BASE_URL}/lives`, reqBody);
@@ -445,4 +447,3 @@ class API {
 }
 
 export default API;
-

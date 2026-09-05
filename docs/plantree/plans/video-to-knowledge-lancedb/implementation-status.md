@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-09-05
+更新时间：2026-09-06
 
 ## State Ownership
 
@@ -39,9 +39,10 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 
 ### 2026-09-05 烧录发布契约根因修复：方案澄清
 
-- 状态：用户批准两批实施；无 token budget Goal active。第一批源码已提交 `ff6ac37`、UTC 契约增量 `3c45403`，草稿 [PR #51](https://github.com/Neymar022/bililive-go/pull/51)；A7 工具已通过本地审查，生产采用未完成，第二批单次录制未实现；未合并或修改生产。既存未跟踪 `scripts/apply-chronological-renumber.py` 保留，不纳入提交。
+- 状态：用户批准两批实施。第一批 [PR #51](https://github.com/Neymar022/bililive-go/pull/51) 已 squash 合并为 `5f7194b8eac69067814791a8db49f522c462cdc0`，master CI/E2E/镜像/Warmup 全部成功；尚未部署、历史 apply 或采用/retry。第二批独立分支 `codex/recording-mode-once` 已接通运行入口/API/UI，完成本地验证与正式双轴审查，准备提交；基线 `30cad3b` 与 `origin/master=5f7194b` 源码树相同。既存未跟踪 `scripts/apply-chronological-renumber.py` 及两个 `__pycache__` 保留，不纳入提交。
+- Goal 状态异常：本轮开始读为 active，23:19 +08 读为 blocked；本轮未调用 update_goal。恢复同目标 create_goal 返回 unfinished goal，工具无 active 更新能力。已通知用户在 UI 恢复；不能为重建 Goal 伪标 complete。此状态不表示第二批源码不可继续，也不表示完整验收完成。
 - 已验根因：F1 运行时将无 MP4/MKV 的旧 sidecar 算入公开剧集；F2 聚合 NFO writer 将公开 ordinal 写回长 identity，且旧测试断言该错误输出。两条真实代码 overlay 诊断均连续两次 RED，空库对照 PASS。
-- 运行态依据：本轮 `/api/info.git_hash` 与远端 master 均为 `0ce2dd5`；不是未部署。任务错误发生在 worker 调用前，worker `/healthz` 为 200，存在当日 `actual_burn_provider=remote-mac` completed 证据。易变运行数值以执行前新鲜 API 为准。
+- 运行态依据：诊断时生产与 master 同为 `0ce2dd5`，证明旧修复已部署但未覆盖两条入口；第一批现已发布 `5f7194b`，生产最近读取仍为 `0ce2dd5`。任务错误发生在 worker 调用前，worker `/healthz` 为 200，存在诊断当日 `actual_burn_provider=remote-mac` completed 证据。易变运行数值以执行前新鲜 API 为准。
 - D1（Q1 已确认）：允许受影响合集按 recordedAt 重排连续展示序号；底层 identity、路径不变，播放记录与收藏不得丢失或串集。自动处理范围由 D8 限定。
 - D2（Q2 已确认）：小范围统一发布规则、定向修复历史元数据、恢复同根因且输入可验证的失败任务。保留冲突保护，不删除 MP4，不盲目重试全量失败，不重写远端烧录平台。
 - D3（Q3 已确认）：证据不足或关系冲突仅停止受影响合集的发布/恢复；其他合集继续，媒体保留，不猜测关联。
@@ -57,20 +58,25 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 第二批已决：`recording_mode=once|continuous`；新增 UI 默认 once，旧配置/旧 API 缺字段保持 continuous。单次为当前剩余/下一场，连续离线三分钟结束，请求失败不当离线；全场无可播放视频自动等下一场。留下可播放视频即消费额度，不等待字幕/烧录；未确认结果前不录下一场。不加总时长上限。
 - 生命周期已决：模式切换本场生效但不打断录制；手动停止结束本轮，已有视频继续处理、不自动重开。等待状态可重启恢复；录制中崩溃且无法证明同场时暂停待确认，保留文件和额度状态。
 - 两批分别走定向测试、一次正式 review、仓库提交门禁、中文 PR/CI/合并/镜像及最小部署。第一批上线后即可开发第二批，不等待全部积压。自动后验、Mac、聚合后下一次发布及用户投影仪实测全部通过前不标记整体完成。
-- 技术边界：场次结束必须等待最终 recorder 退出和末段入队登记，不能仅用 LiveEnd/RecorderStop/quiet window。媒体发布与知识开关解耦，单段/多段共用就绪判断；复用库外工作区、SQLite 与持久化调度。Compose 声明 app/worker 共享绝对根；运行容器 Mounts 尚待部署前只读验证。
-- 已实现未发布：普通/聚合统一 NFO writer；有效 MP4/MKV 排序；SQLite 场次/producer/完整输入集合；三分钟离线确认；确定性库外处理；完整场次公开与知识开关解耦；`retry?mode=resume` 保留检查点/计划并比较交换；历史工具缺失 uniqueid 恢复、独立小 NFO 备份、并发变更拒绝自动回滚。
+- 技术边界：场次结束必须等待最终 recorder 退出和末段入队登记，不能仅用 LiveEnd/RecorderStop/quiet window。媒体发布与知识开关解耦，单段/多段共用就绪判断；复用库外工作区、SQLite 与持久化调度。用户返回运行容器核对：app/worker 共享同一 NAS 根，均 RW；生产写前仍需刷新。
+- 第一批已发布未部署：普通/聚合统一 NFO writer；有效 MP4/MKV 排序；SQLite 场次/producer/完整输入集合；三分钟离线确认；确定性库外处理；完整场次公开与知识开关解耦；`retry?mode=resume` 保留检查点/计划并比较交换；历史工具缺失 uniqueid 恢复、独立小 NFO 备份、并发变更拒绝自动回滚。
 - 最新定向 RED→GREEN：库根 symlink alias 共用发布锁；收尾等待移出 recorder manager 全局锁且仍计活跃；处理目录既有文件/metadata 归属、符号链接、完成产物缺失均在 worker 前拒绝；公开成品 NFO/MP4/SRT 损坏拒绝成功复用。末段迟到/乱序、SQLite 重开、失败续跑、知识失败及不重复烧录集成通过。
 - 最新保护：同房间事件 FIFO、停止与派发互斥；末段/封口/槽位释放唤醒调度。新录制 capture 与 worker processing 均位于库外 `.live_session_segments`，避开生产 organizer 的 `srt_video` 扫描；不改既有路径/cron。worker 独立 attempt，MP4/SRT/ASS 无覆盖硬链接提交；metadata 比较当前版本后更新；明确 Mac unavailable 以外的失败保留未确认状态。
 - 正式审查增量：冲突后第二次进入仍拒绝外来 MP4、HTTP 500/502/504 后续跑不重复 worker、真实 recorder Stop panic 后再关等待线程退出、Start 登记失败可 Close，均 RED→GREEN。确认响应落盘后可 CAS 回收，部分提交可续接；未确认/外来响应拒绝；聚合后下一次普通发布 episode=2 通过。Standards/Spec 限定复审均零剩余发现，不覆盖 A7/第二批/生产。六包 race、Python 30 项及 21:26 +08 `make build-web dev lint test` 全绿。全量首轮本地 HTTP EADDRNOTAVAIL 后定向及全量复跑通过，未修改网络配置。
-- 历史 dry-run：熊小电 4 集 / 7,807,358,890 bytes GREEN，仅聚合 NFO 公开集号需改为 4 并恢复 identity；天津蛋哥读取首个 `.subtitle.json` PermissionError，未绕过坏/不可读 metadata。Python 两文件 30 项通过，支持 MP4/MKV、双 identity 时间恢复、重复媒体拒绝及 `--only-show`。未生产写入。
-- 最新生产只读：21:06 +08 `sudo -n -l` 仍需密码；随后 API task1518 failed、session961 normal 结束时间 2026-09-04 19:00:19，task 含 3 个转换 MP4 和完整阶段链，但旧 `normal` 不足以证明末段闭合。20:36 active=2/update idle 仅历史快照；运行 Mounts 未验证，已请求用户只读 inspect，不使用聊天历史密码。
+- 历史 dry-run：用户返回天津 60 集 GREEN、task1518/session961 的 3 个媒体输入通过采用核验；尚未 apply/retry。熊小电初次用户 RED 为目录名仅写 `熊小电`；23:25 +08 SSH 对实际 `video/熊小电-百起的家电课堂` 重跑 GREEN：4 集 / 7,807,358,890 bytes、仅 1 NFO 需改，fingerprint `760ec65d50ce1ce0c73f6cf7c1ae09dc237e9c8615fa4ec62631fac1d19d17ff`。非媒体丢失，不修改既有路径。
+- 最新生产只读：09-06 00:16 +08 active=0、running=0、pending=11、update=idle，无 ffmpeg，`video/srt_video/.live_session_segments` 近五分钟媒体/sidecar 写入为 0，运行 `0ce2dd5`。原录制门禁已清空；00:41 +08 SSH 密钥仍可用但 `sudo -n` 需要密码，当前写入阻塞为交互 sudo。权威 SQLite 在 `video/.appdata/db/`，不得误用 `video/pipeline.db`。没有 apply/retry/部署，不使用聊天历史密码。
 - 历史定向盘点：session961 仅 task1518；源目录当天 3 个 MP4 与阶段检查点一致，公开库当天零条目。旧进程内日志已不含该场次；SQLite lives 仅有 normal 结束、iostats 不含文件/producer 登记。不能仅以安静目录伪造完整场次。未采用的历史场次在 resume 状态变更前拒绝，保留原失败原因/检查点。
-- CI 增量：`3c45403` 的 build/build-web/test/lint/E2E/AI 指示全部成功。UTC 三反例及跨日普通/聚合契约已 RED→GREEN，统一 UTC+8 且 identity 不变；UTC+14 legacy sidecar 日期偏移和重复进入 inode/mtime 验证通过，双轴限定复审无剩余发现。`claude-review` run `33969983901` 因 GitHub App 未安装而 token exchange 401，不改认证、不盲目重跑。
+- CI 增量：`30cad3b` 的 build/build-web/test/lint/E2E/AI 指示全部成功，含新纳入的 38 项 Python 门禁。UTC 三反例及跨日普通/聚合契约已 RED→GREEN，统一 UTC+8 且 identity 不变；UTC+14 legacy sidecar 日期偏移和重复进入 inode/mtime 验证通过，双轴限定复审无剩余发现。`claude-review` run `33971518382` 仍为 GitHub App 认证失败，不改认证、不盲目重跑。
 - A7 证据突破：可读磁盘日志 `video/bililive-go-2026-09-04.log` 保留 task1518 完整前处理。按实际 `room=/565107510570` 过滤：行 126642 Record Start、127716 入队 1 文件、128351 Record End、128352 最终 defer 录制摘要 1 文件；旧 `0ce2dd5` 的 `run()` 在 `tryRecord` 返回后 defer 推送摘要，可作为输入封口证据。SQLite 初始 1 FLV → fix_flv 3 FLV → convert_mp4 3 MP4 完整链一致，subtitle 首次失败于库路径检查。旧 RecordInfo.start_time 是入队时间 18:58:16，实际起点由场次与初始文件同证为 18:01:35；历史采用必须校正该任务时间而不改既有媒体路径，不能只注入 producer。
 - A7 工具：`scripts/adopt-recording-session.py` 限定单 producer/单 task、完整 fix→convert→subtitle 且 worker 前失败；日志最终摘要、无遗漏尾段、alias、阶段链和现存媒体一致才采用。事务内重验计划，精确备份任务行，校正 producer/真实起点并登记历史 membership；低 rowid 不抢占当前场次。保持 failed、not_before、全部检查点及媒体；采用不是重试，rollback 拒绝覆盖已续跑状态。8 项测试及 Standards/Spec 审查通过；未掉电故障注入。
 - 最新本地验证：22:16 +08、UTC 环境 `make build-web dev lint test` 全绿；38 项 Python focused 全绿并纳入 CI；工具同形 SQL/JSON → SQLite 重开 → Recover → Resume → CompleteMedia 的 Go 兼容测试通过。全 Python discovery 的一个既存 Docker workflow literal 断言漂移不属本批，不改发布架构。
-- 只读权限交接：`/tmp/bililive-publication-readonly.WIVeGs/preflight.py` 及三个维护脚本已用 `scp -O` 上传并逐文件 SHA 对齐。用户命令：`ssh -tt -i ~/.ssh/openclaw-nas-sync Neymar@192.168.1.80 'sudo -- /usr/bin/python3 -B /tmp/bililive-publication-readonly.WIVeGs/preflight.py'`；只读 Mounts/Compose/工作区、API、天津/熊小电 ordinal 与 session961 adoption dry-run，不写生产 DB/媒体、不 pull/rebuild。尚待用户输出，无 SSH/sleep 等待进程。
-- 下一步：提交 A7 工具与兼容/CI 增量；收到只读结果后仅补缺失证据，A7 fixed point 闭合后才合并发布。生产写前新鲜门禁/挂载与精确备份。第二批独立分支准备，不等待全量积压、不混入第一批 PR。
+- 只读权限交接已返回：`/tmp/bililive-publication-readonly.WIVeGs/preflight.py` 及三个维护脚本已用 `scp -O` 上传并逐文件 SHA 对齐；用户交互 sudo 核对结果见上。wrapper 中熊小电旧简写不再作为 fixed point；后续维护用实际完整目录名。未写生产 DB/媒体，未 pull/rebuild。
+- 第二批本地：配置 `recording_mode` 枚举/校验/持久化，旧省略保持 continuous 与原监听标志；`recording_runs` 复用 pipeline SQLite，等待/录制/判定/完成/暂停/手动停止及显式重新开启已测。场次结束与最终 producer 退出同事务推进额度，切片不结束；独立 capture evidence 区分单次完成与发布封口，播放证据不被后续失败覆盖。`VerifyRecordedVideo` 用现有 FFmpeg 探测并最小解码一帧；真实 0.2 秒样本通过，空文件/纯音频为无视频，缺文件/工具失败/取消为未知。recorder 在入队前保存证据，parser 报错留下可播放视频也可完成单次；发布失败仍阻止整场公开。
+- 第二批入口已接通：启动按当前配置同步 mode 后恢复；占位身份不创建额度或派发开播，真实身份替换后恢复。listener 不越过 completed/paused/finalizing；模式切换本场生效；手动启停/删除后重加显式开新轮。添加窗口默认 once，旧省略 continuous，设置/查询暴露模式、执行状态和暂停原因。
+- 第二批审查已闭合：删除测试专用平行状态 API；真实生命周期测试覆盖已证明无视频但发布 blocked、URL 更新、模式保存/启停。URL 与模式/启停同次变化在 CAS 内拒绝；无 callback 的身份初始化失败在新增写前报错。parser panic 后补做有界 capture 验证，未知尾段不误算 empty。Standards/Spec 最终限定复审均零剩余发现。
+- 第二批最近验证：09-06 00:34 +08 `make build-web dev lint test` 全绿；五包 race、listener 初始化/finalizing race 连跑 5 次、settings handler race 与添加窗口 Jest 通过。00:37 +08 本地 Chrome Playwright `12/12`，含 390/1280 添加窗口与真实本地 API 设置保存/刷新；截图在忽略的 `test-results/`。本地用临时 `test-output/recording-mode.playwright.config.ts` 指定 Chrome，不改 CI 浏览器配置。00:41 +08 无本任务 dev/Playwright/SSH 等待进程；测试产物不提交。真实 Mac/投影仪与生产仍待验收。
+- 第一批镜像：master CI `33976406195`、E2E `33976406077`、发布 `33976406084`、Warmup `33976406211` 全绿；`neymar022/bililive-go-app:latest` 与 `sha-5f7194b` digest 同为 `sha256:da6ce7f11939ca000c9ea2e481ccacc0d829c992fd3bbcc409ec53146fa678b3`。不以镜像成功替代运行态验证。
+- 下一步：第二批按已审 diff 提交、以 master 整理独立 PR 并跑必要 CI；第一批经交互 sudo 后刷新门禁/运行挂载、精确备份再最小 app 部署，不重建 worker。随后定向历史采用/元数据修复/安全 resume，保留 not_before，再做 Mac/投影仪及下一次发布后验；不等待全量积压才交付第二批。
 
 ### 2026-08-22 UGREEN Android TV 选集兼容修复
 

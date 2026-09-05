@@ -14,6 +14,7 @@ type recordingSessionStore interface {
 	RecordingSession(context.Context, string) (RecordingSession, error)
 	CompleteRecordingTaskMedia(context.Context, string, int64, []SessionMediaSource) error
 	RecoverRecordingSessions(context.Context) error
+	RecordCaptureEvidence(context.Context, RecordingOrigin, bool, string) error
 }
 
 func (m *Manager) recordingStore() (recordingSessionStore, error) {
@@ -62,6 +63,24 @@ func (m *Manager) FinishRecordingProducer(origin RecordingOrigin, failure string
 	}
 	m.wakeScheduler()
 	return nil
+}
+
+func (m *Manager) RecordCaptureEvidence(origin RecordingOrigin, playable bool, failure string) error {
+	store, err := m.recordingStore()
+	if err != nil {
+		return err
+	}
+	return store.RecordCaptureEvidence(m.ctx, origin, playable, failure)
+}
+
+func (m *Manager) RecordingRun(liveID string) (RecordingRun, error) {
+	store, ok := m.store.(interface {
+		GetRecordingRun(context.Context, string) (RecordingRun, error)
+	})
+	if !ok {
+		return RecordingRun{}, errors.New("persistent recording run store unavailable")
+	}
+	return store.GetRecordingRun(m.ctx, liveID)
 }
 
 func (m *Manager) EndRecordingSession(liveID, reason string) error {

@@ -32,7 +32,7 @@ import (
 	soop "github.com/bililive-go/bililive-go/src/live/sooplive"
 	"github.com/bililive-go/bililive-go/src/livestate"
 	applog "github.com/bililive-go/bililive-go/src/log"
-	"github.com/bililive-go/bililive-go/src/pkg/events"
+	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/memstats"
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
@@ -62,7 +62,8 @@ func parseInfo(ctx context.Context, l live.Live) *live.Info {
 			Initializing: true,
 		}
 	} else {
-		info = obj.(*live.Info)
+		snapshot := *obj.(*live.Info)
+		info = &snapshot
 	}
 
 	info.Listening = inst.ListenerManager.(listeners.Manager).HasListener(ctx, l.GetLiveId())
@@ -89,6 +90,7 @@ func parseInfo(ctx context.Context, l live.Live) *live.Info {
 	if info.RoomName == "" {
 		info.RoomName = l.GetRawUrl()
 	}
+	populateRecordingRunInfo(ctx, info)
 	return info
 }
 
@@ -222,15 +224,18 @@ func getLive(writer http.ResponseWriter, r *http.Request) {
 	// 构造详细响应
 	detailedInfo := map[string]interface{}{
 		// 基本信息
-		"host_name":           info.HostName,
-		"room_name":           info.RoomName,
-		"status":              info.Status,
-		"listening":           info.Listening,
-		"recording":           info.Recording,
-		"recording_preparing": info.RecordingPreparing,
-		"live_id":             info.Live.GetLiveId(),
-		"raw_url":             info.Live.GetRawUrl(),
-		"platform":            info.Live.GetPlatformCNName(),
+		"host_name":              info.HostName,
+		"room_name":              info.RoomName,
+		"status":                 info.Status,
+		"listening":              info.Listening,
+		"recording":              info.Recording,
+		"recording_preparing":    info.RecordingPreparing,
+		"recording_mode":         info.RecordingMode,
+		"recording_state":        info.RecordingState,
+		"recording_pause_reason": info.RecordingPauseReason,
+		"live_id":                info.Live.GetLiveId(),
+		"raw_url":                info.Live.GetRawUrl(),
+		"platform":               info.Live.GetPlatformCNName(),
 
 		// 有效配置信息
 		"platform_key":          platformKey,
@@ -449,8 +454,6 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 		if _, err := configs.SetLiveRoomListening(live.GetRawUrl(), false); err != nil {
 			live.GetLogger().Error("failed to set live room listening: " + err.Error())
 		}
-		// 与开播和最终录制退出按房间排序，避免封口错误的最新场次。
-		inst.EventDispatcher.(events.Dispatcher).DispatchEvent(events.NewOrderedEvent(listeners.UserStop, live, string(live.GetLiveId())))
 		// 广播监控停止事件
 		GetSSEHub().BroadcastListChange(live.GetLiveId(), "listen_stop", map[string]interface{}{
 			"live_id": string(live.GetLiveId()),
@@ -639,16 +642,6 @@ func switchStreamHandler(writer http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func startListening(ctx context.Context, live live.Live) error {
-	inst := instance.GetInstance(ctx)
-	return inst.ListenerManager.(listeners.Manager).AddListener(ctx, live)
-}
-
-func stopListening(ctx context.Context, liveId types.LiveID) error {
-	inst := instance.GetInstance(ctx)
-	return inst.ListenerManager.(listeners.Manager).RemoveListener(ctx, liveId)
-}
-
 /*
 	Post data example
 
@@ -674,27 +667,47 @@ func addLives(writer http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	var requests []struct {
+		URL           string          `json:"url"`
+		Listen        bool            `json:"listen"`
+		RecordingMode json.RawMessage `json:"recording_mode"`
+	}
+	if err := json.Unmarshal(b, &requests); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: err.Error()})
+		return
+	}
+	modes := make([]configs.RecordingMode, len(requests))
+	for i, request := range requests {
+		if len(request.RecordingMode) > 0 {
+			if err := json.Unmarshal(request.RecordingMode, &modes[i]); err != nil || modes[i] == "" || modes[i].Validate() != nil {
+				writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: "recording_mode 必须为 once 或 continuous"})
+				return
+			}
+		}
+	}
 	info := liveSlice(make([]*live.Info, 0))
-	errorMessages := make([]string, 0, 4)
-	gjson.ParseBytes(b).ForEach(func(key, value gjson.Result) bool {
-		isListen := value.Get("listen").Bool()
-		urlStr := strings.Trim(value.Get("url").String(), " ")
-		if retInfo, err := addLiveImpl(inst.Ctx, urlStr, isListen); err != nil {
-			msg := urlStr + ": " + err.Error()
-			applog.GetLogger().Error(msg)
-			errorMessages = append(errorMessages, msg)
-			return true
-		} else {
+	for i, request := range requests {
+		retInfo, err := addLiveImpl(inst.Ctx, strings.TrimSpace(request.URL), request.Listen, modes[i])
+		if err != nil {
+			writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: request.URL + ": " + err.Error()})
+			return
+		}
+		if retInfo != nil {
 			info = append(info, retInfo)
 		}
-		return true
-	})
+	}
 	sort.Sort(info)
-	// TODO return error messages too
 	writeJSON(writer, info)
 }
 
-func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.Info, err error) {
+func addLiveImpl(ctx context.Context, urlStr string, isListen bool, modes ...configs.RecordingMode) (info *live.Info, err error) {
+	var mode configs.RecordingMode
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if err := mode.Validate(); err != nil {
+		return nil, err
+	}
 	if !strings.HasPrefix(urlStr, "http://") && !strings.HasPrefix(urlStr, "https://") {
 		urlStr = "https://" + urlStr
 	}
@@ -707,8 +720,9 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.
 	liveRoom, err := configs.GetCurrentConfig().GetLiveRoomByUrl(u.String())
 	if err != nil {
 		liveRoom = &configs.LiveRoom{
-			Url:         u.String(),
-			IsListening: isListen,
+			Url:           u.String(),
+			IsListening:   isListen,
+			RecordingMode: mode,
 		}
 		needAppend = true
 	}
@@ -716,23 +730,37 @@ func addLiveImpl(ctx context.Context, urlStr string, isListen bool) (info *live.
 	if err != nil {
 		return nil, err
 	}
+	if wrapped, ok := newLive.(*live.WrappedLive); ok {
+		if _, initializing := wrapped.Live.(live.InitializingLiveSetter); initializing {
+			wrapped.Close()
+			return nil, errors.New("房间身份尚未确认，请稍后重试添加")
+		}
+	}
 	// 记录 LiveId 到全局配置（并发安全）
 	configs.SetLiveRoomId(u.String(), newLive.GetLiveId())
 	if inst.Lives.SetIfAbsent(newLive.GetLiveId(), newLive) {
-		if isListen {
-			inst.ListenerManager.(listeners.Manager).AddListener(ctx, newLive)
-		}
-		info = parseInfo(ctx, newLive)
-
 		if needAppend {
 			if liveRoom == nil {
 				return nil, errors.New("liveRoom is nil, cannot append to LiveRooms")
 			}
 			// 使用统一的 Update 接口做 COW 并原子替换
+			liveRoom.LiveId = newLive.GetLiveId()
 			if _, err := configs.AppendLiveRoom(*liveRoom); err != nil {
+				inst.Lives.Delete(newLive.GetLiveId())
 				return nil, err
 			}
 		}
+		if pm, ok := inst.PipelineManager.(*pipeline.Manager); ok {
+			if _, err := pm.ConfigureRecordingRun(string(newLive.GetLiveId()), liveRoom.EffectiveRecordingMode()); err != nil {
+				return nil, err
+			}
+		}
+		if isListen {
+			if err := startListening(ctx, newLive); err != nil {
+				return nil, err
+			}
+		}
+		info = parseInfo(ctx, newLive)
 		// 广播直播间列表变更事件
 		GetSSEHub().BroadcastListChange(newLive.GetLiveId(), "room_added", map[string]interface{}{
 			"live_id":   string(newLive.GetLiveId()),
@@ -769,11 +797,8 @@ func removeLive(writer http.ResponseWriter, r *http.Request) {
 func removeLiveImpl(ctx context.Context, live live.Live) error {
 	inst := instance.GetInstance(ctx)
 	liveId := live.GetLiveId()
-	lm := inst.ListenerManager.(listeners.Manager)
-	if lm.HasListener(ctx, liveId) {
-		if err := lm.RemoveListener(ctx, liveId); err != nil {
-			return err
-		}
+	if err := stopListening(ctx, liveId); err != nil {
+		return err
 	}
 	inst.Lives.Delete(liveId)
 	if _, err := configs.RemoveLiveRoomByUrl(live.GetRawUrl()); err != nil {
@@ -888,6 +913,11 @@ func applyLiveRoomsByConfig(ctx context.Context, oldConfig *configs.Config, newC
 				return fmt.Errorf("live id: %s can not find", room.LiveId)
 			}
 			live.UpdateLiveOptionsbyConfig(ctx, newRoom)
+			if room.EffectiveRecordingMode() != newRoom.EffectiveRecordingMode() {
+				if err := syncRoomRecordingMode(ctx, newRoom.Url); err != nil {
+					return err
+				}
+			}
 			if room.IsListening != newRoom.IsListening {
 				if newRoom.IsListening {
 					// start listening
@@ -1787,7 +1817,13 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = configs.UpdateWithRetry(func(c *configs.Config) error {
+	mode, hasMode, err := requestedRecordingMode(updates)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: err.Error()})
+		return
+	}
+	var previousRoom, updatedRoom configs.LiveRoom
+	updatedConfig, err := configs.UpdateWithRetry(func(c *configs.Config) error {
 		// 查找直播间（先按 LiveId，回退按 URL 计算的 hash）
 		roomIdx := -1
 		for i, room := range c.LiveRooms {
@@ -1814,6 +1850,16 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		}
 
 		room := &c.LiveRooms[roomIdx]
+		previousRoom = *room
+		if nextURL, ok := updates["url"].(string); ok && nextURL != room.Url {
+			nextListening, hasListening := updates["is_listening"].(bool)
+			if hasMode || (hasListening && nextListening != room.IsListening) {
+				return errRecordingControlURLChange
+			}
+		}
+		if hasMode {
+			room.RecordingMode = mode
+		}
 
 		// 更新直播间特有字段
 		if url, ok := updates["url"].(string); ok {
@@ -1841,11 +1887,16 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("弹幕参数无效: %w", err)
 			}
 		}
+		updatedRoom = *room
 
 		return nil
 	}, 3, 10*time.Millisecond)
 
 	if err != nil {
+		if errors.Is(err, errRecordingControlURLChange) {
+			writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: err.Error()})
+			return
+		}
 		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{
 			ErrNo:  http.StatusInternalServerError,
 			ErrMsg: "更新直播间配置失败: " + err.Error(),
@@ -1853,6 +1904,10 @@ func updateRoomConfigById(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := applyRoomRecordingControls(r.Context(), previousRoom, updatedRoom, updatedConfig.Version, hasMode); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{ErrNo: http.StatusInternalServerError, ErrMsg: err.Error()})
+		return
+	}
 	writeJSON(writer, commonResp{
 		Data: "OK",
 	})
@@ -2050,12 +2105,25 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_, err = configs.UpdateWithRetry(func(c *configs.Config) error {
+	mode, hasMode, err := requestedRecordingMode(updates)
+	if err != nil {
+		writeJsonWithStatusCode(writer, http.StatusBadRequest, commonResp{ErrNo: http.StatusBadRequest, ErrMsg: err.Error()})
+		return
+	}
+	var previousRoom, updatedRoom configs.LiveRoom
+	updatedConfig, err := configs.UpdateWithRetry(func(c *configs.Config) error {
 		room, err := c.GetLiveRoomByUrl(decodedUrl)
 		if err != nil {
 			return errors.New("找不到直播间: " + decodedUrl)
 		}
 
+		previousRoom = *room
+		if isListening, ok := updates["is_listening"].(bool); ok {
+			room.IsListening = isListening
+		}
+		if hasMode {
+			room.RecordingMode = mode
+		}
 		// 更新直播间配置
 		if quality, ok := updates["quality"].(float64); ok {
 			room.Quality = int(quality)
@@ -2076,6 +2144,7 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 				return fmt.Errorf("弹幕配置无效: %w", err)
 			}
 		}
+		updatedRoom = *room
 
 		return nil
 	}, 3, 10*time.Millisecond)
@@ -2088,6 +2157,10 @@ func updateRoomConfig(writer http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := applyRoomRecordingControls(r.Context(), previousRoom, updatedRoom, updatedConfig.Version, hasMode); err != nil {
+		writeJsonWithStatusCode(writer, http.StatusInternalServerError, commonResp{ErrNo: http.StatusInternalServerError, ErrMsg: err.Error()})
+		return
+	}
 	writeJSON(writer, commonResp{
 		Data: "OK",
 	})
