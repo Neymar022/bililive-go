@@ -96,6 +96,49 @@ func TestEnsureLibraryHardlinkPublishesUGREENCompatibleOrdinalAndRetainsRecorded
 	assert.Contains(t, nfoText, fmt.Sprintf("<uniqueid type=\"bililive-recorded-at\" default=\"false\">%d</uniqueid>", identity))
 }
 
+func TestLibraryPublicationUsesSameRecordingDateAcrossTimezones(t *testing.T) {
+	stubCoverExtraction(t)
+	for _, location := range []*time.Location{time.UTC, time.FixedZone("UTC-7", -7*60*60)} {
+		t.Run(location.String(), func(t *testing.T) {
+			libraryRoot := t.TempDir()
+			sourcePath := filepath.Join(t.TempDir(), "主播 - 2026-03-21 00-30-00 - 跨日直播.mp4")
+			require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
+			recordedAt := time.Date(2026, 3, 20, 16, 30, 0, 0, time.UTC).In(location)
+			publishedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", recordedAt, "抖音")
+			require.NoError(t, err)
+			assert.Contains(t, filepath.Base(publishedPath), ".2026-03-21 - 跨日直播.mp4")
+			nfo := string(mustReadFile(t, sidecarStem(publishedPath)+".nfo"))
+			assert.Contains(t, nfo, "<title>2026-03-21 - 跨日直播</title>")
+			assert.Contains(t, nfo, "<dateadded>2026-03-21 00:30:00</dateadded>")
+			require.NoError(t, ValidatePublishedLibraryEpisode(publishedPath))
+			sharedNFO, err := BuildLibraryEpisodeNFO(publishedPath, recordedAt, "抖音")
+			require.NoError(t, err)
+			assert.Equal(t, sharedNFO, nfo, "普通和聚合发布必须使用同一时区契约")
+		})
+	}
+}
+
+func TestEnsureLibrarySidecarsPreservesLegacyDateAcrossTimezones(t *testing.T) {
+	stubCoverExtraction(t)
+	seasonDir := filepath.Join(t.TempDir(), "主播", "Season 01")
+	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
+	path := filepath.Join(seasonDir, "主播.S01E0001.2026-06-12 - 历史直播.mp4")
+	require.NoError(t, os.WriteFile(path, []byte("video"), 0o644))
+	require.NoError(t, EnsureLibrarySidecars(context.Background(), path, path, "主播", time.Time{}, "抖音"))
+	nfoPath := sidecarStem(path) + ".nfo"
+	nfo := string(mustReadFile(t, nfoPath))
+	assert.Contains(t, nfo, "<title>2026-06-12 - 历史直播</title>")
+	assert.Contains(t, nfo, "<dateadded>2026-06-12 00:00:00</dateadded>")
+	require.NoError(t, ValidatePublishedLibraryEpisode(path))
+	before, err := os.Stat(nfoPath)
+	require.NoError(t, err)
+	require.NoError(t, EnsureLibrarySidecars(context.Background(), path, path, "主播", time.Time{}, "抖音"))
+	after, err := os.Stat(nfoPath)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(before, after))
+	assert.Equal(t, before.ModTime(), after.ModTime())
+}
+
 func TestEnsureLibraryHardlinkRejectsLateEarlierRecordingRatherThanMisordering(t *testing.T) {
 	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()

@@ -152,6 +152,7 @@ func buildEpisodeFilename(aliasName string, episodeIdentity int64, recordedAt ti
 }
 
 func buildEpisodeNFO(aliasName string, episodeOrdinal, recordedAtIdentity int64, recordedAt time.Time, title, platform string) string {
+	recordedAt = recordedAt.In(mediaLibraryLocation)
 	aliasName = sanitizeComponent(aliasName)
 	if aliasName == "" {
 		aliasName = "未分类主播"
@@ -555,6 +556,9 @@ type sourceFileMeta struct {
 }
 
 func parseSourceFilename(sourcePath, fallbackHost string, fallbackTime time.Time) sourceFileMeta {
+	if !fallbackTime.IsZero() {
+		fallbackTime = fallbackTime.In(mediaLibraryLocation)
+	}
 	stem := strings.TrimSuffix(filepath.Base(sourcePath), filepath.Ext(sourcePath))
 	m := normalizedFilenamePattern.FindStringSubmatch(stem)
 	if m == nil {
@@ -596,7 +600,7 @@ func parseLibraryEpisodeFilename(libraryPath string) (sourceFileMeta, bool) {
 	aliasName := sanitizeComponent(m[libraryEpisodeFilenamePattern.SubexpIndex("alias_name")])
 	title := sanitizeComponent(m[libraryEpisodeFilenamePattern.SubexpIndex("title")])
 	recordedDate := m[libraryEpisodeFilenamePattern.SubexpIndex("recorded_date")]
-	recordedAt, err := time.ParseInLocation("2006-01-02", recordedDate, time.Local)
+	recordedAt, err := time.ParseInLocation("2006-01-02", recordedDate, mediaLibraryLocation)
 	if err != nil {
 		recordedAt = time.Now()
 	}

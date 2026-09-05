@@ -39,7 +39,7 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 
 ### 2026-09-05 烧录发布契约根因修复：方案澄清
 
-- 状态：用户批准两批实施；无 token budget Goal active。第一批核心源码已通过复审与门禁，准备以 `codex/fix-session-publication` 草稿 PR 固定；A7 历史闭合采用未完成，第二批单次录制未实现；未合并或修改生产。既存未跟踪 `scripts/apply-chronological-renumber.py` 保留，不纳入提交。
+- 状态：用户批准两批实施；无 token budget Goal active。第一批源码已提交 `ff6ac37`，草稿 [PR #51](https://github.com/Neymar022/bililive-go/pull/51)；A7 历史闭合采用未完成，第二批单次录制未实现；未合并或修改生产。既存未跟踪 `scripts/apply-chronological-renumber.py` 保留，不纳入提交。
 - 已验根因：F1 运行时将无 MP4/MKV 的旧 sidecar 算入公开剧集；F2 聚合 NFO writer 将公开 ordinal 写回长 identity，且旧测试断言该错误输出。两条真实代码 overlay 诊断均连续两次 RED，空库对照 PASS。
 - 运行态依据：本轮 `/api/info.git_hash` 与远端 master 均为 `0ce2dd5`；不是未部署。任务错误发生在 worker 调用前，worker `/healthz` 为 200，存在当日 `actual_burn_provider=remote-mac` completed 证据。易变运行数值以执行前新鲜 API 为准。
 - D1（Q1 已确认）：允许受影响合集按 recordedAt 重排连续展示序号；底层 identity、路径不变，播放记录与收藏不得丢失或串集。自动处理范围由 D8 限定。
@@ -65,7 +65,9 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 历史 dry-run：熊小电 4 集 / 7,807,358,890 bytes GREEN，仅聚合 NFO 公开集号需改为 4 并恢复 identity；天津蛋哥读取首个 `.subtitle.json` PermissionError，未绕过坏/不可读 metadata。Python 两文件 30 项通过，支持 MP4/MKV、双 identity 时间恢复、重复媒体拒绝及 `--only-show`。未生产写入。
 - 最新生产只读：21:06 +08 `sudo -n -l` 仍需密码；随后 API task1518 failed、session961 normal 结束时间 2026-09-04 19:00:19，task 含 3 个转换 MP4 和完整阶段链，但旧 `normal` 不足以证明末段闭合。20:36 active=2/update idle 仅历史快照；运行 Mounts 未验证，已请求用户只读 inspect，不使用聊天历史密码。
 - 历史定向盘点：session961 仅 task1518；源目录当天 3 个 MP4 与阶段检查点一致，公开库当天零条目。旧进程内日志已不含该场次；SQLite lives 仅有 normal 结束、iostats 不含文件/producer 登记。不能仅以安静目录伪造完整场次。未采用的历史场次在 resume 状态变更前拒绝，保留原失败原因/检查点。
-- 下一步：草稿 PR/CI 与 A7 证据恢复、精确 dry-run 继续；A7 未闭合不合并发布。Docker/受限元数据读取需交互式 sudo，已向用户请求只读 inspect；生产写前新鲜门禁/挂载与精确备份。第二批不等待全量积压。
+- CI 增量：PR #51 build/build-web/lint/E2E/AI 指示均成功；test 的三个旧小集号反例已在本机 UTC 稳定 RED。新增跨日普通/聚合契约反例证明生产普通 writer 漏时区归一化，并非仅 fixture 问题；已统一 UTC+8，identity 不变。Spec 复审补出的 UTC+14 legacy sidecar 日期偏移也 RED→GREEN，含重复进入 inode/mtime 验证；双轴限定复审无剩余发现。`claude-review` run `33969058458` 因 GitHub App 未安装而 token exchange 401，不改认证、不盲目重跑。
+- A7 证据突破：可读磁盘日志 `video/bililive-go-2026-09-04.log` 保留 task1518 完整前处理。按实际 `room=/565107510570` 过滤：行 126642 Record Start、127716 入队 1 文件、128351 Record End、128352 最终 defer 录制摘要 1 文件；旧 `0ce2dd5` 的 `run()` 在 `tryRecord` 返回后 defer 推送摘要，可作为输入封口证据。SQLite 初始 1 FLV → fix_flv 3 FLV → convert_mp4 3 MP4 完整链一致，subtitle 首次失败于库路径检查。旧 RecordInfo.start_time 是入队时间 18:58:16，实际起点由场次与初始文件同证为 18:01:35；历史采用必须校正该任务时间而不改既有媒体路径，不能只注入 producer。
+- 下一步：提交 UTC 增量并验证新 CI；A7 以日志/任务/文件三方闭合生成唯一采用计划，再做精确 dry-run；A7 未闭合不合并发布。Docker/受限元数据读取需交互式 sudo，已向用户请求只读 inspect；生产写前新鲜门禁/挂载与精确备份。第二批不等待全量积压。
 
 ### 2026-08-22 UGREEN Android TV 选集兼容修复
 
