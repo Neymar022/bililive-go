@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	gomock "go.uber.org/mock/gomock"
@@ -13,8 +14,95 @@ import (
 	"github.com/bililive-go/bililive-go/src/live"
 	livemock "github.com/bililive-go/bililive-go/src/live/mock"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
+	parsermock "github.com/bililive-go/bililive-go/src/pkg/parser/mock"
 	"github.com/bililive-go/bililive-go/src/types"
 )
+
+func TestRemoveRecorderDoesNotBlockOtherRoomsDuringFinalization(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r := NewMockRecorder(ctrl)
+	other := NewMockRecorder(ctrl)
+	entered, release := make(chan struct{}), make(chan struct{})
+	r.EXPECT().Close().Do(func() { close(entered); <-release })
+	m := &manager{savers: map[types.LiveID]Recorder{"ending": r, "other": other}}
+	done := make(chan error, 1)
+	go func() { done <- m.RemoveRecorder(context.Background(), "ending") }()
+	<-entered
+	queried := make(chan struct{})
+	go func() {
+		_, err := m.GetRecorder(context.Background(), "other")
+		assert.NoError(t, err)
+		assert.Equal(t, 2, m.GetActiveRecordingsCount(), "收尾未完成仍算活跃")
+		close(queried)
+	}()
+	select {
+	case <-queried:
+	case <-time.After(100 * time.Millisecond):
+		t.Error("一个房间收尾阻塞了其他房间状态查询")
+	}
+	close(release)
+	assert.NoError(t, <-done)
+	<-queried
+	assert.Equal(t, 1, m.GetActiveRecordingsCount())
+}
+
+func TestRemoveRecorderPanicPreservesActivityWithoutStrandingWaiters(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	r := NewMockRecorder(ctrl)
+	gomock.InOrder(r.EXPECT().Close().Do(func() { panic("parser stop failure") }), r.EXPECT().Close())
+	m := &manager{savers: map[types.LiveID]Recorder{"room": r}}
+	assert.Panics(t, func() { _ = m.RemoveRecorder(context.Background(), "room") })
+	assert.Equal(t, 1, m.GetActiveRecordingsCount(), "异常退出不能假报空闲")
+	done := make(chan error, 1)
+	go func() { done <- m.RemoveRecorder(context.Background(), "room") }()
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(100 * time.Millisecond):
+		t.Error("异常遗留了无法关闭的 stopping 等待")
+		// 清理旧实现留下的测试 goroutine。
+		m.lock.Lock()
+		close(m.stopping["room"])
+		m.lock.Unlock()
+		<-done
+	}
+}
+
+func TestRemoveRealRecorderAfterStopPanicWaitsForParserExit(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	p := parsermock.NewMockParser(ctrl)
+	entered, release := make(chan struct{}), make(chan struct{})
+	p.EXPECT().ParseLiveStream(gomock.Any(), gomock.Any(), gomock.Any(), gomock.Any()).DoAndReturn(func(context.Context, *live.StreamUrlInfo, live.Live, string) error {
+		close(entered)
+		<-release
+		return nil
+	})
+	p.EXPECT().Stop().Do(func() { panic("parser stop failure") })
+	r := &recorder{state: running, stop: make(chan struct{}), done: make(chan struct{}), parser: p, parserLock: new(sync.RWMutex)}
+	go func() {
+		_ = p.ParseLiveStream(context.Background(), nil, nil, "recording.flv")
+		close(r.done)
+	}()
+	<-entered
+	m := &manager{savers: map[types.LiveID]Recorder{"room": r}}
+	assert.Panics(t, func() { _ = m.RemoveRecorder(context.Background(), "room") })
+	done := make(chan error, 1)
+	go func() { done <- m.RemoveRecorder(context.Background(), "room") }()
+	select {
+	case <-done:
+		t.Error("真实录制线程仍在运行，第二次关闭不得假报退出")
+	case <-time.After(50 * time.Millisecond):
+		assert.Equal(t, 1, m.GetActiveRecordingsCount())
+	}
+	close(release)
+	select {
+	case err := <-done:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		assert.Equal(t, 0, m.GetActiveRecordingsCount())
+	}
+	<-r.done
+}
 
 func TestManagerAddAndRemoveRecorder(t *testing.T) {
 	ctrl := gomock.NewController(t)

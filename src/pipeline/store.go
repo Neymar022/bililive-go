@@ -99,6 +99,12 @@ func (s *SQLiteStore) initSchema() error {
 
 	CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_status ON pipeline_tasks(status);
 	CREATE INDEX IF NOT EXISTS idx_pipeline_tasks_created_at ON pipeline_tasks(created_at);
+	CREATE TABLE IF NOT EXISTS pipeline_recording_sessions (
+		id TEXT PRIMARY KEY,
+		live_id TEXT NOT NULL,
+		state_json TEXT NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_recording_sessions_live_id ON pipeline_recording_sessions(live_id);
 	`
 
 	if _, err := s.db.Exec(schema); err != nil {
@@ -145,7 +151,12 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task *PipelineTask) error 
 	currentFilesJSON, _ := json.Marshal(task.CurrentFiles)
 	stageResultsJSON, _ := json.Marshal(task.StageResults)
 
-	result, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `
 		INSERT INTO pipeline_tasks (
 			status, record_info_json, pipeline_config_json,
 			initial_files_json, current_files_json,
@@ -177,8 +188,10 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task *PipelineTask) error 
 		return err
 	}
 	task.ID = id
-
-	return nil
+	if err := registerRecordingTask(ctx, tx, task); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // GetTask 获取任务
@@ -311,6 +324,12 @@ func (s *SQLiteStore) GetPendingTasks(ctx context.Context, limit int) ([]*Pipeli
 			error_message, can_retry
 		FROM pipeline_tasks
 		WHERE status = ?
+		AND NOT EXISTS (
+			SELECT 1 FROM pipeline_recording_sessions AS session
+			WHERE session.id = json_extract(pipeline_tasks.record_info_json, '$.live_session_id')
+			AND json_extract(session.state_json, '$.tasks."' || pipeline_tasks.id || '".ready') = 1
+			AND COALESCE(json_extract(session.state_json, '$.ready'), 0) = 0
+		)
 		ORDER BY created_at ASC
 	`, PipelineStatusPending)
 	if err != nil {

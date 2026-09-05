@@ -1,6 +1,6 @@
 # Implementation Status
 
-更新时间：2026-08-23
+更新时间：2026-09-05
 
 ## State Ownership
 
@@ -36,6 +36,36 @@ P0/P1 之间：先确保生产链路安全、非阻塞、幂等，再扩大知�
 - 本仓库 PRD 已记录生产链路事实：Mac MLX 转写、Mac 硬编烧录、MOVESPEED/BiliNoteRuntime、NAS 媒体库路径、LanceDB side index。
 
 ## Current Work
+
+### 2026-09-05 烧录发布契约根因修复：方案澄清
+
+- 状态：用户批准两批实施；无 token budget Goal active。第一批核心源码已通过复审与门禁，准备以 `codex/fix-session-publication` 草稿 PR 固定；A7 历史闭合采用未完成，第二批单次录制未实现；未合并或修改生产。既存未跟踪 `scripts/apply-chronological-renumber.py` 保留，不纳入提交。
+- 已验根因：F1 运行时将无 MP4/MKV 的旧 sidecar 算入公开剧集；F2 聚合 NFO writer 将公开 ordinal 写回长 identity，且旧测试断言该错误输出。两条真实代码 overlay 诊断均连续两次 RED，空库对照 PASS。
+- 运行态依据：本轮 `/api/info.git_hash` 与远端 master 均为 `0ce2dd5`；不是未部署。任务错误发生在 worker 调用前，worker `/healthz` 为 200，存在当日 `actual_burn_provider=remote-mac` completed 证据。易变运行数值以执行前新鲜 API 为准。
+- D1（Q1 已确认）：允许受影响合集按 recordedAt 重排连续展示序号；底层 identity、路径不变，播放记录与收藏不得丢失或串集。自动处理范围由 D8 限定。
+- D2（Q2 已确认）：小范围统一发布规则、定向修复历史元数据、恢复同根因且输入可验证的失败任务。保留冲突保护，不删除 MP4，不盲目重试全量失败，不重写远端烧录平台。
+- D3（Q3 已确认）：证据不足或关系冲突仅停止受影响合集的发布/恢复；其他合集继续，媒体保留，不猜测关联。
+- D4（Q4 已确认）：新任务优先；F1/F2 各一个代表任务通过后，按合集录制时间小批恢复；保留既有 not_before，不打断录制。
+- D5（Q5 已确认）：仅备份本次变更元数据、必要 DB 关系和恢复清单，不复制 MP4；最终验收后保留七天，清理前另行确认。其他历史备份不处理。
+- D6（Q6 已确认）：自动后验、Mac 检查及聚合后下一次发布验证通过后，用户完成投影仪选集/播放/观看记录复核；未通过真实客户端验收不得完整收尾。
+- D7（Q7 已确认）：新增同场直播仅在整场成品完成后正式入库，中间分段从工作区保留为内部素材，不提前占公开集号；bililive 任务记录保留处理状态。用户接受 UGREEN 可观看时间推迟；历史既有成品不因此迁移。
+- D8（Q8 已确认）：正常新增自动发布，不让录制进程持续直写 UGREEN 私有 DB。本轮历史修复走精确备份计划；未来需要改变既有索引时，先暂停受影响合集并生成维护计划，证明引用/观看记录安全后才应用。不承诺全部异常无人值守修复。
+- 已验技术前提：Executor/启动恢复已有 CurrentStage+CurrentFiles 检查点；现有人工 RetryTask 会重置 InitialFiles、清空 NotBefore，不可直接批量调用。最小方向为既有入口校验后续跑，并复用逐文件 completed 判断；当前 SQL 队列创建时间优先，不具备新任务优先，历史应空闲时小批放行。
+- 新发现的设计前提：当前分段先进入媒体库，聚合成功后再隐藏；统一 NFO writer 尚不足以处理 N 个公开分段变为一集后的 ordinal 集合变化。历史 UGREEN watcher 曾未同步既有 NFO 集号，不能承诺仅改 NFO 即自动更新已入库关联。
+- 实施主链：真实调用回归测试 → 统一有效剧集/NFO 契约与成品公开时机 → 校验后保留检查点续跑 → 受影响合集 dry-run → 必要发布部署、元数据备份及受控修复 → F1/F2 样本与小批积压恢复 → Mac/投影仪及跨下一次发布验收。
+- 验证重点：孤立 sidecar 不参与公开序号但仍防覆盖；单分段场次也能完成发布；同场多分段仅公开一集；重复进入不重复烧录；晚到/冲突按 D3/D8 处置；修复前后媒体数量/字节、引用、播放记录和收藏保持一致。沿用仓库必要测试、编译、审查与发布门禁，不重复无关全量审计。
+- 第二批已决：`recording_mode=once|continuous`；新增 UI 默认 once，旧配置/旧 API 缺字段保持 continuous。单次为当前剩余/下一场，连续离线三分钟结束，请求失败不当离线；全场无可播放视频自动等下一场。留下可播放视频即消费额度，不等待字幕/烧录；未确认结果前不录下一场。不加总时长上限。
+- 生命周期已决：模式切换本场生效但不打断录制；手动停止结束本轮，已有视频继续处理、不自动重开。等待状态可重启恢复；录制中崩溃且无法证明同场时暂停待确认，保留文件和额度状态。
+- 两批分别走定向测试、一次正式 review、仓库提交门禁、中文 PR/CI/合并/镜像及最小部署。第一批上线后即可开发第二批，不等待全部积压。自动后验、Mac、聚合后下一次发布及用户投影仪实测全部通过前不标记整体完成。
+- 技术边界：场次结束必须等待最终 recorder 退出和末段入队登记，不能仅用 LiveEnd/RecorderStop/quiet window。媒体发布与知识开关解耦，单段/多段共用就绪判断；复用库外工作区、SQLite 与持久化调度。Compose 声明 app/worker 共享绝对根；运行容器 Mounts 尚待部署前只读验证。
+- 已实现未发布：普通/聚合统一 NFO writer；有效 MP4/MKV 排序；SQLite 场次/producer/完整输入集合；三分钟离线确认；确定性库外处理；完整场次公开与知识开关解耦；`retry?mode=resume` 保留检查点/计划并比较交换；历史工具缺失 uniqueid 恢复、独立小 NFO 备份、并发变更拒绝自动回滚。
+- 最新定向 RED→GREEN：库根 symlink alias 共用发布锁；收尾等待移出 recorder manager 全局锁且仍计活跃；处理目录既有文件/metadata 归属、符号链接、完成产物缺失均在 worker 前拒绝；公开成品 NFO/MP4/SRT 损坏拒绝成功复用。末段迟到/乱序、SQLite 重开、失败续跑、知识失败及不重复烧录集成通过。
+- 最新保护：同房间事件 FIFO、停止与派发互斥；末段/封口/槽位释放唤醒调度。新录制 capture 与 worker processing 均位于库外 `.live_session_segments`，避开生产 organizer 的 `srt_video` 扫描；不改既有路径/cron。worker 独立 attempt，MP4/SRT/ASS 无覆盖硬链接提交；metadata 比较当前版本后更新；明确 Mac unavailable 以外的失败保留未确认状态。
+- 正式审查增量：冲突后第二次进入仍拒绝外来 MP4、HTTP 500/502/504 后续跑不重复 worker、真实 recorder Stop panic 后再关等待线程退出、Start 登记失败可 Close，均 RED→GREEN。确认响应落盘后可 CAS 回收，部分提交可续接；未确认/外来响应拒绝；聚合后下一次普通发布 episode=2 通过。Standards/Spec 限定复审均零剩余发现，不覆盖 A7/第二批/生产。六包 race、Python 30 项及 21:26 +08 `make build-web dev lint test` 全绿。全量首轮本地 HTTP EADDRNOTAVAIL 后定向及全量复跑通过，未修改网络配置。
+- 历史 dry-run：熊小电 4 集 / 7,807,358,890 bytes GREEN，仅聚合 NFO 公开集号需改为 4 并恢复 identity；天津蛋哥读取首个 `.subtitle.json` PermissionError，未绕过坏/不可读 metadata。Python 两文件 30 项通过，支持 MP4/MKV、双 identity 时间恢复、重复媒体拒绝及 `--only-show`。未生产写入。
+- 最新生产只读：21:06 +08 `sudo -n -l` 仍需密码；随后 API task1518 failed、session961 normal 结束时间 2026-09-04 19:00:19，task 含 3 个转换 MP4 和完整阶段链，但旧 `normal` 不足以证明末段闭合。20:36 active=2/update idle 仅历史快照；运行 Mounts 未验证，已请求用户只读 inspect，不使用聊天历史密码。
+- 历史定向盘点：session961 仅 task1518；源目录当天 3 个 MP4 与阶段检查点一致，公开库当天零条目。旧进程内日志已不含该场次；SQLite lives 仅有 normal 结束、iostats 不含文件/producer 登记。不能仅以安静目录伪造完整场次。未采用的历史场次在 resume 状态变更前拒绝，保留原失败原因/检查点。
+- 下一步：草稿 PR/CI 与 A7 证据恢复、精确 dry-run 继续；A7 未闭合不合并发布。Docker/受限元数据读取需交互式 sudo，已向用户请求只读 inspect；生产写前新鲜门禁/挂载与精确备份。第二批不等待全量积压。
 
 ### 2026-08-22 UGREEN Android TV 选集兼容修复
 

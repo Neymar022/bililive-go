@@ -318,7 +318,7 @@ func libraryEpisodeStem(name string) (string, bool) {
 	return "", false
 }
 
-func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (int64, error) {
+func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time, existingPath ...string) (int64, error) {
 	if recordedAt.IsZero() {
 		return 0, errors.New("no reliable recording start time")
 	}
@@ -329,6 +329,21 @@ func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (in
 	if err != nil {
 		return 0, err
 	}
+	dir, err = filepath.Abs(dir)
+	if err != nil {
+		return 0, err
+	}
+	dir, err = filepath.EvalSymlinks(dir)
+	if err != nil {
+		return 0, err
+	}
+	for i, path := range existingPath {
+		if absolute, err := filepath.Abs(filepath.Dir(path)); err == nil {
+			if parent, err := filepath.EvalSymlinks(absolute); err == nil {
+				existingPath[i] = filepath.Join(parent, filepath.Base(path))
+			}
+		}
+	}
 
 	type publishedEpisode struct {
 		recordedAt   time.Time
@@ -338,10 +353,34 @@ func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (in
 	}
 	published := make(map[int64]publishedEpisode)
 	var maxEpisodeOrdinal int64
+	var existingOrdinal int64
 	seenStems := make(map[string]struct{})
+	seenIdentities := make(map[int64]string)
 	for _, entry := range entries {
 		if entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
 			continue
+		}
+		// 公开集号只属于成品媒体；孤立 sidecar 仍由 identity 预留检查防止覆盖。
+		ext := strings.ToLower(filepath.Ext(entry.Name()))
+		if ext != ".mp4" && ext != ".mkv" {
+			continue
+		}
+		replaced := false
+		for index, path := range existingPath {
+			if index > 0 && filepath.Clean(path) == filepath.Join(dir, entry.Name()) && filepath.Clean(path) != filepath.Clean(existingPath[0]) {
+				replaced = true
+				break
+			}
+		}
+		if replaced {
+			continue
+		}
+		info, statErr := entry.Info()
+		if statErr != nil {
+			return 0, statErr
+		}
+		if !info.Mode().IsRegular() {
+			return 0, fmt.Errorf("published media is not a regular file: %s", entry.Name())
 		}
 		match := libraryEpisodeSlotPattern.FindStringSubmatch(entry.Name())
 		if match == nil {
@@ -351,43 +390,27 @@ func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (in
 		if parseErr != nil {
 			continue
 		}
-		last := first
-		if len(match) > 2 && match[2] != "" {
-			if parsed, rangeErr := strconv.ParseInt(match[2], 10, 64); rangeErr == nil && parsed >= first {
-				last = parsed
-			}
-		}
 		stem, known := libraryEpisodeStem(entry.Name())
 		if !known {
 			continue
 		}
 		if _, exists := seenStems[stem]; exists {
-			continue
+			return 0, fmt.Errorf("multiple media for published episode: %s", stem)
 		}
 		seenStems[stem] = struct{}{}
-		stemPath := filepath.Join(dir, stem)
-		publicEpisode, hasPublicEpisode := episodeOrdinalFromNFO(stemPath + ".nfo")
-		if !hasPublicEpisode {
-			if last >= chronologicalEpisodeIdentityMin || last > maxUGREENEpisodeOrdinal {
-				return 0, fmt.Errorf("historical recordedAt episode identity requires NFO ordinal migration: %s", entry.Name())
-			}
-			publicEpisode = first
+		if previous, exists := seenIdentities[first]; exists {
+			return 0, fmt.Errorf("multiple media for published identity %d: %s and %s", first, previous, entry.Name())
+		}
+		seenIdentities[first] = entry.Name()
+		publicEpisode, existingRecordedAt, err := publishedEpisodeMetadata(filepath.Join(dir, entry.Name()), first)
+		if err != nil {
+			return 0, err
 		}
 		publicEpisodeLast := publicEpisode
-		if !hasPublicEpisode {
-			publicEpisodeLast = last
+		if len(existingPath) > 0 && filepath.Clean(filepath.Join(dir, entry.Name())) == filepath.Clean(existingPath[0]) {
+			existingOrdinal = publicEpisode
 		}
-
-		existingRecordedAt, hasExactRecordedAt := recordedAtForEpisodeIdentity(first)
-		if !hasExactRecordedAt {
-			existingRecordedAt, hasExactRecordedAt = episodeRecordedAtFromSidecars(stemPath)
-		}
-		recordedDate := ""
-		if hasExactRecordedAt {
-			recordedDate = existingRecordedAt.Format("2006-01-02")
-		} else if meta, ok := parseLibraryEpisodeFilename(stem + ".mp4"); ok {
-			recordedDate = meta.recordedAt.Format("2006-01-02")
-		}
+		recordedDate := existingRecordedAt.Format("2006-01-02")
 		for ordinal := publicEpisode; ordinal <= publicEpisodeLast; ordinal++ {
 			if previous, duplicate := published[ordinal]; duplicate {
 				return 0, fmt.Errorf(
@@ -440,6 +463,9 @@ func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time) (in
 		}
 	}
 
+	if existingOrdinal > 0 {
+		return existingOrdinal, nil
+	}
 	recordedDate := recordedAt.Format("2006-01-02")
 	if lastPublished, ok := published[maxEpisodeOrdinal]; ok {
 		if !lastPublished.recordedAt.IsZero() && recordedAt.Before(lastPublished.recordedAt) {
@@ -645,6 +671,17 @@ func lockLibraryPath(locks *keyedPathLocks, path string) func() {
 	key, err := filepath.Abs(path)
 	if err != nil {
 		key = filepath.Clean(path)
+	}
+	// 季目录可能尚未创建；从最近存在的父目录解析库根别名。
+	for parent, suffix := key, ""; ; parent = filepath.Dir(parent) {
+		if resolved, err := filepath.EvalSymlinks(parent); err == nil {
+			key = filepath.Join(resolved, suffix)
+			break
+		}
+		if filepath.Dir(parent) == parent {
+			break
+		}
+		suffix = filepath.Join(filepath.Base(parent), suffix)
 	}
 
 	locks.mutex.Lock()

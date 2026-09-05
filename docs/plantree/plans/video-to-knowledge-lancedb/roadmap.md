@@ -20,6 +20,7 @@
 
 ## In Progress
 
+- 烧录发布契约与积压恢复：按[已确认两批方案](implementation-status.md#2026-09-05-烧录发布契约根因修复方案澄清)实施；先统一有效成品/NFO、整场封口与检查点恢复，再独立交付单次录制。
 - UGREEN 影视中心选集交互与封面复核：序号标签已完成生产验收，真实 53 集严格显示 `1..53`，完整日期标题仍保留且长 recordedAt 不可见；卡片整卡点击、首卡裁切和封面保持独立未完成状态，整体仍为进行中。
 - P0：生产安全闭环。
   - 同源重复入队和 completed metadata 覆盖保护。
@@ -31,6 +32,7 @@
 
 ## Next
 
+- 单次/连续录制：发布修复上线后独立交付，不以历史积压全部恢复为前置；模式/状态、重启、人工停止与无有效视频行为见实施状态。
 - 将现存 `349` 条缺失 critical 历史引用作为独立数据卫生任务审计来源与可恢复性；本次部署证明未新增，不得与已验证存在的 `406` 条库外分段引用混合清理。
 - 决定 BiliNote `branch-vtok-473-b5544ce` 与 Bililive-go `sha-97c3f27` 的开 PR、合并、稳定 tag 或 NAS pin 策略；两个验证提交当前都尚未进入各自 `origin/master`。
 - 如需更强生产验收，执行受控失败 smoke：BiliNote 不可达或 bad endpoint 时只记录 `knowledge_sync_status=failed`，不影响 pipeline completed。

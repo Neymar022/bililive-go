@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/bluele/gcache"
 	"github.com/sirupsen/logrus"
@@ -17,6 +18,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/events"
 	evtmock "github.com/bililive-go/bililive-go/src/pkg/events/mock"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
+	"github.com/bililive-go/bililive-go/src/types"
 	gomock "go.uber.org/mock/gomock"
 )
 
@@ -36,6 +38,7 @@ func TestRefresh(t *testing.T) {
 	})
 	log.New(ctx)
 	live := livemock.NewMockLive(ctrl)
+	live.EXPECT().GetLiveId().Return(types.LiveID("room")).AnyTimes()
 	// 创建一个测试用的 LiveLogger
 	testLogger := livelogger.New(1024, logrus.Fields{"test": "listener"})
 	live.EXPECT().GetLogger().Return(testLogger).AnyTimes()
@@ -52,7 +55,7 @@ func TestRefresh(t *testing.T) {
 	live.EXPECT().GetInfo().Return(&livepkg.Info{Status: true}, nil)
 	live.EXPECT().SetLastStartTime(gomock.Any())
 	live.EXPECT().GetPlatformCNName().Return("platform").AnyTimes()
-	ed.EXPECT().DispatchEvent(events.NewEvent(LiveStart, live))
+	ed.EXPECT().DispatchEvent(events.NewOrderedEvent(LiveStart, live, "room"))
 	l.refresh()
 	assert.True(t, l.status.roomStatus)
 
@@ -67,14 +70,18 @@ func TestRefresh(t *testing.T) {
 	live.EXPECT().GetInfo().Return(&livepkg.Info{Status: true, RoomName: "b"}, nil)
 	live.EXPECT().GetRawUrl().Return("").AnyTimes()                 // 添加对GetRawUrl方法的期望调用
 	live.EXPECT().GetPlatformCNName().Return("platform").AnyTimes() // 添加对GetPlatformCNName方法的期望调用
-	ed.EXPECT().DispatchEvent(events.NewEvent(RoomNameChanged, live))
+	ed.EXPECT().DispatchEvent(events.NewOrderedEvent(RoomNameChanged, live, "room"))
 	l.refresh()
 
-	// true -> false
+	// 短暂离线不结束本场，满三分钟才发出结束事件。
 	live.EXPECT().GetInfo().Return(&livepkg.Info{Status: false}, nil)
 	live.EXPECT().GetRawUrl().Return("").AnyTimes() // 添加对GetRawUrl方法的期望调用
 	live.EXPECT().GetPlatformCNName().Return("platform").AnyTimes()
-	ed.EXPECT().DispatchEvent(events.NewEvent(LiveEnd, live))
+	l.refresh()
+	assert.True(t, l.status.roomStatus)
+	l.offlineSince = time.Now().Add(-3 * time.Minute)
+	live.EXPECT().GetInfo().Return(&livepkg.Info{Status: false}, nil)
+	ed.EXPECT().DispatchEvent(events.NewOrderedEvent(LiveEnd, live, "room"))
 	l.refresh()
 	assert.False(t, l.status.roomStatus)
 }
@@ -125,6 +132,11 @@ func TestListenerStartAndClose(t *testing.T) {
 	testLogger := livelogger.New(1024, logrus.Fields{"test": "listener"})
 	live.EXPECT().GetLogger().Return(testLogger).AnyTimes()
 	live.EXPECT().GetInfo().Return(&livepkg.Info{Status: false}, nil).AnyTimes()
+	live.EXPECT().GetInfoWithInterval(gomock.Any()).DoAndReturn(func(ctx context.Context) (*livepkg.Info, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}).AnyTimes()
+	live.EXPECT().GetLiveId().Return(types.LiveID("room")).AnyTimes()
 	live.EXPECT().GetPlatformCNName().Return("platform").AnyTimes()
 	live.EXPECT().GetRawUrl().Return("").AnyTimes() // 添加对GetRawUrl方法的期望调用
 	ed.EXPECT().DispatchEvent(gomock.Any()).Times(2)
@@ -133,4 +145,30 @@ func TestListenerStartAndClose(t *testing.T) {
 	assert.NoError(t, l.Start())
 	l.Close()
 	l.Close()
+}
+
+func TestListenerStopPreventsLateLiveStartDispatch(t *testing.T) {
+	ctrl := gomock.NewController(t)
+	ed := evtmock.NewMockDispatcher(ctrl)
+	configs.SetCurrentConfig(configs.NewConfig())
+	ctx := context.WithValue(context.Background(), instance.Key, &instance.Instance{EventDispatcher: ed})
+	log.New(ctx)
+	live := livemock.NewMockLive(ctrl)
+	live.EXPECT().GetLogger().Return(livelogger.New(1024, nil)).AnyTimes()
+	live.EXPECT().GetLiveId().Return(types.LiveID("room")).AnyTimes()
+	live.EXPECT().GetRawUrl().Return("").AnyTimes()
+	live.EXPECT().GetPlatformCNName().Return("platform").AnyTimes()
+	entered, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	live.EXPECT().SetLastStartTime(gomock.Any()).Do(func(time.Time) { close(entered); <-release })
+	ed.EXPECT().DispatchEvent(events.NewOrderedEvent(ListenStop, live, "room"))
+	l := NewListener(ctx, live).(*listener)
+	l.state = running
+	go func() {
+		defer close(done)
+		l.processInfo(&livepkg.Info{Status: true})
+	}()
+	<-entered
+	l.Close()
+	close(release)
+	<-done
 }

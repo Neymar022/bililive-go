@@ -137,7 +137,7 @@ func TestEnsureLibraryHardlinkRejectsSameSecondEarlierRecordingWithoutExactSidec
 	require.NoError(t, os.WriteFile(existingStem+".mp4", []byte("later"), 0o644))
 	require.NoError(t, os.WriteFile(
 		existingStem+".nfo",
-		[]byte("<episodedetails><episode>1</episode><dateadded>2026-03-20 10:00:00</dateadded></episodedetails>"),
+		[]byte(buildEpisodeNFO("主播", 1, episodeIdentityForRecordedAt(laterAt), laterAt, "已发布场次", "抖音")),
 		0o644,
 	))
 	sourcePath := filepath.Join(t.TempDir(), "主播 - 2026-03-20 10-00-00 - 晚到的更早场次.mp4")
@@ -729,6 +729,7 @@ func TestEnsureLibraryHardlink_ExistingUnrelatedFileInSlot(t *testing.T) {
 	// Pre-create an unrelated file at E0001 (different content/inode).
 	unrelatedPath := filepath.Join(seasonDir, "主播.S01E0001.2026-03-19 - 其他.mp4")
 	require.NoError(t, os.WriteFile(unrelatedPath, []byte("unrelated"), 0o644))
+	writePublishedFixtureNFO(t, unrelatedPath, 1, referenceTime.Add(-24*time.Hour))
 
 	returnedPath, err := EnsureLibraryHardlink(context.Background(), sourcePath, libraryRoot, "主播", referenceTime, "bililive-go")
 	require.NoError(t, err)
@@ -761,6 +762,8 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	// Pre-create 2 existing episodes so the next one should be E0003.
 	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0001.2026-03-18 - 第一集.mp4"), []byte("ep1"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0002.2026-03-19 - 第二集.mp4"), []byte("ep2"), 0o644))
+	writePublishedFixtureNFO(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-18 - 第一集.mp4"), 1, referenceTime.Add(-48*time.Hour))
+	writePublishedFixtureNFO(t, filepath.Join(seasonDir, "主播.S01E0002.2026-03-19 - 第二集.mp4"), 2, referenceTime.Add(-24*time.Hour))
 
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-20 10-00-00 - 第三集.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
@@ -772,7 +775,7 @@ func TestEnsureLibraryHardlink_EpisodeNumbering(t *testing.T) {
 	assert.Equal(t, expectedPath, targetPath)
 }
 
-func TestEnsureLibraryHardlink_EpisodeNumberingReservesRangeEpisode(t *testing.T) {
+func TestEnsureLibraryHardlinkCountsLegacyRangeAsOnePublishedMedia(t *testing.T) {
 	stubCoverExtraction(t)
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
@@ -781,6 +784,8 @@ func TestEnsureLibraryHardlink_EpisodeNumberingReservesRangeEpisode(t *testing.T
 	require.NoError(t, os.MkdirAll(seasonDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0001.2026-03-18 - 第一集.mp4"), []byte("ep1"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(seasonDir, "主播.S01E0002-S01E0003.2026-03-20 - 同场聚合.mp4"), []byte("ep2-3"), 0o644))
+	writePublishedFixtureNFO(t, filepath.Join(seasonDir, "主播.S01E0001.2026-03-18 - 第一集.mp4"), 1, referenceTime.Add(-48*time.Hour))
+	writePublishedFixtureNFO(t, filepath.Join(seasonDir, "主播.S01E0002-S01E0003.2026-03-20 - 同场聚合.mp4"), 2, referenceTime)
 
 	sourcePath := filepath.Join(sourceRoot, "主播 - 2026-03-22 10-00-00 - 第四集.mp4")
 	require.NoError(t, os.WriteFile(sourcePath, []byte("source"), 0o644))
@@ -790,6 +795,13 @@ func TestEnsureLibraryHardlink_EpisodeNumberingReservesRangeEpisode(t *testing.T
 
 	expectedPath := filepath.Join(seasonDir, fmt.Sprintf("主播.S01E%d.2026-03-22 - 第四集.mp4", episodeIdentityForRecordedAt(referenceTime.Add(48*time.Hour))))
 	assert.Equal(t, expectedPath, targetPath)
+	require.Contains(t, string(mustReadFile(t, sidecarStem(targetPath)+".nfo")), "<episode>3</episode>")
+}
+
+func writePublishedFixtureNFO(t *testing.T, path string, ordinal int64, recordedAt time.Time) {
+	t.Helper()
+	nfo := buildEpisodeNFO("主播", ordinal, episodeIdentityForRecordedAt(recordedAt), recordedAt, "历史", "test")
+	require.NoError(t, os.WriteFile(sidecarStem(path)+".nfo", []byte(nfo), 0o644))
 }
 
 // TestEnsureLibraryHardlink_DoesNotReuseEpisodeWithSidecars verifies that

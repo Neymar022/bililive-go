@@ -3,6 +3,7 @@ package listeners
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -48,10 +49,12 @@ type listener struct {
 	status status
 	ed     events.Dispatcher
 
-	state     uint32
-	stop      chan struct{}
-	runCtx    context.Context    // 用于控制 run 循环中的等待
-	runCancel context.CancelFunc // 取消 runCtx
+	state        uint32
+	eventMu      sync.Mutex
+	offlineSince time.Time
+	stop         chan struct{}
+	runCtx       context.Context    // 用于控制 run 循环中的等待
+	runCancel    context.CancelFunc // 取消 runCtx
 }
 
 func (l *listener) Start() error {
@@ -67,10 +70,12 @@ func (l *listener) Start() error {
 }
 
 func (l *listener) Close() {
+	l.eventMu.Lock()
+	defer l.eventMu.Unlock()
 	if !atomic.CompareAndSwapUint32(&l.state, running, stopped) {
 		return
 	}
-	l.ed.DispatchEvent(events.NewEvent(ListenStop, l.Live))
+	l.ed.DispatchEvent(events.NewOrderedEvent(ListenStop, l.Live, string(l.Live.GetLiveId())))
 	l.runCancel() // 取消 run 循环中的等待
 	close(l.stop)
 }
@@ -87,6 +92,7 @@ func (l *listener) sendLiveNotification(hostName, status string) {
 func (l *listener) refresh() {
 	info, err := l.Live.GetInfo()
 	if err != nil {
+		l.offlineSince = time.Time{}
 		l.Live.GetLogger().
 			WithError(err).
 			WithField("url", l.Live.GetRawUrl()).
@@ -107,6 +113,7 @@ func (l *listener) run() {
 			// 使用 GetInfoWithInterval，它会等待配置的间隔时间后再发送请求
 			info, err := l.Live.GetInfoWithInterval(l.runCtx)
 			if err != nil {
+				l.offlineSince = time.Time{}
 				// 如果是 context 取消导致的错误，说明 listener 正在关闭
 				if l.runCtx.Err() != nil {
 					return
@@ -124,6 +131,20 @@ func (l *listener) run() {
 
 // processInfo 处理获取到的直播间信息，检测状态变化并触发事件
 func (l *listener) processInfo(info *live.Info) {
+	if info == nil {
+		l.offlineSince = time.Time{}
+		return
+	}
+	if l.status.roomStatus && !info.Status {
+		if l.offlineSince.IsZero() {
+			l.offlineSince = time.Now()
+			return
+		}
+		if time.Since(l.offlineSince) < 3*time.Minute {
+			return
+		}
+	}
+	l.offlineSince = time.Time{}
 	// 尝试从缓存中获取主播姓名，以防API调用失败
 	hostName := info.HostName
 	if hostName == "" {
@@ -173,7 +194,12 @@ func (l *listener) processInfo(info *live.Info) {
 		logInfo = "Room name was changed"
 	}
 	if isStatusChanged {
-		l.ed.DispatchEvent(events.NewEvent(evtTyp, l.Live))
+		l.eventMu.Lock()
+		defer l.eventMu.Unlock()
+		if atomic.LoadUint32(&l.state) == stopped || l.runCtx.Err() != nil {
+			return
+		}
+		l.ed.DispatchEvent(events.NewOrderedEvent(evtTyp, l.Live, string(l.Live.GetLiveId())))
 		applog.GetLogger().WithFields(fields).Info(logInfo)
 	}
 }

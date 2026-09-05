@@ -19,16 +19,18 @@ import (
 // Manager 管道任务管理器
 // 负责管理任务队列、持久化存储、并发执行控制
 type Manager struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
-	store         Store
-	executor      *Executor
-	config        *ManagerConfig
-	runningTasks  map[int64]context.CancelFunc
-	mu            sync.RWMutex
-	wg            sync.WaitGroup
-	eventDispatch events.Dispatcher
-	ticker        *time.Ticker
+	ctx               context.Context
+	cancel            context.CancelFunc
+	store             Store
+	executor          *Executor
+	config            *ManagerConfig
+	runningTasks      map[int64]context.CancelFunc
+	mu                sync.RWMutex
+	wg                sync.WaitGroup
+	eventDispatch     events.Dispatcher
+	ticker            *time.Ticker
+	wake              chan struct{}
+	recordingSessions map[string]string
 }
 
 // ManagerConfig 管理器配置
@@ -60,13 +62,15 @@ func NewManager(ctx context.Context, store Store, config *ManagerConfig, dispatc
 	managerCtx, cancel := context.WithCancel(ctx)
 
 	m := &Manager{
-		ctx:           managerCtx,
-		cancel:        cancel,
-		store:         store,
-		executor:      NewExecutor(logrus.StandardLogger()),
-		config:        config,
-		runningTasks:  make(map[int64]context.CancelFunc),
-		eventDispatch: dispatcher,
+		ctx:               managerCtx,
+		cancel:            cancel,
+		store:             store,
+		executor:          NewExecutor(logrus.StandardLogger()),
+		config:            config,
+		runningTasks:      make(map[int64]context.CancelFunc),
+		eventDispatch:     dispatcher,
+		wake:              make(chan struct{}, 1),
+		recordingSessions: make(map[string]string),
 	}
 
 	return m
@@ -79,6 +83,11 @@ func (m *Manager) RegisterStage(name string, factory StageFactory) {
 
 // Start 启动管理器（实现 Module 接口）
 func (m *Manager) Start(ctx context.Context) error {
+	if store, err := m.recordingStore(); err == nil {
+		if err := store.RecoverRecordingSessions(m.ctx); err != nil {
+			return fmt.Errorf("recover recording session closure: %w", err)
+		}
+	}
 	// 重置所有运行中的任务（处理程序非正常退出的情况）
 	if err := m.store.ResetRunningTasks(m.ctx); err != nil {
 		logrus.WithError(err).Warn("failed to reset running pipeline tasks")
@@ -117,6 +126,8 @@ func (m *Manager) pollLoop() {
 		case <-m.ctx.Done():
 			return
 		case <-m.ticker.C:
+			m.scheduleNextTasks()
+		case <-m.wake:
 			m.scheduleNextTasks()
 		}
 	}
@@ -184,6 +195,7 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 		m.mu.Lock()
 		delete(m.runningTasks, task.ID)
 		m.mu.Unlock()
+		m.wakeScheduler()
 	}()
 
 	logrus.WithFields(logrus.Fields{
@@ -206,6 +218,9 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 	}
 	pipelineCtx.ShouldDeferStage = func(stageIndex int, stage StageConfig) (*time.Time, bool) {
 		return m.shouldDeferStage(task, stageIndex, stage)
+	}
+	pipelineCtx.SessionMediaReady = func(sources []SessionMediaSource) (RecordingSession, error) {
+		return m.completeSessionMedia(task, sources)
 	}
 	pipelineCtx.OnStageCompleted = func(stageIndex int, result StageResult, output []FileInfo) {
 		task.CurrentStage = stageIndex + 1
@@ -275,6 +290,13 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 	m.broadcastTaskUpdate(task)
 }
 
+func (m *Manager) wakeScheduler() {
+	select {
+	case m.wake <- struct{}{}:
+	default:
+	}
+}
+
 func (m *Manager) shouldDeferStage(task *PipelineTask, stageIndex int, stage StageConfig) (*time.Time, bool) {
 	if stage.Name != StageNameSubtitleGenerate || !stage.GetBoolOption(OptionSubtitleScheduled, false) {
 		return nil, false
@@ -328,6 +350,7 @@ func (m *Manager) EnqueueRecordingTask(
 	info *live.Info,
 	pipelineConfig *PipelineConfig,
 	outputFiles []string,
+	origins ...RecordingEnqueueOrigin,
 ) error {
 	// 构建文件信息列表
 	files := make([]FileInfo, len(outputFiles))
@@ -337,7 +360,11 @@ func (m *Manager) EnqueueRecordingTask(
 
 	// 创建任务
 	recordInfo := NewRecordInfo(info)
-	if inst := instance.GetInstance(m.ctx); inst != nil {
+	if len(origins) > 0 {
+		recordInfo.LiveSessionID = origins[0].SessionID
+		recordInfo.RecordingProducerID = origins[0].ProducerID
+		recordInfo.StartTime = origins[0].StartTime
+	} else if inst := instance.GetInstance(m.ctx); inst != nil {
 		recordInfo.LiveSessionID = liveSessionIDFromValue(m.ctx, inst.LiveStateStore, string(info.Live.GetLiveId()))
 		if recordInfo.LiveSessionID == "" {
 			recordInfo.LiveSessionID = liveSessionIDFromValue(m.ctx, inst.LiveStateManager, string(info.Live.GetLiveId()))

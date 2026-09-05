@@ -23,7 +23,6 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/instance"
-	"github.com/bililive-go/bililive-go/src/listeners"
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/notify"
 	"github.com/bililive-go/bililive-go/src/pipeline"
@@ -38,6 +37,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/pkg/streamprobe"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/recorders/danmaku"
+	"github.com/bililive-go/bililive-go/src/subtitle"
 )
 
 const (
@@ -213,13 +213,16 @@ type danmakuRecorder interface {
 }
 
 type recorder struct {
-	Live       live.Live
-	ed         events.Dispatcher
-	cache      gcache.Cache
-	startTime  time.Time
-	parser     parser.Parser
-	parserLock *sync.RWMutex
-	danmakuRec danmakuRecorder
+	Live              live.Live
+	ed                events.Dispatcher
+	cache             gcache.Cache
+	startTime         time.Time
+	origin            pipeline.RecordingOrigin
+	pipelineManager   *pipeline.Manager
+	registrationError string
+	parser            parser.Parser
+	parserLock        *sync.RWMutex
+	danmakuRec        danmakuRecorder
 
 	stop  chan struct{}
 	state uint32
@@ -332,6 +335,14 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	}
 	// 使用层级配置的 OutPutPath
 	fileName := filepath.Join(resolvedConfig.OutPutPath, buf.String())
+	if cfg.Subtitle.Enabled && r.origin.ProducerID != "" {
+		fileName, err = subtitle.RecordingCapturePath(cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath), r.origin.SessionID, r.origin.ProducerID, buf.String())
+		if err != nil {
+			r.registrationError = err.Error()
+			r.getLogger().WithError(err).Error("无法创建库外录制工作区")
+			return
+		}
+	}
 	outputPath, _ := filepath.Split(fileName)
 
 	// TODO 根据配置选择最佳流
@@ -561,8 +572,24 @@ func (r *recorder) tryRecord(ctx context.Context) {
 
 	// 设置当前录制文件路径
 	r.setCurrentFilePath(fileName)
+	registered := false
+	defer func() {
+		if registered || r.origin.ProducerID == "" {
+			return
+		}
+		// parser 报错或提前返回也可能留下尾段，不能把它当作不存在。
+		paths := append([]string{fileName}, findBililiveRecorderOutputFiles(fileName)...)
+		for _, path := range paths {
+			info, err := os.Stat(path)
+			if (err == nil && info.Size() > 0) || (err != nil && !os.IsNotExist(err)) {
+				r.registrationError = "recording output was not registered: " + path
+				return
+			}
+		}
+	}()
 
 	r.getLogger().Debugln("Start ParseLiveStream(" + url.String() + ", " + fileName + ")")
+	recordingStartedAt := time.Now()
 	err = r.parser.ParseLiveStream(ctx, streamInfo, r.Live, fileName)
 
 	// 清除当前录制文件路径
@@ -706,22 +733,22 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		}
 
 		// 入队 Pipeline 任务
-		if err := pipelineManager.EnqueueRecordingTask(info, pipelineConfig, outputFiles); err != nil {
+		if err := pipelineManager.EnqueueRecordingTask(info, pipelineConfig, outputFiles, pipeline.RecordingEnqueueOrigin{RecordingOrigin: r.origin, StartTime: recordingStartedAt}); err != nil {
+			r.registrationError = err.Error()
 			r.getLogger().WithError(err).Error("failed to enqueue pipeline task")
 		} else {
+			registered = true
 			r.getLogger().Infof("pipeline task enqueued: %d files, %d stages", len(outputFiles), len(pipelineConfig.Stages))
 		}
 	}
 }
 
-// stopRetryForExplicitOffline 在平台已明确给出“已下播”信号时补发一次 LiveEnd，
-// 让 recorder manager 走正常回收流程，避免 recorder 永久停留在“录制准备中”。
+// 流地址的单次离线不能绕过 listener 的三分钟结束确认。
 func (r *recorder) stopRetryForExplicitOffline(err error) bool {
 	if !errors.Is(err, live.ErrLiveOffline) {
 		return false
 	}
-	r.getLogger().WithError(err).Info("stream source explicitly reported offline, dispatching LiveEnd")
-	r.ed.DispatchEvent(events.NewEvent(listeners.LiveEnd, r.Live))
+	r.getLogger().WithError(err).Debug("流地址已离线，等待监听器确认本场结束")
 	return true
 }
 
@@ -776,8 +803,15 @@ func (r *recorder) selectPreferredStream(streamInfos []*live.StreamUrlInfo) (ret
 }
 
 func (r *recorder) run(ctx context.Context) {
-	defer close(r.done)
 	defer r.sendAccumulatedSummary()
+	defer close(r.done)
+	defer func() {
+		if r.pipelineManager != nil && r.origin.ProducerID != "" {
+			if err := r.pipelineManager.FinishRecordingProducer(r.origin, r.registrationError); err != nil {
+				r.getLogger().WithError(err).Error("无法封口录制输入，保留现场等待恢复")
+			}
+		}
+	}()
 
 	const minRetryInterval = 5 * time.Second
 
@@ -940,6 +974,18 @@ func (r *recorder) Start(ctx context.Context) error {
 	if !atomic.CompareAndSwapUint32(&r.state, begin, pending) {
 		return nil
 	}
+	if inst := instance.GetInstance(ctx); inst != nil {
+		r.pipelineManager = pipeline.GetManager(inst)
+		if r.pipelineManager != nil {
+			origin, err := r.pipelineManager.BeginRecordingProducer(string(r.Live.GetLiveId()))
+			if err != nil {
+				close(r.done)
+				atomic.StoreUint32(&r.state, stopped)
+				return fmt.Errorf("begin recording input registration: %w", err)
+			}
+			r.origin = origin
+		}
+	}
 	bilisentry.GoWithContext(ctx, func(ctx context.Context) { r.run(ctx) })
 	r.getLogger().Info("Record Start ", r.Live.GetRawUrl())
 	r.ed.DispatchEvent(events.NewEvent(RecorderStart, r.Live))
@@ -968,6 +1014,9 @@ func (r *recorder) IsRecording() bool {
 
 func (r *recorder) Close() {
 	if !atomic.CompareAndSwapUint32(&r.state, running, stopped) {
+		if atomic.LoadUint32(&r.state) == stopped {
+			<-r.done
+		}
 		return
 	}
 	close(r.stop)
@@ -984,6 +1033,7 @@ func (r *recorder) Close() {
 		dmRec.Stop()
 	}
 	r.getLogger().Info("Record End")
+	<-r.done
 	r.ed.DispatchEvent(events.NewEvent(RecorderStop, r.Live))
 }
 

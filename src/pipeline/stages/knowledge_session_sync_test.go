@@ -1428,6 +1428,7 @@ func TestPublishLiveSessionMediaAggregateKeepsAppliedSidecarsWhenVideoRestoreFai
 	aggregatePath, err = canonicalLiveSessionAggregatePath(aggregatePath)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(aggregatePath, []byte("old-aggregate"), 0o644))
+	require.NoError(t, os.WriteFile(strings.TrimSuffix(aggregatePath, ".mp4")+".nfo", []byte(`<episodedetails><episode>1</episode><uniqueid type="bililive-recorded-at">1620015360000000</uniqueid></episodedetails>`), 0o644))
 
 	oldMediaRename := liveSessionMediaRename
 	oldSidecarRename := liveSessionSidecarRename

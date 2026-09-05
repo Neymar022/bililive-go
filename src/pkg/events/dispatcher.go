@@ -33,6 +33,7 @@ type Dispatcher interface {
 type dispatcher struct {
 	sync.RWMutex
 	saver map[EventType]*list.List // map<EventType, List<*EventListener>>
+	tails map[string]chan struct{}
 }
 
 func (e *dispatcher) Start(ctx context.Context) error {
@@ -81,18 +82,40 @@ func (e *dispatcher) DispatchEvent(event *Event) {
 	if event == nil {
 		return
 	}
-	e.RLock()
+	e.Lock()
 	listeners, ok := e.saver[event.Type]
 	if !ok || listeners == nil {
-		e.RUnlock()
+		e.Unlock()
 		return
 	}
 	hs := make([]*EventListener, 0)
 	for e := listeners.Front(); e != nil; e = e.Next() {
 		hs = append(hs, e.Value.(*EventListener))
 	}
-	e.RUnlock()
+	var previous, done chan struct{}
+	if event.OrderKey != "" {
+		if e.tails == nil {
+			e.tails = make(map[string]chan struct{})
+		}
+		previous = e.tails[event.OrderKey]
+		done = make(chan struct{})
+		e.tails[event.OrderKey] = done
+	}
+	e.Unlock()
 	bilisentry.Go(func() {
+		if done != nil {
+			defer func() {
+				e.Lock()
+				if e.tails[event.OrderKey] == done {
+					delete(e.tails, event.OrderKey)
+				}
+				close(done)
+				e.Unlock()
+			}()
+		}
+		if previous != nil {
+			<-previous
+		}
 		for _, h := range hs {
 			h.Handler(event)
 		}

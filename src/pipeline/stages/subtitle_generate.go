@@ -51,6 +51,10 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 
 	libraryRoot := cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath)
 	sourceRoot := cfg.Subtitle.GetEffectiveSourceRoot(cfg.OutPutPath)
+	sessionRecording := strings.TrimSpace(ctx.RecordInfo.LiveSessionID) != ""
+	if sessionRecording && (ctx.RecordInfo.RecordingProducerID == "" || ctx.SessionMediaReady == nil) {
+		return nil, errors.New("historical live session requires verified input closure migration")
+	}
 	provider := s.config.GetStringOption("provider", cfg.Subtitle.DefaultProvider)
 	language := s.config.GetStringOption("language", cfg.Subtitle.Language)
 	preset := subtitle.ResolveRenderPreset(
@@ -60,7 +64,8 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 	)
 
 	var output []pipeline.FileInfo
-	for _, file := range input {
+	var sessionSources []pipeline.SessionMediaSource
+	for index, file := range input {
 		if file.Type != pipeline.FileTypeVideo {
 			output = append(output, file)
 			continue
@@ -69,7 +74,7 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, fmt.Errorf("subtitle_generate: requires mp4 input after fix_flv/convert_mp4, got %s", file.Path)
 		}
 
-		if skipped, durationSeconds, minDuration := s.shouldSkipLibraryPublish(ctx, cfg.Subtitle, file.Path, libraryRoot); skipped {
+		if skipped, durationSeconds, minDuration := s.shouldSkipLibraryPublish(ctx, cfg.Subtitle, file.Path, libraryRoot); !sessionRecording && skipped {
 			s.cleanupShortLibraryLink(file.Path, libraryRoot)
 			s.logs += fmt.Sprintf("媒体库发布已跳过（视频过短 %.2fs <= %.0fs）: %s\n", durationSeconds, minDuration.Seconds(), filepath.Base(file.Path))
 			if ctx.Logger != nil {
@@ -83,7 +88,17 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			continue
 		}
 
-		libraryPath, err := subtitle.ResolveLibraryVideoPath(file.Path, libraryRoot)
+		var libraryPath string
+		var err error
+		if sessionRecording {
+			libraryPath, err = subtitle.RecordingWorkPath(libraryRoot, ctx.RecordInfo.LiveSessionID, ctx.TaskID, index, file.Path, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime)
+			if err != nil {
+				return nil, err
+			}
+			defer subtitle.LockRecordingWork(libraryPath)()
+		} else {
+			libraryPath, err = subtitle.ResolveLibraryVideoPath(file.Path, libraryRoot)
+		}
 		if err != nil {
 			// Self-sufficient mode: cron organizer hasn't run yet (race window).
 			// Create the Plex-style hardlink in-process so the pipeline never fails
@@ -100,17 +115,33 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 				"library": libraryPath,
 			}).Info("subtitle_generate: 已自建字幕库硬链接（cron 尚未运行）")
 		}
-		if err := subtitle.EnsureLibrarySidecars(ctx.Ctx, file.Path, libraryPath, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime, ctx.RecordInfo.Platform); err != nil {
-			return nil, fmt.Errorf("subtitle_generate: failed to ensure library sidecars: %w", err)
+		if !sessionRecording {
+			if err := subtitle.EnsureLibrarySidecars(ctx.Ctx, file.Path, libraryPath, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime, ctx.RecordInfo.Platform); err != nil {
+				return nil, fmt.Errorf("subtitle_generate: failed to ensure library sidecars: %w", err)
+			}
 		}
 		srtPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".srt"
 		assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
 		metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"
 
-		if metadata, ok := loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath); ok {
-			s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
-			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
+		var completed subtitle.Metadata
+		var complete bool
+		if sessionRecording {
+			completed, complete, err = loadRecordingCheckpoint(ctx, file.Path, libraryPath)
+			if err != nil {
 				return nil, err
+			}
+		} else {
+			completed, complete = loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath)
+		}
+		if metadata := completed; complete {
+			if sessionRecording {
+				sessionSources = append(sessionSources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: libraryPath, MetadataPath: metadataPath})
+			} else {
+				s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
+				if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
+					return nil, err
+				}
 			}
 			s.logs += fmt.Sprintf("字幕结果已存在，跳过转写: %s\n", subtitle.MediaDisplayTitle(libraryPath))
 			output = append(output,
@@ -133,11 +164,32 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			continue
 		}
 
+		saveMetadata := subtitle.SaveMetadata
+		if sessionRecording {
+			saveMetadata, err = recordingMetadataWriter(metadataPath, completed)
+			if err != nil {
+				return nil, err
+			}
+		}
+		workerVideoPath, workerSRTPath := libraryPath, srtPath
 		recordMeta := map[string]any{
 			"platform":   ctx.RecordInfo.Platform,
 			"host_name":  ctx.RecordInfo.HostName,
 			"room_name":  ctx.RecordInfo.RoomName,
 			"start_time": ctx.RecordInfo.StartTime,
+		}
+		if sessionRecording {
+			recordMeta["live_session_id"] = ctx.RecordInfo.LiveSessionID
+			recordMeta["live_session_media_role"] = "segment"
+			recordMeta["recording_producer_id"] = ctx.RecordInfo.RecordingProducerID
+			recordMeta["pipeline_task_id"] = strconv.FormatInt(ctx.TaskID, 10)
+			attemptDir, err := os.MkdirTemp(filepath.Dir(libraryPath), ".attempt-*")
+			if err != nil {
+				return nil, err
+			}
+			workerVideoPath = filepath.Join(attemptDir, filepath.Base(libraryPath))
+			workerSRTPath = strings.TrimSuffix(workerVideoPath, ".mp4") + ".srt"
+			recordMeta["recording_attempt_path"] = workerVideoPath
 		}
 
 		metadata := subtitle.Metadata{
@@ -153,23 +205,28 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			RendererStatus: subtitle.StatusRunning,
 			RecordMeta:     recordMeta,
 		}
-		if err := subtitle.SaveMetadata(metadataPath, metadata); err != nil {
+		if err := saveMetadata(metadataPath, metadata); err != nil {
 			return nil, err
 		}
 
 		request := subtitle.ProcessRequest{
 			SourcePath:      file.Path,
-			OutputVideoPath: libraryPath,
-			OutputSRTPath:   srtPath,
+			OutputVideoPath: workerVideoPath,
+			OutputSRTPath:   workerSRTPath,
 			Provider:        provider,
 			Language:        language,
 			BurnStyle:       cfg.Subtitle.BurnStyle,
 			RecordMeta:      recordMeta,
 		}
 		request.BurnStyle.Preset = preset
-		s.commands = append(s.commands, fmt.Sprintf("POST %s/api/v1/process (最多 %d 次重试)", strings.TrimRight(cfg.Subtitle.GetWorkerURL(), "/"), subtitle.DefaultProcessMaxAttempts))
+		maxAttempts := subtitle.DefaultProcessMaxAttempts
+		if sessionRecording {
+			// 网络结果不确定时保留独立 attempt，不盲目再次烧录。
+			maxAttempts = 1
+		}
+		s.commands = append(s.commands, fmt.Sprintf("POST %s/api/v1/process (最多 %d 次尝试)", strings.TrimRight(cfg.Subtitle.GetWorkerURL(), "/"), maxAttempts))
 
-		response, err := subtitle.ProcessFileWithRetry(cfg.Subtitle.GetWorkerURL(), request, subtitle.DefaultProcessMaxAttempts)
+		response, err := subtitle.ProcessFileWithRetry(cfg.Subtitle.GetWorkerURL(), request, maxAttempts)
 		if err != nil {
 			if subtitle.IsMacTranscriberUnavailable(err) {
 				metadata.Status = subtitle.StatusQueued
@@ -177,7 +234,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 				metadata.RendererStatus = subtitle.StatusQueued
 				metadata.RendererError = err.Error()
 				metadata.SourceExists = fileExists(file.Path)
-				_ = subtitle.SaveMetadata(metadataPath, metadata)
+				if saveErr := saveMetadata(metadataPath, metadata); sessionRecording && saveErr != nil {
+					return nil, saveErr
+				}
 				return nil, pipeline.NewRetryLaterError(err, subtitleRetryLaterDelay())
 			}
 			metadata.Status = subtitle.StatusFailed
@@ -185,7 +244,13 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			metadata.RendererStatus = subtitle.StatusFailed
 			metadata.RendererError = err.Error()
 			metadata.SourceExists = fileExists(file.Path)
-			_ = subtitle.SaveMetadata(metadataPath, metadata)
+			// 普通 HTTP 失败也可能发生在远端完成之后；只有明确未执行的错误可自动重试。
+			if sessionRecording {
+				metadata.Status, metadata.RendererStatus = subtitle.StatusRunning, subtitle.StatusRunning
+			}
+			if saveErr := saveMetadata(metadataPath, metadata); sessionRecording && saveErr != nil {
+				return nil, saveErr
+			}
 			return nil, err
 		}
 
@@ -199,19 +264,40 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		metadata.RendererStatus = subtitle.StatusCompleted
 		metadata.RendererError = ""
 		if response.ASSPath != "" {
-			metadata.ASSPath = response.ASSPath
+			if sessionRecording {
+				if response.ASSPath != strings.TrimSuffix(workerSRTPath, ".srt")+".ass" {
+					return nil, errors.New("worker returned an unexpected ASS path")
+				}
+			} else {
+				metadata.ASSPath = response.ASSPath
+			}
 		}
 		metadata.Segments = response.Segments
 		metadata.CompletedAt = &now
 		metadata.SourceExists = fileExists(file.Path)
-		if err := subtitle.SaveMetadata(metadataPath, metadata); err != nil {
+		if sessionRecording {
+			staged, err := recordingAttemptMetadata(metadata)
+			if err != nil {
+				return nil, err
+			}
+			if err := subtitle.SaveMetadata(strings.TrimSuffix(workerVideoPath, ".mp4")+".subtitle.json", staged); err != nil {
+				return nil, err
+			}
+		}
+		if err := saveMetadata(metadataPath, metadata); err != nil {
 			return nil, err
 		}
 
-		s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
-
-		if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
-			return nil, err
+		if sessionRecording {
+			if err := promoteRecordingAttempt(metadata); err != nil {
+				return nil, err
+			}
+			sessionSources = append(sessionSources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: libraryPath, MetadataPath: metadataPath})
+		} else {
+			s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
+			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
+				return nil, err
+			}
 		}
 
 		s.logs += fmt.Sprintf("字幕生成完成: %s\n", subtitle.MediaDisplayTitle(libraryPath))
@@ -235,6 +321,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		)
 	}
 
+	if sessionRecording {
+		return s.publishCompletedSession(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, sessionSources)
+	}
 	return output, nil
 }
 

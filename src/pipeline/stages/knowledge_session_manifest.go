@@ -21,6 +21,7 @@ const knowledgeSessionManifestDir = ".knowledge_sessions"
 var knowledgeSessionManifestMu sync.Mutex
 
 type knowledgeSessionManifest struct {
+	PublicationVersion    int                              `json:"publication_version,omitempty"`
 	SourceID              string                           `json:"source_id"`
 	LiveSessionID         string                           `json:"live_session_id"`
 	UpdatedAt             time.Time                        `json:"updated_at"`
