@@ -13,6 +13,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/live"
 	applog "github.com/bililive-go/bililive-go/src/log"
 	"github.com/bililive-go/bililive-go/src/notify"
+	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 )
@@ -29,12 +30,12 @@ type Listener interface {
 	Close()
 }
 
-func NewListener(ctx context.Context, live live.Live) Listener {
+func NewListener(ctx context.Context, roomLive live.Live) Listener {
 	inst := instance.GetInstance(ctx)
 	// 创建一个可取消的 context，用于控制 run 循环中的等待
 	runCtx, cancel := context.WithCancel(ctx)
-	return &listener{
-		Live:      live,
+	l := &listener{
+		Live:      roomLive,
 		status:    status{},
 		stop:      make(chan struct{}),
 		ed:        inst.EventDispatcher.(events.Dispatcher),
@@ -42,6 +43,11 @@ func NewListener(ctx context.Context, live live.Live) Listener {
 		runCtx:    runCtx,
 		runCancel: cancel,
 	}
+	l.pipeline, _ = inst.PipelineManager.(*pipeline.Manager)
+	if wrapped, ok := roomLive.(*live.WrappedLive); ok {
+		_, l.identityPending = wrapped.Live.(live.InitializingLiveSetter)
+	}
+	return l
 }
 
 type listener struct {
@@ -49,12 +55,15 @@ type listener struct {
 	status status
 	ed     events.Dispatcher
 
-	state        uint32
-	eventMu      sync.Mutex
-	offlineSince time.Time
-	stop         chan struct{}
-	runCtx       context.Context    // 用于控制 run 循环中的等待
-	runCancel    context.CancelFunc // 取消 runCtx
+	state           uint32
+	eventMu         sync.Mutex
+	offlineSince    time.Time
+	stop            chan struct{}
+	runCtx          context.Context    // 用于控制 run 循环中的等待
+	runCancel       context.CancelFunc // 取消 runCtx
+	pipeline        *pipeline.Manager
+	recordingRunID  string
+	identityPending bool
 }
 
 func (l *listener) Start() error {
@@ -62,6 +71,20 @@ func (l *listener) Start() error {
 		return nil
 	}
 	defer atomic.CompareAndSwapUint32(&l.state, pending, running)
+	if l.pipeline != nil && !l.identityPending {
+		run, err := l.configureRecordingRun()
+		if err != nil {
+			atomic.StoreUint32(&l.state, stopped)
+			l.runCancel()
+			return err
+		}
+		l.recordingRunID = run.RunID
+		if run.Terminal() {
+			atomic.StoreUint32(&l.state, stopped)
+			l.runCancel()
+			return nil
+		}
+	}
 
 	l.ed.DispatchEvent(events.NewEvent(ListenStart, l.Live))
 	l.refresh()
@@ -106,6 +129,10 @@ func (l *listener) run() {
 	// 使用 GetInfoWithInterval 来处理等待和请求
 	// 它会自动获取配置的间隔时间，并在尊重平台速率限制的前提下等待后发送请求
 	for {
+		if !l.monitoring() {
+			l.Close()
+			return
+		}
 		select {
 		case <-l.stop:
 			return
@@ -131,9 +158,20 @@ func (l *listener) run() {
 
 // processInfo 处理获取到的直播间信息，检测状态变化并触发事件
 func (l *listener) processInfo(info *live.Info) {
+	// 初始化对象即便拿到开播状态，也必须等待 manager 用真实身份替换后才派发录制事件。
+	if l.identityPending {
+		return
+	}
 	if info == nil {
 		l.offlineSince = time.Time{}
 		return
+	}
+	if info.Status && !l.status.roomStatus && l.pipeline != nil {
+		run, err := l.configureRecordingRun()
+		if err != nil || run.RunID != l.recordingRunID || run.State != pipeline.RecordingRunWaiting {
+			// 结果待定时不记作已开播，后续确认可继续等待同一平台状态。
+			return
+		}
 	}
 	if l.status.roomStatus && !info.Status {
 		if l.offlineSince.IsZero() {
@@ -202,4 +240,24 @@ func (l *listener) processInfo(info *live.Info) {
 		l.ed.DispatchEvent(events.NewOrderedEvent(evtTyp, l.Live, string(l.Live.GetLiveId())))
 		applog.GetLogger().WithFields(fields).Info(logInfo)
 	}
+}
+
+func (l *listener) configureRecordingRun() (pipeline.RecordingRun, error) {
+	cfg := configs.GetCurrentConfig()
+	room, err := cfg.GetLiveRoomByUrl(l.Live.GetRawUrl())
+	if err != nil {
+		return pipeline.RecordingRun{}, err
+	}
+	return l.pipeline.ConfigureRecordingRun(string(l.Live.GetLiveId()), room.EffectiveRecordingMode())
+}
+
+func (l *listener) monitoring() bool {
+	if atomic.LoadUint32(&l.state) == stopped {
+		return false
+	}
+	if l.pipeline == nil || l.identityPending {
+		return true
+	}
+	run, err := l.pipeline.RecordingRun(string(l.Live.GetLiveId()))
+	return err == nil && run.RunID == l.recordingRunID && !run.Terminal()
 }

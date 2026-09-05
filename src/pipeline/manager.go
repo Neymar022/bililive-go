@@ -19,18 +19,19 @@ import (
 // Manager 管道任务管理器
 // 负责管理任务队列、持久化存储、并发执行控制
 type Manager struct {
-	ctx               context.Context
-	cancel            context.CancelFunc
-	store             Store
-	executor          *Executor
-	config            *ManagerConfig
-	runningTasks      map[int64]context.CancelFunc
-	mu                sync.RWMutex
-	wg                sync.WaitGroup
-	eventDispatch     events.Dispatcher
-	ticker            *time.Ticker
-	wake              chan struct{}
-	recordingSessions map[string]string
+	ctx                      context.Context
+	cancel                   context.CancelFunc
+	store                    Store
+	executor                 *Executor
+	config                   *ManagerConfig
+	runningTasks             map[int64]context.CancelFunc
+	mu                       sync.RWMutex
+	wg                       sync.WaitGroup
+	eventDispatch            events.Dispatcher
+	ticker                   *time.Ticker
+	wake                     chan struct{}
+	recordingSessions        map[string]string
+	initializedRecordingRuns map[string]bool
 }
 
 // ManagerConfig 管理器配置

@@ -112,7 +112,8 @@ func DecorateConfigNode(node *yaml.Node) {
 	liveRoomsNode := findNode(root, "live_rooms")
 	if liveRoomsNode != nil && liveRoomsNode.Kind == yaml.SequenceNode && len(liveRoomsNode.Content) > 0 {
 		firstItem := liveRoomsNode.Content[0]
-		firstItem.HeadComment = `# quality参数目前仅B站启用，默认为0
+		firstItem.HeadComment = `# recording_mode: once 单次录制；continuous 连续录制。省略时保持连续，新增 UI 默认单次。
+# quality参数目前仅B站启用，默认为0
 # (B站)0代表原画PRO(HEVC)优先, 其他数值为原画(AVC)
 # 原画PRO会保存为.ts文件, 原画为.flv
 # HEVC相比AVC体积更小, 减少35%体积, 画质相当, 但是B站转码有时候会崩`

@@ -8,6 +8,7 @@ import (
 	"github.com/bililive-go/bililive-go/src/instance"
 	"github.com/bililive-go/bililive-go/src/interfaces"
 	"github.com/bililive-go/bililive-go/src/live"
+	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/pkg/events"
 	"github.com/bililive-go/bililive-go/src/types"
 )
@@ -72,6 +73,12 @@ func (m *manager) registryListener(ctx context.Context, ed events.Dispatcher) {
 			panic(err)
 		}
 		configs.SetLiveRoomId(wrappedLive.GetRawUrl(), wrappedLive.GetLiveId())
+		if pm, ok := inst.PipelineManager.(*pipeline.Manager); ok {
+			if _, err := pm.ConfigureRecordingRun(string(wrappedLive.GetLiveId()), room.EffectiveRecordingMode()); err != nil {
+				logger.WithError(err).Error("无法恢复录制额度，禁止开启录制")
+				return
+			}
+		}
 		if room.IsListening {
 			if err := m.replaceListener(ctx, initializingLive, wrappedLive); err != nil {
 				logger.WithFields(map[string]any{
@@ -106,12 +113,20 @@ func (m *manager) AddListener(ctx context.Context, live live.Live) error {
 	m.lock.Lock()
 	defer m.lock.Unlock()
 
-	if _, ok := m.savers[live.GetLiveId()]; ok {
-		return ErrListenerExist
+	if old, ok := m.savers[live.GetLiveId()]; ok {
+		if listenerMonitoring(old) {
+			return ErrListenerExist
+		}
+		old.Close()
+		delete(m.savers, live.GetLiveId())
 	}
 	listener := newListener(ctx, live)
 	m.savers[live.GetLiveId()] = listener
-	return listener.Start()
+	if err := listener.Start(); err != nil {
+		delete(m.savers, live.GetLiveId())
+		return err
+	}
+	return nil
 }
 
 func (m *manager) RemoveListener(ctx context.Context, liveId types.LiveID) error {
@@ -158,6 +173,13 @@ func (m *manager) GetListener(ctx context.Context, liveId types.LiveID) (Listene
 func (m *manager) HasListener(ctx context.Context, liveId types.LiveID) bool {
 	m.lock.RLock()
 	defer m.lock.RUnlock()
-	_, ok := m.savers[liveId]
-	return ok
+	l, ok := m.savers[liveId]
+	return ok && listenerMonitoring(l)
+}
+
+func listenerMonitoring(l Listener) bool {
+	if monitor, ok := l.(*listener); ok {
+		return monitor.monitoring()
+	}
+	return true
 }

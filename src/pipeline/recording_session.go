@@ -35,12 +35,13 @@ type recordingTaskMedia struct {
 
 // RecordingSession 将封口事实与完整任务集合持久化在现有 pipeline 数据库。
 type RecordingSession struct {
-	ID        string                        `json:"id"`
-	LiveID    string                        `json:"live_id"`
-	EndReason string                        `json:"end_reason,omitempty"`
-	Blocked   string                        `json:"blocked,omitempty"`
-	Producers map[string]bool               `json:"producers"`
-	Tasks     map[string]recordingTaskMedia `json:"tasks"`
+	ID              string                        `json:"id"`
+	LiveID          string                        `json:"live_id"`
+	EndReason       string                        `json:"end_reason,omitempty"`
+	Blocked         string                        `json:"blocked,omitempty"`
+	Producers       map[string]bool               `json:"producers"`
+	Tasks           map[string]recordingTaskMedia `json:"tasks"`
+	CaptureEvidence map[string]string             `json:"capture_evidence,omitempty"`
 }
 
 func (s RecordingSession) Sealed() bool {
@@ -97,6 +98,9 @@ func readRecordingSession(ctx context.Context, tx *sql.Tx, id string) (Recording
 }
 
 func saveRecordingSession(ctx context.Context, tx *sql.Tx, session RecordingSession) error {
+	if err := finishRecordingRunCapture(ctx, tx, session); err != nil {
+		return err
+	}
 	content, err := json.Marshal(struct {
 		RecordingSession
 		Ready bool `json:"ready"`
@@ -140,8 +144,29 @@ func (s *SQLiteStore) OpenRecordingSession(ctx context.Context, id, liveID strin
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.db.ExecContext(ctx, `INSERT INTO pipeline_recording_sessions(id, live_id, state_json) VALUES (?, ?, ?)`, id, liveID, string(content))
-	return err
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	run, err := readRecordingRun(ctx, tx, liveID)
+	if err == nil {
+		if run.State != RecordingRunWaiting {
+			return fmt.Errorf("recording run cannot open another session while %s", run.State)
+		}
+		run.State = RecordingRunRecording
+		run.SessionID = id
+		run.PauseReason = ""
+		if err = saveRecordingRun(ctx, tx, run); err != nil {
+			return err
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO pipeline_recording_sessions(id, live_id, state_json) VALUES (?, ?, ?)`, id, liveID, string(content)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *SQLiteStore) latestRecordingSessionID(ctx context.Context, liveID string) (string, error) {
@@ -165,9 +190,28 @@ func (s *SQLiteStore) BeginRecordingProducer(ctx context.Context, liveID string)
 			return errors.New("recording session is closed or requires confirmation")
 		}
 		session.Producers[origin.ProducerID] = false
+		if session.CaptureEvidence == nil {
+			session.CaptureEvidence = make(map[string]string)
+		}
+		session.CaptureEvidence[origin.ProducerID] = "empty"
 		return nil
 	})
 	return origin, err
+}
+
+func (s *SQLiteStore) RecordCaptureEvidence(ctx context.Context, origin RecordingOrigin, playable bool, failure string) error {
+	return s.updateRecordingSession(ctx, origin.SessionID, func(session *RecordingSession, _ *sql.Tx) error {
+		finished, exists := session.Producers[origin.ProducerID]
+		if !exists || finished || session.CaptureEvidence == nil {
+			return errors.New("capture evidence requires an active recording producer")
+		}
+		if playable {
+			session.CaptureEvidence[origin.ProducerID] = "playable"
+		} else if failure != "" && session.CaptureEvidence[origin.ProducerID] != "playable" {
+			session.CaptureEvidence[origin.ProducerID] = "unknown"
+		}
+		return nil
+	})
 }
 
 func (s *SQLiteStore) FinishRecordingProducer(ctx context.Context, origin RecordingOrigin, failure string) error {

@@ -573,7 +573,12 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	// 设置当前录制文件路径
 	r.setCurrentFilePath(fileName)
 	registered := false
+	captureChecked := false
 	defer func() {
+		if !captureChecked {
+			// parser panic 也必须验证留下的尾段，不能沿用未开始录制时的空证据。
+			r.recordCaptureEvidence(ctx, fileName)
+		}
 		if registered || r.origin.ProducerID == "" {
 			return
 		}
@@ -591,6 +596,8 @@ func (r *recorder) tryRecord(ctx context.Context) {
 	r.getLogger().Debugln("Start ParseLiveStream(" + url.String() + ", " + fileName + ")")
 	recordingStartedAt := time.Now()
 	err = r.parser.ParseLiveStream(ctx, streamInfo, r.Live, fileName)
+	r.recordCaptureEvidence(ctx, fileName)
+	captureChecked = true
 
 	// 清除当前录制文件路径
 	r.setCurrentFilePath("")

@@ -408,6 +408,16 @@ func main() {
 	if liveStateManager != nil {
 		livestate.RegisterEventListeners(ed, liveStateManager, inst.Cache, pipelineManager)
 	}
+	// 对外接受启停前先恢复持久化场次，并注册有序生命周期消费者。
+	if err = lm.Start(ctx); err != nil {
+		logger.Fatalf("failed to init listener manager, error: %s", err)
+	}
+	if err = rm.Start(ctx); err != nil {
+		logger.Fatalf("failed to init recorder manager, error: %s", err)
+	}
+	if err = pipelineManager.Start(ctx); err != nil {
+		logger.Fatalf("failed to init pipeline manager, error: %s", err)
+	}
 
 	// 尽早启动 HTTP 服务器，让用户可以快速访问 Web 界面
 	// 即使 live rooms 还在初始化，用户也能看到页面
@@ -447,18 +457,6 @@ func main() {
 		}
 	}
 
-	// 启动 manager
-	if err = lm.Start(ctx); err != nil {
-		logger.Fatalf("failed to init listener manager, error: %s", err)
-	}
-	if err = rm.Start(ctx); err != nil {
-		logger.Fatalf("failed to init recorder manager, error: %s", err)
-	}
-
-	// 启动 Pipeline 管道管理器
-	if err = pipelineManager.Start(ctx); err != nil {
-		logger.Fatalf("failed to init pipeline manager, error: %s", err)
-	}
 	if err = subtitleModule.Start(ctx); err != nil {
 		logger.Fatalf("failed to init subtitle manager, error: %s", err)
 	}

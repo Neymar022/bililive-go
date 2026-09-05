@@ -4,6 +4,7 @@ package events
 import (
 	"container/list"
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/bililive-go/bililive-go/src/instance"
@@ -34,6 +35,27 @@ type dispatcher struct {
 	sync.RWMutex
 	saver map[EventType]*list.List // map<EventType, List<*EventListener>>
 	tails map[string]chan struct{}
+}
+
+// WaitForOrderedEvents 等待该房间已派发的生命周期完成；取消等待不会撤销已发出的停止。
+// 调用者须先阻止旧 listener 派发新事件，不能在该房间的事件 handler 内等待自己。
+func WaitForOrderedEvents(ctx context.Context, ed Dispatcher, key string) error {
+	d, ok := ed.(*dispatcher)
+	if !ok {
+		return errors.New("ordered event completion unavailable")
+	}
+	d.RLock()
+	tail := d.tails[key]
+	d.RUnlock()
+	if tail == nil {
+		return nil
+	}
+	select {
+	case <-tail:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (e *dispatcher) Start(ctx context.Context) error {

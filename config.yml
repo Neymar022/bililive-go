@@ -86,6 +86,7 @@ danmaku:
   guard_position: bottom-left
   sc_position: bottom-left
 live_rooms:
+  # recording_mode: once 单次录制；continuous 连续录制。省略时保持连续，新增 UI 默认单次。
   # quality参数目前仅B站启用，默认为0
   # (B站)0代表原画PRO(HEVC)优先, 其他数值为原画(AVC)
   # 原画PRO会保存为.ts文件, 原画为.flv

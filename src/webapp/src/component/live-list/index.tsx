@@ -14,6 +14,7 @@ import { useNavigate, NavigateFunction } from "react-router-dom";
 import EditCookieDialog from "../edit-cookie/index";
 import { RoomConfigForm } from "../config-info";
 import { StreamAttributes } from '../../types/stream';
+import { recordingStateLabel, recordingPauseReasonLabel } from '../../types/recording';
 
 const api = new API();
 const { Text } = Typography;
@@ -900,6 +901,11 @@ class LiveList extends React.Component<Props, IState> {
                         tags = ['录制准备中'];
                     }
 
+                    const recordingState = recordingStateLabel(item.recording_state);
+                    if (recordingState) {
+                        tags = [recordingState];
+                    }
+
                     if (item.initializing === true) {
                         tags.push('初始化')
                     }
@@ -1437,11 +1443,14 @@ class LiveList extends React.Component<Props, IState> {
                                 <div style={configRowStyle}>
                                     <span style={configLabelStyle}>监控状态</span>
                                     <Tag color={detail.listening ? 'green' : undefined}>
-                                        {detail.listening ? '监控中' : '已停止'}
+                                        {recordingStateLabel(detail.recording_state) || (detail.listening ? '监控中' : '已停止')}
                                     </Tag>
                                 </div>
                                 <div style={configRowStyle}>
                                     <span style={configLabelStyle}>录制状态</span>
+                                    <Tooltip title={recordingPauseReasonLabel(detail.recording_pause_reason)}>
+                                        <Tag>{detail.recording_mode === 'once' ? '单次录制' : '连续录制'}</Tag>
+                                    </Tooltip>
                                     <Tag color={detail.recording ? 'red' : detail.recording_preparing ? 'volcano' : undefined}>
                                         {detail.recording ? '录制中' : detail.recording_preparing ? '录制准备中' : '未录制'}
                                     </Tag>
@@ -1893,7 +1902,7 @@ class LiveList extends React.Component<Props, IState> {
                 column.onFilter = (value: string | number | boolean, record: ItemData) => record.address === value;
             }
             if (column.key === 'tags') {
-                column.filters = ['初始化', '监控中', '录制中', '录制准备中', '已停止'].map(text => ({ text, value: text }));
+                column.filters = ['初始化', '监控中', '录制中', '录制准备中', '录制收尾中', '单次已完成', '待确认', '已停止'].map(text => ({ text, value: text }));
                 column.onFilter = (value: string | number | boolean, record: ItemData) => record.tags.includes(value as string);
             }
         })
