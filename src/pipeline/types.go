@@ -54,12 +54,13 @@ func NewCoverFileInfo(path, sourcePath string) FileInfo {
 
 // RecordInfo 录制信息
 type RecordInfo struct {
-	LiveID        types.LiveID `json:"live_id"`
-	LiveSessionID string       `json:"live_session_id,omitempty"`
-	Platform      string       `json:"platform"`
-	HostName      string       `json:"host_name"`
-	RoomName      string       `json:"room_name"`
-	StartTime     time.Time    `json:"start_time"`
+	LiveID              types.LiveID `json:"live_id"`
+	LiveSessionID       string       `json:"live_session_id,omitempty"`
+	RecordingProducerID string       `json:"recording_producer_id,omitempty"`
+	Platform            string       `json:"platform"`
+	HostName            string       `json:"host_name"`
+	RoomName            string       `json:"room_name"`
+	StartTime           time.Time    `json:"start_time"`
 }
 
 // NewRecordInfo 从 live.Info 创建录制信息
@@ -91,6 +92,8 @@ type PipelineContext struct {
 	ShouldDeferStage func(stageIndex int, stage StageConfig) (*time.Time, bool)
 	// OnStageCompleted 在单个阶段完成后回调，供持久化当前输出。
 	OnStageCompleted func(stageIndex int, result StageResult, output []FileInfo)
+	// SessionMediaReady 登记本任务全部处理产物并返回完整场次快照，不等待任务整体 completed。
+	SessionMediaReady func([]SessionMediaSource) (RecordingSession, error)
 }
 
 // Stage 管道阶段接口

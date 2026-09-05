@@ -73,6 +73,8 @@ var (
 type manager struct {
 	lock         sync.RWMutex
 	savers       map[types.LiveID]Recorder
+	stopping     map[types.LiveID]chan struct{}
+	closed       bool
 	statusTicker *time.Ticker
 	statusStopCh chan struct{}
 	statusWg     sync.WaitGroup // 用于等待广播 goroutine 退出
@@ -141,10 +143,14 @@ func (m *manager) Close(ctx context.Context) {
 	}
 
 	m.lock.Lock()
-	defer m.lock.Unlock()
-	for id, recorder := range m.savers {
-		recorder.Close()
-		delete(m.savers, id)
+	m.closed = true
+	ids := make([]types.LiveID, 0, len(m.savers))
+	for id := range m.savers {
+		ids = append(ids, id)
+	}
+	m.lock.Unlock()
+	for _, id := range ids {
+		_ = m.RemoveRecorder(ctx, id)
 	}
 	inst := instance.GetInstance(ctx)
 	inst.WaitGroup.Done()
@@ -158,6 +164,9 @@ func (m *manager) AddRecorder(ctx context.Context, live live.Live) error {
 
 // addRecorderLocked 是 AddRecorder 的内部实现，调用者必须已持有 m.lock
 func (m *manager) addRecorderLocked(ctx context.Context, live live.Live) error {
+	if m.closed {
+		return ErrRecorderNotExist
+	}
 	if _, ok := m.savers[live.GetLiveId()]; ok {
 		return ErrRecorderExist
 	}
@@ -208,6 +217,10 @@ func (m *manager) RestartRecorder(ctx context.Context, live live.Live) error {
 	// 1. 在锁内完成 map 操作：取出旧 recorder，创建并放入新 recorder
 	// 这样外部观察者（如 LiveEnd 事件处理器）始终能看到录制器存在，不会出现中间状态
 	m.lock.Lock()
+	if m.closed || m.stopping[live.GetLiveId()] != nil {
+		m.lock.Unlock()
+		return ErrRecorderNotExist
+	}
 	oldRecorder, ok := m.savers[live.GetLiveId()]
 	if !ok {
 		m.lock.Unlock()
@@ -260,23 +273,38 @@ func (m *manager) RestartRecorder(ctx context.Context, live live.Live) error {
 
 func (m *manager) RemoveRecorder(ctx context.Context, liveId types.LiveID) error {
 	m.lock.Lock()
-	defer m.lock.Unlock()
-	return m.removeRecorderLocked(ctx, liveId)
-}
-
-// removeRecorderLocked 是 RemoveRecorder 的内部实现，调用者必须已持有 m.lock
-func (m *manager) removeRecorderLocked(ctx context.Context, liveId types.LiveID) error {
+	if done := m.stopping[liveId]; done != nil {
+		m.lock.Unlock()
+		<-done
+		return nil
+	}
 	recorder, ok := m.savers[liveId]
 	if !ok {
+		m.lock.Unlock()
 		return ErrRecorderNotExist
 	}
-	recorder.Close()
-	delete(m.savers, liveId)
-
-	// 录制结束后，检查是否有等待中的优雅更新
-	if onRecordingEndFunc != nil {
-		bilisentry.GoWithContext(ctx, func(ctx context.Context) { onRecordingEndFunc(ctx) })
+	if m.stopping == nil {
+		m.stopping = make(map[types.LiveID]chan struct{})
 	}
+	done := make(chan struct{})
+	m.stopping[liveId] = done
+	m.lock.Unlock()
+	finished := false
+	defer func() {
+		m.lock.Lock()
+		if finished {
+			delete(m.savers, liveId)
+		}
+		delete(m.stopping, liveId)
+		close(done)
+		m.lock.Unlock()
+		if finished && onRecordingEndFunc != nil {
+			bilisentry.GoWithContext(ctx, func(ctx context.Context) { onRecordingEndFunc(ctx) })
+		}
+	}()
+	// 收尾仍保留在 savers 中计入活跃，但不占用其他房间的管理锁。
+	recorder.Close()
+	finished = true
 
 	return nil
 }

@@ -405,6 +405,9 @@ func main() {
 	// 先初始化 manager（不启动），因为 server 依赖它们
 	lm := listeners.NewManager(ctx)
 	rm := recorders.NewManager(ctx)
+	if liveStateManager != nil {
+		livestate.RegisterEventListeners(ed, liveStateManager, inst.Cache, pipelineManager)
+	}
 
 	// 尽早启动 HTTP 服务器，让用户可以快速访问 Web 界面
 	// 即使 live rooms 还在初始化，用户也能看到页面
@@ -414,10 +417,6 @@ func main() {
 		}
 		// 注册 SSE 事件监听器
 		servers.RegisterSSEEventListeners(inst)
-		// 注册直播间状态持久化事件监听器
-		if liveStateManager != nil {
-			livestate.RegisterEventListeners(ed, liveStateManager, inst.Cache)
-		}
 		// 设置日志回调，将日志推送到 SSE
 		livelogger.SetLogCallback(func(roomID string, logLine string) {
 			servers.GetSSEHub().BroadcastLog(types.LiveID(roomID), logLine)

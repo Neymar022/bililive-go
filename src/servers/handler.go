@@ -32,6 +32,7 @@ import (
 	soop "github.com/bililive-go/bililive-go/src/live/sooplive"
 	"github.com/bililive-go/bililive-go/src/livestate"
 	applog "github.com/bililive-go/bililive-go/src/log"
+	"github.com/bililive-go/bililive-go/src/pkg/events"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/memstats"
 	"github.com/bililive-go/bililive-go/src/pkg/ratelimit"
@@ -448,10 +449,8 @@ func parseLiveAction(writer http.ResponseWriter, r *http.Request) {
 		if _, err := configs.SetLiveRoomListening(live.GetRawUrl(), false); err != nil {
 			live.GetLogger().Error("failed to set live room listening: " + err.Error())
 		}
-		// 记录用户停止监控（结束当前会话）
-		if manager, ok := inst.LiveStateManager.(*livestate.Manager); ok && manager != nil {
-			manager.OnUserStopMonitoring(string(live.GetLiveId()))
-		}
+		// 与开播和最终录制退出按房间排序，避免封口错误的最新场次。
+		inst.EventDispatcher.(events.Dispatcher).DispatchEvent(events.NewOrderedEvent(listeners.UserStop, live, string(live.GetLiveId())))
 		// 广播监控停止事件
 		GetSSEHub().BroadcastListChange(live.GetLiveId(), "listen_stop", map[string]interface{}{
 			"live_id": string(live.GetLiveId()),

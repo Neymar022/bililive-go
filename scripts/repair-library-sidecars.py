@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import tempfile
 import unicodedata
@@ -105,6 +106,7 @@ class UGREENEpisodeOrdinal:
     identity: int
     old_episode: int
     ordinal: int
+    missing_identity: bool = False
 
 
 def normalize_component(value: str) -> str:
@@ -119,7 +121,7 @@ def normalize_component(value: str) -> str:
 
 
 def parse_episode(path: Path, library_root: Path) -> Episode | None:
-    if path.suffix.lower() != ".mp4":
+    if path.suffix.lower() not in (".mp4", ".mkv"):
         return None
     try:
         rel = path.relative_to(library_root)
@@ -149,8 +151,12 @@ def episode_recorded_at(ep: Episode) -> datetime:
     metadata_path = ep.path.with_suffix(".subtitle.json")
     try:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
+    except FileNotFoundError:
         metadata = {}
+    except (OSError, ValueError, TypeError) as exc:
+        raise ValueError(f"unreadable recorded_at metadata: {metadata_path}") from exc
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("record_meta") or {}, dict):
+        raise ValueError(f"invalid recorded_at metadata: {metadata_path}")
     value = (metadata.get("record_meta") or {}).get("start_time")
     if isinstance(value, str):
         try:
@@ -166,6 +172,17 @@ def episode_recorded_at(ep: Episode) -> datetime:
             return datetime.strptime(match.group("recorded_at"), "%Y-%m-%d %H-%M-%S").replace(
                 tzinfo=MEDIA_LIBRARY_TIMEZONE
             )
+    # 已迁移条目的文件名与独立 NFO identity 一致时，可解码原始录制时间。
+    if 1_000_000_000_000 <= ep.episode <= MAX_SAFE_EPISODE_IDENTITY:
+        nfo_path = ep.path.with_suffix(".nfo")
+        try:
+            node = ET.fromstring(nfo_path.read_text(encoding="utf-8"))
+        except (OSError, ET.ParseError):
+            node = None
+        if node is not None:
+            identities = [(item.text or "").strip() for item in node.findall("uniqueid") if item.get("type") == "bililive-recorded-at"]
+            if identities == [str(ep.episode)]:
+                return (CHRONOLOGICAL_EPISODE_EPOCH + timedelta(microseconds=ep.episode // CHRONOLOGICAL_EPISODE_IDENTITY_BASE)).astimezone(MEDIA_LIBRARY_TIMEZONE)
     raise ValueError(f"no reliable recorded_at: {ep.path}")
 
 
@@ -236,7 +253,19 @@ def plan_ugreen_episode_ordinals(episodes: list[Episode]) -> list[UGREENEpisodeO
     planned: list[UGREENEpisodeOrdinal] = []
     for show_dir, show_episodes in sorted(grouped.items(), key=lambda item: str(item[0])):
         show_episodes.sort(key=lambda item: (item[1], item[0].episode, str(item[0].path)))
+        identities: set[tuple[int, int]] = set()
         for ordinal, (episode, recorded_at) in enumerate(show_episodes, start=1):
+            identity_key = (episode.season, episode.episode)
+            if identity_key in identities:
+                raise ValueError(f"duplicate media identity: {episode.path}")
+            identities.add(identity_key)
+            info = episode.path.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+                raise ValueError(f"media is not a nonempty regular file: {episode.path}")
+            with episode.path.open("rb") as media:
+                media.read(1)
+            if episode.path.with_suffix(".nfo").is_symlink():
+                raise ValueError(f"NFO symlink is not a writable repair target: {episode.path}")
             nfo_path = episode.path.with_suffix(".nfo").resolve()
             if not nfo_path.is_file():
                 raise ValueError(f"missing episode NFO: {nfo_path}")
@@ -260,7 +289,7 @@ def plan_ugreen_episode_ordinals(episodes: list[Episode]) -> list[UGREENEpisodeO
                 for node in nfo_root.findall("uniqueid")
                 if node.get("type") == "bililive-recorded-at"
             ]
-            if recorded_at_ids != [str(episode.episode)]:
+            if recorded_at_ids and recorded_at_ids != [str(episode.episode)]:
                 raise ValueError(
                     f"recordedAt NFO uniqueid mismatch: {nfo_path}: "
                     f"expected {episode.episode}, got {recorded_at_ids}"
@@ -273,6 +302,7 @@ def plan_ugreen_episode_ordinals(episodes: list[Episode]) -> list[UGREENEpisodeO
                     identity=episode.episode,
                     old_episode=old_episode,
                     ordinal=ordinal,
+                    missing_identity=not recorded_at_ids,
                 )
             )
 
@@ -527,10 +557,38 @@ def build_show_nfo(alias: str, date: str, studio: str) -> str:
     )
 
 
+def public_episode_ordinal(ep: Episode) -> int:
+    if ep.episode <= 9999:
+        return ep.episode
+    path = ep.path.with_suffix(".nfo")
+    try:
+        node = ET.fromstring(path.read_text(encoding="utf-8"))
+        ordinal = int(node.findtext("episode", "0"))
+    except (OSError, ValueError, ET.ParseError) as exc:
+        raise ValueError(f"episode requires verified ordinal migration: {path}") from exc
+    if node.tag != "episodedetails" or not 1 <= ordinal <= 9999:
+        raise ValueError(f"episode requires verified ordinal migration: {path}")
+    identities = [(item.text or "").strip() for item in node.findall("uniqueid") if item.get("type") == "bililive-recorded-at"]
+    if identities and identities != [str(ep.episode)]:
+        raise ValueError(f"recordedAt NFO uniqueid mismatch: {path}")
+    return ordinal
+
+
 def build_episode_nfo(ep: Episode, studio: str) -> str:
-    display_title = f"{ep.date} - {ep.title}"
-    sort_title = f"{ep.alias} - {ep.date} 00-00-00"
-    plot = f"{studio} | 主播: {ep.alias} | 标题: {ep.title} | 录制时间: {ep.date} 00-00-00"
+    ordinal = public_episode_ordinal(ep)
+    if ep.episode > 9999:
+        recorded_at = episode_recorded_at(ep).astimezone(MEDIA_LIBRARY_TIMEZONE)
+        base = chronological_episode_identity(recorded_at)
+        if not base <= ep.episode < base + CHRONOLOGICAL_EPISODE_IDENTITY_BASE:
+            raise ValueError(f"recordedAt filename identity mismatch: {ep.path}")
+    else:
+        recorded_at = datetime.strptime(ep.date, "%Y-%m-%d").replace(tzinfo=MEDIA_LIBRARY_TIMEZONE)
+    date = recorded_at.strftime("%Y-%m-%d")
+    precise_time = recorded_at.strftime("%Y-%m-%d %H-%M-%S")
+    display_title = f"{date} - {ep.title}"
+    sort_title = f"{ep.alias} - {precise_time}"
+    plot = f"{studio} | 主播: {ep.alias} | 标题: {ep.title} | 录制时间: {precise_time}"
+    identity = ep.episode if ep.episode > 9999 else chronological_episode_identity(recorded_at)
     return "\n".join(
         [
             '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
@@ -539,13 +597,14 @@ def build_episode_nfo(ep: Episode, studio: str) -> str:
             f"  <showtitle>{html.escape(ep.alias)}</showtitle>",
             f"  <sorttitle>{html.escape(sort_title)}</sorttitle>",
             f"  <season>{ep.season}</season>",
-            f"  <episode>{ep.episode}</episode>",
+            f"  <episode>{ordinal}</episode>",
+            f'  <uniqueid type="bililive-recorded-at" default="false">{identity}</uniqueid>',
             f"  <plot>{html.escape(plot)}</plot>",
             f"  <studio>{html.escape(studio)}</studio>",
             "  <genre>直播录屏</genre>",
             "  <tag>直播录屏</tag>",
-            f"  <aired>{ep.date}</aired>",
-            f"  <dateadded>{ep.date} 00:00:00</dateadded>",
+            f"  <aired>{date}</aired>",
+            f"  <dateadded>{recorded_at.strftime('%Y-%m-%d %H:%M:%S')}</dateadded>",
             "</episodedetails>",
             "",
         ]
@@ -606,13 +665,20 @@ def ensure_show_nfo_fields(text: str, date: str, studio: str) -> str:
 def episode_nfo_complete(path: Path, ep: Episode) -> bool:
     if not path.exists():
         return False
-    text = path.read_text(encoding="utf-8", errors="ignore")
+    text = path.read_text(encoding="utf-8")
+    try:
+        ordinal = public_episode_ordinal(ep)
+        node = ET.fromstring(text)
+    except (ValueError, ET.ParseError):
+        return False
+    if ep.episode > 9999 and [item.text for item in node.findall("uniqueid") if item.get("type") == "bililive-recorded-at"] != [str(ep.episode)]:
+        return False
     return all(
         [
             contains_tag(text, "title", f"{ep.date} - {ep.title}"),
             contains_tag(text, "showtitle", ep.alias),
             contains_tag(text, "season", str(ep.season)),
-            contains_tag(text, "episode", str(ep.episode)),
+            contains_tag(text, "episode", str(ordinal)),
             contains_tag(text, "studio"),
         ]
     )
@@ -620,7 +686,9 @@ def episode_nfo_complete(path: Path, ep: Episode) -> bool:
 
 def collect_episodes(root: Path) -> list[Episode]:
     episodes: list[Episode] = []
-    for mp4 in root.rglob("*.mp4"):
+    for mp4 in root.rglob("*"):
+        if mp4.suffix.lower() not in (".mp4", ".mkv"):
+            continue
         ep = parse_episode(mp4, root)
         if ep is not None:
             episodes.append(ep)
@@ -1083,7 +1151,7 @@ def main() -> int:
         if args.apply or args.merge_duplicate_shows:
             parser.error("--plan-ugreen-episode-ordinals is read-only and cannot be combined with apply modes")
         plan = plan_ugreen_episode_ordinals(episodes)
-        changed = [item for item in plan if item.old_episode != item.ordinal]
+        changed = [item for item in plan if item.old_episode != item.ordinal or item.missing_identity]
         for item in changed:
             print(
                 "[ugreen-episode-ordinal] "

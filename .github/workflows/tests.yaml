@@ -47,6 +47,8 @@ jobs:
           node-version-file: '.node-version'
       - name: Test
         run: make build-web test
+      - name: Test publication maintenance tools
+        run: python3 -B -m unittest tests/test_adopt_recording_session.py tests/test_apply_ugreen_episode_ordinals.py tests/test_repair_library_sidecars.py
       - name: Codecov
         uses: codecov/codecov-action@v2
   lint:

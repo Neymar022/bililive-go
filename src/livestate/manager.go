@@ -139,7 +139,7 @@ func (m *Manager) RecoverFromCrash() error {
 }
 
 // OnLiveStart 直播开始时调用
-func (m *Manager) OnLiveStart(liveID, url, platform, hostName, roomName string) {
+func (m *Manager) OnLiveStart(liveID, url, platform, hostName, roomName string) (int64, error) {
 	now := time.Now()
 
 	// 更新直播间信息
@@ -154,12 +154,14 @@ func (m *Manager) OnLiveStart(liveID, url, platform, hostName, roomName string) 
 
 	if err := m.store.UpsertLiveRoom(m.ctx, room); err != nil {
 		logrus.WithError(err).WithField("live_id", liveID).Warn("保存直播间信息失败")
-		return
+		return 0, err
 	}
 
 	// 开始新的会话（包含名称信息）
-	if _, err := m.store.StartSession(m.ctx, liveID, hostName, roomName, now); err != nil {
+	id, err := m.store.StartSession(m.ctx, liveID, hostName, roomName, now)
+	if err != nil {
 		logrus.WithError(err).WithField("live_id", liveID).Warn("创建直播会话失败")
+		return 0, err
 	}
 
 	logrus.WithFields(logrus.Fields{
@@ -167,6 +169,7 @@ func (m *Manager) OnLiveStart(liveID, url, platform, hostName, roomName string) 
 		"host_name": hostName,
 		"room_name": roomName,
 	}).Debug("记录直播开始")
+	return id, nil
 }
 
 // OnLiveEnd 直播结束时调用

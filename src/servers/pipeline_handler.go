@@ -174,7 +174,16 @@ func makePipelineRetryTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 			return
 		}
 
-		if err := pm.RetryTask(id); err != nil {
+		switch r.URL.Query().Get("mode") {
+		case "":
+			err = pm.RetryTask(id)
+		case "resume":
+			err = pm.ResumeTask(id)
+		default:
+			http.Error(w, "invalid retry mode", http.StatusBadRequest)
+			return
+		}
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}

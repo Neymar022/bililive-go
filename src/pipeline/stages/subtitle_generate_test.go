@@ -369,7 +369,7 @@ func TestSubtitleGenerateSkipsKnowledgeSyncForTooShortTranscript(t *testing.T) {
 	assert.NotNil(t, metadata.KnowledgeSyncUpdatedAt)
 }
 
-func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(t *testing.T) {
+func TestSubtitleGenerateRejectsUnsealedHistoricalSessionBeforeKnowledgeSync(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	sourcePath := filepath.Join(sourceRoot, "建筑师 linkai - 2026-06-01 19-10-00 - 设计师还在加班画图吗？进来看看！.mp4")
@@ -449,26 +449,13 @@ func TestSubtitleGenerateDoesNotSkipKnowledgeSyncForSameLiveSessionContinuation(
 	}, []pipeline.FileInfo{
 		{Path: sourcePath, Type: pipeline.FileTypeVideo},
 	})
-	require.NoError(t, err)
-	require.Len(t, output, 3)
-	assert.Equal(t, 1, knowledgeCalls, "同场直播续段不能因为自身时长低于阈值而跳过 BiliNote ingest")
-	assert.Equal(t, "live-session:session-20260601-linkai", capturedPayload.SourceID)
-	assert.Equal(t, "session-20260601-linkai", capturedPayload.LiveSessionID)
-	assert.Equal(t, "qwen3.7-plus", capturedPayload.ModelName)
-	assert.Equal(t, "教程", capturedPayload.Style)
-	require.Len(t, capturedPayload.SourceVideos, 1)
-	assert.Equal(t, "bililive-go-620", capturedPayload.SourceVideos[0].TaskID)
-	assert.Equal(t, libraryPath, capturedPayload.SourceVideos[0].SourceVideoPath)
-	require.Len(t, capturedPayload.MediaSegments, 1)
-	assert.Equal(t, capturedPayload.SourceVideos, capturedPayload.MediaSegments)
-
-	metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json")
-	require.NoError(t, err)
-	assert.Equal(t, subtitle.StatusQueued, metadata.KnowledgeSyncStatus)
-	assert.Equal(t, "bililive-go-620", metadata.KnowledgeSyncTaskID)
+	require.ErrorContains(t, err, "verified input closure migration")
+	require.Empty(t, output)
+	assert.Equal(t, 0, knowledgeCalls)
+	require.FileExists(t, libraryPath)
 }
 
-func TestSubtitleGenerateUsesCompletedSidecarWhenKnowledgeAggregationRetries(t *testing.T) {
+func TestSubtitleGeneratePreservesUnregisteredCompletedSessionWithoutWorkerOrKnowledge(t *testing.T) {
 	sourceRoot := t.TempDir()
 	libraryRoot := t.TempDir()
 	libraryPath, metadataPath, _ := writeCompletedKnowledgeSessionSidecar(t, libraryRoot, "建筑师 linkai", 20, "同场续段")
@@ -515,15 +502,14 @@ func TestSubtitleGenerateUsesCompletedSidecarWhenKnowledgeAggregationRetries(t *
 		{Path: libraryPath, Type: pipeline.FileTypeVideo},
 	})
 
-	require.NoError(t, err)
-	require.Len(t, output, 3)
+	require.ErrorContains(t, err, "verified input closure migration")
+	require.Empty(t, output)
 	assert.Equal(t, 0, workerCalls, "RetryLater 恢复时不应重复调用字幕 worker")
-	assert.Equal(t, 1, knowledgeCalls)
+	assert.Equal(t, 0, knowledgeCalls)
 
 	metadata, err := subtitle.LoadMetadata(metadataPath)
 	require.NoError(t, err)
-	assert.Equal(t, subtitle.StatusQueued, metadata.KnowledgeSyncStatus)
-	assert.Equal(t, "live-session:session-20260601-linkai", metadata.KnowledgeSyncSourceID)
+	assert.Equal(t, subtitle.StatusCompleted, metadata.Status)
 }
 
 func TestSubtitleGenerateDeletesResidualSourceWhenCompletedSidecarIsReused(t *testing.T) {

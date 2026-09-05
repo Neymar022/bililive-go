@@ -692,5 +692,58 @@ class RepairLibrarySidecarsTest(unittest.TestCase):
             self.assertTrue(any(quarantine_root.rglob("*.mp4")))
 
 
+    def test_title_repair_preserves_public_ordinal_and_recording_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            season = root / "Host" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "Host.S01E1685894400000000.2026-09-05 - Room.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text('{"record_meta":{"start_time":"2026-09-05T10:00:00+08:00"}}')
+            video.with_suffix(".nfo").write_text('<episodedetails><episode>1</episode><uniqueid type="bililive-recorded-at">1685894400000000</uniqueid></episodedetails>')
+            module = self.load_script_module()
+            ep = module.parse_episode(video, root)
+            repaired = module.build_episode_nfo(ep, "test")
+            self.assertIn("<episode>1</episode>", repaired)
+            self.assertIn('>1685894400000000</uniqueid>', repaired)
+            self.assertIn("<dateadded>2026-09-05 10:00:00</dateadded>", repaired)
+            video.with_suffix(".nfo").write_text(repaired)
+            self.assertTrue(module.episode_nfo_complete(video.with_suffix(".nfo"), ep))
+
+            video.with_suffix(".nfo").write_text(repaired.replace(">1685894400000000</uniqueid>", ">1685894400000008</uniqueid>"))
+            with self.assertRaisesRegex(ValueError, "uniqueid mismatch"):
+                module.build_episode_nfo(ep, "test")
+
+    def test_ordinal_inventory_includes_mkv_and_rejects_duplicate_media_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            season = root / "Host" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "Host.S01E1685894400000000.2026-09-05 - Room.mkv"
+            video.write_bytes(b"video")
+            video.with_suffix(".subtitle.json").write_text('{"record_meta":{"start_time":"2026-09-05T10:00:00+08:00"}}')
+            video.with_suffix(".nfo").write_text('<episodedetails><episode>1</episode><uniqueid type="bililive-recorded-at">1685894400000000</uniqueid></episodedetails>')
+            module = self.load_script_module()
+            self.assertEqual(1, len(module.plan_ugreen_episode_ordinals(module.collect_episodes(root))))
+            video.with_suffix(".mp4").write_bytes(b"different-video")
+            with self.assertRaisesRegex(ValueError, "duplicate.*identity"):
+                module.plan_ugreen_episode_ordinals(module.collect_episodes(root))
+
+    def test_ordinal_plan_recovers_recording_time_from_matching_persisted_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            season = root / "Host" / "Season 01"
+            season.mkdir(parents=True)
+            video = season / "Host.S01E1685894400000000.2026-09-05 - Room.mp4"
+            video.write_bytes(b"video")
+            video.with_suffix(".nfo").write_text('<episodedetails><episode>1</episode><uniqueid type="bililive-recorded-at">1685894400000000</uniqueid></episodedetails>')
+            module = self.load_script_module()
+            plan = module.plan_ugreen_episode_ordinals(module.collect_episodes(root))
+            self.assertEqual("2026-09-05T10:00:00+08:00", plan[0].recorded_at.isoformat())
+            video.with_suffix(".nfo").write_text('<episodedetails><episode>1</episode></episodedetails>')
+            with self.assertRaisesRegex(ValueError, "no reliable recorded_at"):
+                module.plan_ugreen_episode_ordinals(module.collect_episodes(root))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,7 @@ import os
 import re
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from types import ModuleType
@@ -62,8 +63,18 @@ def atomic_write(path: Path, data: bytes, mode: int) -> None:
             temporary.unlink(missing_ok=True)
 
 
-def render_episode_nfo(path: Path, old_episode: int, ordinal: int) -> bytes:
+def render_episode_nfo(path: Path, old_episode: int, ordinal: int, missing_identity: int | None = None) -> bytes:
     text = path.read_text(encoding="utf-8")
+    root = ET.fromstring(text)
+    nodes = root.findall("episode")
+    if root.tag != "episodedetails" or len(nodes) != 1 or (nodes[0].text or "").strip() != str(old_episode):
+        raise ValueError(f"NFO fixed point changed: {path}")
+    if missing_identity is not None:
+        if any(node.get("type") == "bililive-recorded-at" for node in root.findall("uniqueid")):
+            raise ValueError(f"NFO identity changed: {path}")
+        nodes[0].text = str(ordinal)
+        ET.SubElement(root, "uniqueid", {"type": "bililive-recorded-at", "default": "false"}).text = str(missing_identity)
+        return ET.tostring(root, encoding="utf-8", xml_declaration=True)
     pattern = re.compile(r"(<episode>)(.*?)(</episode>)", re.S)
     match = pattern.search(text)
     if match is None or match.group(2).strip() != str(old_episode):
@@ -77,20 +88,31 @@ def render_episode_nfo(path: Path, old_episode: int, ordinal: int) -> bytes:
     ).encode("utf-8")
 
 
-def build_plan(module: ModuleType, root: Path) -> tuple[list[object], dict[str, object]]:
+def build_plan(module: ModuleType, root: Path, only_show: str = "") -> tuple[list[object], dict[str, object]]:
     episodes = module.collect_episodes(root)
+    if only_show:
+        if Path(only_show).name != only_show or only_show in (".", ".."):
+            raise ValueError("only-show must be one exact show directory name")
+        show = root / only_show
+        if show.is_symlink():
+            raise ValueError(f"show directory must not be a symlink: {show}")
+        episodes = [episode for episode in episodes if episode.show_dir == show]
+        if not episodes:
+            raise ValueError(f"no published media in selected show: {show}")
     plan = module.plan_ugreen_episode_ordinals(episodes)
-    changed = [item for item in plan if item.old_episode != item.ordinal]
+    changed = [item for item in plan if item.old_episode != item.ordinal or item.missing_identity]
     media = [
         {
             "path": str(item.path),
             "inode": item.path.stat().st_ino,
             "size": item.path.stat().st_size,
+            "mtime_ns": item.path.stat().st_mtime_ns,
         }
         for item in plan
     ]
     fingerprint_value = {
         "root": str(root),
+        "only_show": only_show,
         "entries": [
             {
                 "path": str(item.path),
@@ -116,6 +138,7 @@ def build_plan(module: ModuleType, root: Path) -> tuple[list[object], dict[str, 
         "media_count": len(media),
         "media_bytes": sum(item["size"] for item in media),
         "media": media,
+        "nfo_revisions": {item["nfo"]: item["nfo_sha256"] for item in fingerprint_value["entries"]},
     }
 
 
@@ -128,7 +151,7 @@ def validate_media(snapshot: list[dict[str, object]]) -> None:
     for item in snapshot:
         path = Path(str(item["path"]))
         stat = path.stat()
-        if stat.st_ino != item["inode"] or stat.st_size != item["size"]:
+        if stat.st_ino != item["inode"] or stat.st_size != item["size"] or ("mtime_ns" in item and stat.st_mtime_ns != item["mtime_ns"]):
             raise RuntimeError(f"media changed: {path}")
 
 
@@ -139,8 +162,9 @@ def apply_plan(
     repair_script: Path,
     driver_script: Path,
     expected_fingerprint: str,
+    only_show: str = "",
 ) -> None:
-    changed, summary = build_plan(module, root)
+    changed, summary = build_plan(module, root, only_show)
     if summary["fingerprint"] != expected_fingerprint:
         raise RuntimeError(
             f"fixed point changed: expected {expected_fingerprint}, got {summary['fingerprint']}"
@@ -158,14 +182,24 @@ def apply_plan(
         relative = item.nfo_path.relative_to(root)
         backup = originals / relative
         backup.parent.mkdir(parents=True, exist_ok=True)
-        os.link(item.nfo_path, backup)
+        original = item.nfo_path.read_bytes()
+        before_sha256 = sha256_bytes(original)
+        if before_sha256 != summary["nfo_revisions"][str(item.nfo_path)]:
+            raise RuntimeError(f"NFO changed before backup: {item.nfo_path}")
+        with backup.open("xb") as output:
+            output.write(original)
+            output.flush()
+            os.fsync(output.fileno())
+        backup.chmod(item.nfo_path.stat().st_mode & 0o777)
+        rendered = render_episode_nfo(item.nfo_path, item.old_episode, item.ordinal, item.identity if item.missing_identity else None)
         entries.append(
             {
                 "path": str(item.nfo_path),
                 "backup": str(backup),
                 "old_episode": item.old_episode,
                 "ordinal": item.ordinal,
-                "before_sha256": sha256_file(item.nfo_path),
+                "before_sha256": before_sha256,
+                "after_sha256": sha256_bytes(rendered),
             }
         )
     fsync_directory(originals)
@@ -173,6 +207,7 @@ def apply_plan(
         "version": 1,
         "state": "prepared",
         "root": str(root),
+        "only_show": only_show,
         "fingerprint": expected_fingerprint,
         "repair_script_sha256": sha256_file(repair_script),
         "driver_script_sha256": sha256_file(driver_script),
@@ -188,24 +223,39 @@ def apply_plan(
 
     applied: list[dict[str, object]] = []
     try:
+        validate_media(summary["media"])
         for item, entry in zip(changed, entries, strict=True):
             if sha256_file(item.nfo_path) != entry["before_sha256"]:
                 raise RuntimeError(f"NFO changed after backup: {item.nfo_path}")
-            rendered = render_episode_nfo(item.nfo_path, item.old_episode, item.ordinal)
-            atomic_write(item.nfo_path, rendered, item.nfo_path.stat().st_mode & 0o777)
-            entry["after_sha256"] = sha256_file(item.nfo_path)
+            rendered = render_episode_nfo(item.nfo_path, item.old_episode, item.ordinal, item.identity if item.missing_identity else None)
+            if sha256_bytes(rendered) != entry["after_sha256"]:
+                raise RuntimeError(f"NFO render changed after backup: {item.nfo_path}")
             applied.append(entry)
+            atomic_write(item.nfo_path, rendered, item.nfo_path.stat().st_mode & 0o777)
         validate_media(summary["media"])
-        remaining, after = build_plan(module, root)
+        remaining, after = build_plan(module, root, only_show)
         if remaining or after["changed"] != 0:
             raise RuntimeError(f"ordinal postcondition failed: remaining={after['changed']}")
         manifest["state"] = "applied"
         write_manifest(manifest_path, manifest)
-    except Exception:
-        for entry in reversed(applied):
-            backup = Path(str(entry["backup"]))
-            path = Path(str(entry["path"]))
-            atomic_write(path, backup.read_bytes(), backup.stat().st_mode & 0o777)
+    except Exception as failure:
+        try:
+            validate_media(summary["media"])
+            for entry in applied:
+                current = sha256_file(Path(str(entry["path"])))
+                if current not in (entry["before_sha256"], entry["after_sha256"]):
+                    raise RuntimeError(f"NFO changed during apply: {entry['path']}")
+                if sha256_file(Path(str(entry["backup"]))) != entry["before_sha256"]:
+                    raise RuntimeError(f"NFO backup changed during apply: {entry['backup']}")
+            for entry in reversed(applied):
+                backup = Path(str(entry["backup"]))
+                path = Path(str(entry["path"]))
+                if sha256_file(path) == entry["after_sha256"]:
+                    atomic_write(path, backup.read_bytes(), backup.stat().st_mode & 0o777)
+        except Exception as recovery_failure:
+            manifest["state"] = "recovery_required"
+            write_manifest(manifest_path, manifest)
+            raise RuntimeError(f"apply failed: {failure}; guarded rollback stopped: {recovery_failure}") from recovery_failure
         manifest["state"] = "rolled_back"
         write_manifest(manifest_path, manifest)
         raise
@@ -237,6 +287,7 @@ def rollback(backup_dir: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--root", default="/volume2/docker/bililive-go/video")
+    parser.add_argument("--only-show", default="", help="restrict the fixed point to one exact show directory")
     parser.add_argument("--repair-script", required=True)
     parser.add_argument("--backup-dir", required=True)
     parser.add_argument("--apply", action="store_true")
@@ -259,11 +310,11 @@ def main() -> int:
     if args.apply:
         if not args.expected_fingerprint:
             parser.error("--apply requires --expected-fingerprint")
-        apply_plan(module, root, backup_dir, repair_script, driver_script, args.expected_fingerprint)
+        apply_plan(module, root, backup_dir, repair_script, driver_script, args.expected_fingerprint, args.only_show)
         print(f"ugreen-episode-ordinals apply: state=applied backup={backup_dir}")
         return 0
 
-    _, summary = build_plan(module, root)
+    _, summary = build_plan(module, root, args.only_show)
     print(
         f"ugreen-episode-ordinals fixed-point: shows={summary['shows']} episodes={summary['episodes']} "
         f"changed={summary['changed']} media={summary['media_count']}/{summary['media_bytes']} "
