@@ -94,6 +94,39 @@ class HistoricalRecordingSessionTest(unittest.TestCase):
             self.assertFalse(plan["session"]["ready"])
             self.assertEqual({"1518": {"ready": False, "sources": []}}, plan["session"]["tasks"])
 
+    def test_archived_full_log_survives_rotation_and_still_rechecks_closure(self):
+        driver = self.load_driver()
+        with tempfile.TemporaryDirectory() as directory:
+            conn, log, library, source, _ = self.fixture(directory)
+            self.addCleanup(conn.close)
+            original = log.read_bytes()
+            archived = driver.archive_evidence(log, Path(directory).resolve() / "evidence")
+            self.assertEqual(original, archived.read_bytes())
+            self.assertEqual(0o600, archived.stat().st_mode & 0o777)
+            self.assertEqual(0o700, archived.parent.stat().st_mode & 0o777)
+            plan = driver.build_plan(conn, "961", archived, library, source)
+            log.unlink()
+            driver.apply_plan(conn, plan, Path(directory) / "backup")
+            driver.rollback(conn, Path(directory) / "backup")
+            archived.write_bytes(original.replace(b"Record End", b"unproven end"))
+            with self.assertRaisesRegex(ValueError, "final recording summary"):
+                driver.apply_plan(conn, plan, Path(directory) / "tampered-backup")
+            self.assertEqual(plan["before_task"], dict(conn.execute("SELECT * FROM pipeline_tasks").fetchone()))
+
+    def test_evidence_archive_never_replaces_existing_files_or_accepts_missing_logs(self):
+        driver = self.load_driver()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            log = root / "input.log"
+            with self.assertRaises(FileNotFoundError):
+                driver.archive_evidence(log, root / "missing")
+            log.write_bytes(b"original")
+            archived = driver.archive_evidence(log, root / "evidence")
+            log.write_bytes(b"changed")
+            with self.assertRaises(FileExistsError):
+                driver.archive_evidence(log, root / "evidence")
+            self.assertEqual(b"original", archived.read_bytes())
+
     def test_unowned_same_day_library_media_blocks_adoption(self):
         driver = self.load_driver()
         with tempfile.TemporaryDirectory() as directory:

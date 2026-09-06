@@ -60,6 +60,7 @@ func IsBToolsStarting() bool {
 // 在进入 launcher 模式前调用，确保端口被释放以供新版本使用。
 func Cleanup() {
 	logger := blog.GetLogger()
+	managedBTools.stop()
 
 	// 1. 终止所有已注册的子进程
 	KillAllProcesses()
@@ -311,31 +312,15 @@ func startBTools() error {
 		currentBToolsStatus.Store(int32(BToolsStatusFailed))
 		return err
 	}
-	cmd := exec.Command(
-		nodePath,
-		"./index.cjs",
-		"server",
-		"-c",
-		"./appConfig.json",
-	)
-	cmd.Dir = btoolsFolder
-	cmd.Env = env
-	// 动态决定是否输出，保留错误信息
-	cmd.Stdout = utils.NewDebugControlledWriter(os.Stdout)
-	cmd.Stderr = utils.NewLogFilterWriter(os.Stderr)
-
 	blog.GetLogger().Infoln("Starting bililive-tools server…")
-
-	// 设置状态为已就绪（服务已启动）
-	currentBToolsStatus.Store(int32(BToolsStatusReady))
-
-	// 在 Windows 下使用 Job Object，确保主进程退出时子进程被一并终止
-	// 使用 runWithKillOnCloseAndGetPID 来获取进程 PID
-	return runWithKillOnCloseAndGetPID(cmd, func(pid int) {
-		// 使用通用的进程跟踪器注册子进程
-		RegisterProcess("bililive-tools", pid, ProcessCategoryBTools)
-		blog.GetLogger().Infof("bililive-tools process started with PID: %d", pid)
-	})
+	return managedBTools.run(func() *exec.Cmd {
+		cmd := exec.Command(nodePath, "./index.cjs", "server", "-c", "./appConfig.json")
+		cmd.Dir = btoolsFolder
+		cmd.Env = env
+		cmd.Stdout = utils.NewDebugControlledWriter(os.Stdout)
+		cmd.Stderr = utils.NewLogFilterWriter(os.Stderr)
+		return cmd
+	}, nil)
 }
 
 func AsyncDownloadIfNecessary(toolName string) {

@@ -24,6 +24,46 @@ from urllib.request import urlopen
 MEDIA_TIMEZONE = timezone(timedelta(hours=8))
 
 
+def archive_evidence(log: Path, destination: Path) -> Path:
+    """在 dry-run 阶段保存完整原日志；不以摘要替代生命周期验证。"""
+    log = log.absolute()
+    if log.resolve(strict=True) != log or not log.is_file():
+        raise ValueError("closure evidence must be a regular non-symlink log")
+    destination = destination.absolute()
+    if destination.resolve() != destination:
+        raise ValueError("evidence archive must not traverse symlinks")
+    with log.open("rb") as source:
+        before = os.fstat(source.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            raise ValueError("closure evidence must be a regular log")
+        destination.mkdir(mode=0o700, parents=True, exist_ok=False)
+        archived = destination / "recording.log"
+        try:
+            with os.fdopen(os.open(archived, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as output:
+                remaining = before.st_size
+                while remaining:
+                    chunk = source.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise ValueError("closure log truncated during evidence archival")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+                output.flush()
+                os.fsync(output.fileno())
+            def signature(value):
+                return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+            if signature(before) != signature(os.fstat(source.fileno())) or signature(before) != signature(log.stat()):
+                raise ValueError("closure log changed during evidence archival")
+            descriptor = os.open(destination, os.O_RDONLY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        except BaseException:
+            archived.unlink(missing_ok=True)
+            raise
+    return archived
+
+
 def verify_closure(log: Path, session: dict, live_url: str, input_count: int) -> dict:
     if session["end_reason"] != "normal" or session["end_time"] <= session["start_time"]:
         raise ValueError("historical session has no confirmed normal end")
@@ -312,9 +352,12 @@ def main() -> None:
     mode.add_argument("--rollback", action="store_true")
     parser.add_argument("--expect", default="")
     parser.add_argument("--backup-dir", type=Path)
+    parser.add_argument("--evidence-dir", type=Path, help="dry-run 时独占创建原日志和完整计划归档，不复制媒体")
     parser.add_argument("--api", default="")
     args = parser.parse_args()
     writing = args.apply or args.rollback
+    if args.evidence_dir is not None and writing:
+        parser.error("--evidence-dir is dry-run only; apply using the archived --log and its fingerprint")
     library, source_root = args.library.resolve(strict=True), args.source_root.resolve(strict=True)
     conn = sqlite3.connect(args.pipeline_db.resolve(strict=True).as_uri() + ("?mode=rw" if writing else "?mode=ro"), uri=True, timeout=5)
     conn.row_factory = sqlite3.Row
@@ -331,12 +374,17 @@ def main() -> None:
             rollback(conn, args.backup_dir)
             print("historical session adoption rolled back; media unchanged")
             return
-        plan = build_plan(conn, args.session, args.log.resolve(strict=True), library, source_root)
+        log = args.log.resolve(strict=True)
+        if args.evidence_dir is not None:
+            log = archive_evidence(log, args.evidence_dir)
+        plan = build_plan(conn, args.session, log, library, source_root)
+        if args.evidence_dir is not None:
+            write_manifest(args.evidence_dir, {"state": "evidence-archived", "original_log": str(args.log), "plan": plan})
         if args.apply:
             if args.expect != plan["fingerprint"]:
                 raise ValueError("apply requires the current dry-run --expect fingerprint")
             apply_plan(conn, plan, args.backup_dir)
-        print(encoded({"state": "adopted-not-retried" if args.apply else "dry-run", "fingerprint": plan["fingerprint"], "session_id": args.session, "task_id": plan["before_task"]["id"], "media_count": len(plan["media"]), "media_bytes": sum(item["size"] for item in plan["media"]), "proof_lines": plan["proof"]["lines"], "recording_start": json.loads(plan["after_task"]["record_info_json"])["start_time"]}))
+        print(encoded({"state": "adopted-not-retried" if args.apply else "dry-run", "fingerprint": plan["fingerprint"], "session_id": args.session, "task_id": plan["before_task"]["id"], "media_count": len(plan["media"]), "media_bytes": sum(item["size"] for item in plan["media"]), "proof_log": plan["proof"]["log"], "proof_lines": plan["proof"]["lines"], "recording_start": json.loads(plan["after_task"]["record_info_json"])["start_time"]}))
     finally:
         conn.close()
 
