@@ -3,11 +3,16 @@ package douyin
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
+	"time"
 
 	"github.com/bililive-go/bililive-go/src/live"
+	"github.com/bililive-go/bililive-go/src/tools"
 )
+
+var btoolsHTTPClient = &http.Client{Timeout: 30 * time.Second}
 
 var btoolsConsts = struct {
 	port      int
@@ -68,30 +73,8 @@ func (l *btoolsLive) updateChannelInfo() (err error) {
 }
 
 func (l *btoolsLive) fetchChannelInfo() (channelInfo ChannelInfo, err error) {
-	// 使用自定义请求以便添加认证Header
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/channel-info?url=%s", btoolsConsts.port, url.QueryEscape(l.Url.String()))
-	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
-	if reqErr != nil {
-		err = reqErr
-		return
-	}
-	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
-	if doErr != nil {
-		err = doErr
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		err = fmt.Errorf("请求失败: %s", resp.Status)
-		return
-	}
-
-	if err = json.NewDecoder(resp.Body).Decode(&channelInfo); err != nil {
-		return
-	}
+	err = requestBTools(endpoint, &channelInfo, 0)
 	return
 }
 
@@ -104,24 +87,20 @@ func (l *btoolsLive) fetchLiveInfo() (liveInfo liveInfoResp, err error) {
 	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/live-info?platform=douyin&roomId=%s", btoolsConsts.port, url.QueryEscape(l.roomId))
-	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
-	if reqErr != nil {
-		return liveInfo, reqErr
+	generation := tools.BToolsGeneration()
+	var response struct {
+		Title  string `json:"title"`
+		Owner  string `json:"owner"`
+		Living *bool  `json:"living"`
 	}
-	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
-	if doErr != nil {
-		return liveInfo, doErr
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return liveInfo, fmt.Errorf("请求失败: %s", resp.Status)
-	}
-	if err = json.NewDecoder(resp.Body).Decode(&liveInfo); err != nil {
+	if err = requestBTools(endpoint, &response, generation); err != nil {
 		return liveInfo, err
 	}
-	return liveInfo, nil
+	if response.Living == nil {
+		return liveInfo, fmt.Errorf("解析服务响应缺少 living，无法确认直播状态")
+	}
+	tools.ReportBToolsLiveInfo(generation, false)
+	return liveInfoResp{Title: response.Title, Owner: response.Owner, Living: *response.Living}, nil
 }
 
 func (l *btoolsLive) fetchStreamInfo() (streamInfo streamInfoResp, err error) {
@@ -133,24 +112,41 @@ func (l *btoolsLive) fetchStreamInfo() (streamInfo streamInfoResp, err error) {
 	}
 
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/bgo/stream-info?platform=douyin&roomId=%s", btoolsConsts.port, url.QueryEscape(l.roomId))
+	err = requestBTools(endpoint, &streamInfo, 0)
+	return
+}
+
+func requestBTools(endpoint string, result any, generation uint64) error {
 	req, reqErr := http.NewRequest(http.MethodGet, endpoint, nil)
 	if reqErr != nil {
-		return streamInfo, reqErr
+		return reqErr
 	}
 	req.Header.Set("Authorization", btoolsConsts.authToken)
-
-	resp, doErr := http.DefaultClient.Do(req)
+	resp, doErr := btoolsHTTPClient.Do(req)
 	if doErr != nil {
-		return streamInfo, doErr
+		return doErr
 	}
 	defer resp.Body.Close()
+	const limit = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return fmt.Errorf("读取解析服务响应失败: %w", err)
+	}
+	if len(body) > limit {
+		return fmt.Errorf("解析服务响应超出大小限制")
+	}
 	if resp.StatusCode != http.StatusOK {
-		return streamInfo, fmt.Errorf("请求失败: %s", resp.Status)
+		var failure struct {
+			Error string `json:"error"`
+		}
+		// 仅透传已知分类，不把上游 Cookie、签名 URL 或错误堆栈回显到 UI。
+		if resp.StatusCode == http.StatusInternalServerError && json.Unmarshal(body, &failure) == nil && failure.Error == "所有 API 端点都不可用，请稍后重试" {
+			tools.ReportBToolsLiveInfo(generation, true)
+			return fmt.Errorf("抖音解析端点持续禁用，等待限频恢复；当前无法确认直播状态")
+		}
+		return fmt.Errorf("请求失败: %d %s", resp.StatusCode, http.StatusText(resp.StatusCode))
 	}
-	if err = json.NewDecoder(resp.Body).Decode(&streamInfo); err != nil {
-		return streamInfo, err
-	}
-	return streamInfo, nil
+	return json.Unmarshal(body, result)
 }
 
 func (l *btoolsLive) GetInfo() (info *live.Info, err error) {
