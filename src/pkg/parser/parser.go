@@ -15,6 +15,7 @@ type Builder interface {
 
 type Parser interface {
 	ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) error
+	// Stop 必须幂等；一旦调用，尚未开始的 ParseLiveStream 也不得再启动录制。
 	Stop() error
 }
 

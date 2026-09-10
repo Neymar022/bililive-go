@@ -60,6 +60,8 @@ type Parser struct {
 	statusReq  chan struct{}
 	statusResp chan map[string]interface{}
 	cmdLock    sync.Mutex
+	stopped    bool
+	finished   bool
 	logger     *livelogger.LiveLogger
 
 	// FLV 代理相关
@@ -164,6 +166,12 @@ func (p *Parser) Status() (map[string]interface{}, error) {
 // 正确修复需要同时解决整条 context 传播链路（将 request context 替换为应用级 context），
 // 影响范围广，暂不在此处理。当前录制的停止完全由 recorder.Close() → parser.Stop() 控制。
 func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) (err error) {
+	p.cmdLock.Lock()
+	stopped := p.stopped
+	p.cmdLock.Unlock()
+	if stopped {
+		return nil
+	}
 	url := streamUrlInfo.Url
 	ffmpegPath, err := utils.GetFFmpegPathForLive(ctx, live)
 	if err != nil {
@@ -270,6 +278,11 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	func() {
 		p.cmdLock.Lock()
 		defer p.cmdLock.Unlock()
+		// Stop 可能在参数准备期间发生；检查与启动必须持有同一把锁。
+		if p.stopped {
+			stopped = true
+			return
+		}
 		p.cmd = exec.Command(ffmpegPath, args...)
 		if p.cmdStdIn, err = p.cmd.StdinPipe(); err != nil {
 			return
@@ -289,7 +302,7 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 			return
 		}
 	}()
-	if err != nil {
+	if stopped || err != nil {
 		p.stopFlvProxy()
 		return err
 	}
@@ -298,6 +311,9 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	// 注意：cmd.Wait() 不监听 ctx.Done()，见函数顶部注释。
 	// 停止 FFmpeg 的唯一途径是通过 Stop() 方法。
 	err = p.cmd.Wait()
+	p.cmdLock.Lock()
+	p.finished = true
+	p.cmdLock.Unlock()
 
 	// 停止 FLV 代理
 	p.stopFlvProxy()
@@ -336,12 +352,13 @@ func (p *Parser) stopFlvProxy() {
 
 func (p *Parser) Stop() (err error) {
 	p.closeOnce.Do(func() {
-		// 先停止 FLV 代理
-		p.stopFlvProxy()
-
 		p.cmdLock.Lock()
-		defer p.cmdLock.Unlock()
-		if p.cmd != nil && p.cmd.ProcessState == nil {
+		p.stopped = true
+		defer func() {
+			p.cmdLock.Unlock()
+			p.stopFlvProxy()
+		}()
+		if p.cmd != nil && !p.finished {
 			if p.cmdStdIn != nil && p.cmd.Process != nil {
 				if _, err = p.cmdStdIn.Write([]byte("q")); err != nil {
 					err = fmt.Errorf("error sending stop command to ffmpeg: %v", err)

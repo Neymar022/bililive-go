@@ -97,6 +97,8 @@ func GetRecord(libraryRoot, sourceRoot, relativePath string, retentionDays int) 
 }
 
 func SetKeepSource(videoPath string, keep bool) error {
+	unlock := LockLibraryPublication(videoPath)
+	defer unlock()
 	metadataPath := sidecarPathForVideo(videoPath)
 	metadata, err := LoadMetadata(metadataPath)
 	if err != nil {
@@ -107,6 +109,9 @@ func SetKeepSource(videoPath string, keep bool) error {
 }
 
 func DeleteSourceFile(videoPath, sourceRoot string) error {
+	if metadata, err := LoadMetadata(sidecarPathForVideo(videoPath)); err == nil && len(metadata.RecordingSources) > 0 {
+		return DeletePublishedRecordingSources(videoPath)
+	}
 	sourcePath, err := ResolveSourcePath(videoPath, sourceRoot)
 	if err != nil {
 		return err

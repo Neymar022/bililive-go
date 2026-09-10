@@ -94,6 +94,11 @@ func (s *SubtitleGenerateStage) publishCompletedSession(ctx *pipeline.PipelineCo
 			}
 		}
 	}
+	if current := configs.GetCurrentConfig(); current != nil && current.Subtitle.DeleteSourceOnCompletion && len(aggregate.Metadata.RecordingSources) > 0 {
+		if err := subtitle.DeletePublishedRecordingSources(aggregate.LibraryPath); err != nil {
+			s.logs += fmt.Sprintf("原片清理已跳过或失败，公开成品保持可用: %v\n", err)
+		}
+	}
 	return []pipeline.FileInfo{
 		pipeline.NewVideoFileInfo(aggregate.LibraryPath),
 		{Path: aggregate.Metadata.SRTPath, Type: pipeline.FileTypeOther},

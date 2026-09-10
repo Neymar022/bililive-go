@@ -75,7 +75,31 @@ type Parser struct {
 	logger    *livelogger.LiveLogger
 }
 
-func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) error {
+func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) (err error) {
+	select {
+	case <-p.stopCh:
+		return nil
+	default:
+	}
+	// 录制由 Stop 控制，不继承可能来自 HTTP handler 的请求取消。
+	requestCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer cancel()
+	go func() {
+		select {
+		case <-p.stopCh:
+			cancel()
+		case <-requestCtx.Done():
+		}
+	}()
+	defer func() {
+		if errors.Is(err, context.Canceled) {
+			select {
+			case <-p.stopCh:
+				err = nil // 正常停止留下的尾段仍需登记和后处理。
+			default:
+			}
+		}
+	}()
 	// 检查是否配置了分段策略，原生 FLV 解析器不支持
 	cfg := configs.GetCurrentConfig()
 	if cfg != nil {
@@ -86,7 +110,7 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 
 	url := streamUrlInfo.Url
 	// init input
-	req, err := http.NewRequest("GET", url.String(), nil)
+	req, err := http.NewRequestWithContext(requestCtx, "GET", url.String(), nil)
 	if err != nil {
 		return err
 	}
