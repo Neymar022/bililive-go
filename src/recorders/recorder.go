@@ -302,6 +302,11 @@ func (r *recorder) tryRecord(ctx context.Context) {
 			streamInfos = utils.GenUrlInfos(urls, make(map[string]string))
 		}
 	}
+	select {
+	case <-r.stop:
+		return
+	default:
+	}
 	if err != nil || len(streamInfos) == 0 {
 		if err != nil && r.stopRetryForExplicitOffline(err) {
 			return
@@ -508,7 +513,9 @@ func (r *recorder) tryRecord(ctx context.Context) {
 		r.getLogger().WithError(err).Error("failed to init parse")
 		return
 	}
-	r.setAndCloseParser(p)
+	if !r.setAndCloseParser(p) {
+		return
+	}
 	r.startTime = time.Now()
 
 	// 弹幕录制（支持哔哩哔哩和抖音平台）
@@ -595,7 +602,7 @@ func (r *recorder) tryRecord(ctx context.Context) {
 
 	r.getLogger().Debugln("Start ParseLiveStream(" + url.String() + ", " + fileName + ")")
 	recordingStartedAt := time.Now()
-	err = r.parser.ParseLiveStream(ctx, streamInfo, r.Live, fileName)
+	err = p.ParseLiveStream(ctx, streamInfo, r.Live, fileName)
 	r.recordCaptureEvidence(ctx, fileName)
 	captureChecked = true
 
@@ -966,15 +973,22 @@ func (r *recorder) getParser() parser.Parser {
 	return r.parser
 }
 
-func (r *recorder) setAndCloseParser(p parser.Parser) {
+func (r *recorder) setAndCloseParser(p parser.Parser) bool {
 	r.parserLock.Lock()
 	defer r.parserLock.Unlock()
+	// 与 Close 读取当前 parser 共用锁，停止后不再安装晚返回的下载器。
+	select {
+	case <-r.stop:
+		return false
+	default:
+	}
 	if r.parser != nil {
 		if err := r.parser.Stop(); err != nil {
 			r.getLogger().WithError(err).Warn("failed to end recorder")
 		}
 	}
 	r.parser = p
+	return true
 }
 
 func (r *recorder) Start(ctx context.Context) error {

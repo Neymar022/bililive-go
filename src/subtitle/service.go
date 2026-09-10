@@ -30,34 +30,36 @@ type Segment struct {
 }
 
 type Metadata struct {
-	Status                 Status         `json:"status"`
-	Provider               string         `json:"provider,omitempty"`
-	Language               string         `json:"language,omitempty"`
-	SourcePath             string         `json:"source_path,omitempty"`
-	OutputPath             string         `json:"output_path,omitempty"`
-	ASSPath                string         `json:"ass_path,omitempty"`
-	SRTPath                string         `json:"srt_path,omitempty"`
-	KeepSource             bool           `json:"keep_source"`
-	SourceExists           bool           `json:"source_exists"`
-	LastError              string         `json:"last_error,omitempty"`
-	ActualProvider         string         `json:"actual_provider,omitempty"`
-	ActualModel            string         `json:"actual_model,omitempty"`
-	ActualBurnProvider     string         `json:"actual_burn_provider,omitempty"`
-	RenderPreset           string         `json:"render_preset,omitempty"`
-	RendererStatus         Status         `json:"renderer_status,omitempty"`
-	RendererError          string         `json:"renderer_error,omitempty"`
-	Segments               []Segment      `json:"segments,omitempty"`
-	RecordMeta             map[string]any `json:"record_meta,omitempty"`
-	KnowledgeSyncStatus    Status         `json:"knowledge_sync_status,omitempty"`
-	KnowledgeSyncTaskID    string         `json:"knowledge_sync_task_id,omitempty"`
-	KnowledgeSyncSourceID  string         `json:"knowledge_sync_source_id,omitempty"`
-	KnowledgeSyncError     string         `json:"knowledge_sync_error,omitempty"`
-	KnowledgeSyncAttempts  int            `json:"knowledge_sync_attempts,omitempty"`
-	KnowledgeSyncUpdatedAt *time.Time     `json:"knowledge_sync_updated_at,omitempty"`
-	CreatedAt              time.Time      `json:"created_at,omitempty"`
-	UpdatedAt              time.Time      `json:"updated_at,omitempty"`
-	CompletedAt            *time.Time     `json:"completed_at,omitempty"`
-	SourceDeletedAt        *time.Time     `json:"source_deleted_at,omitempty"`
+	Status                 Status            `json:"status"`
+	Provider               string            `json:"provider,omitempty"`
+	Language               string            `json:"language,omitempty"`
+	SourcePath             string            `json:"source_path,omitempty"`
+	OutputPath             string            `json:"output_path,omitempty"`
+	ASSPath                string            `json:"ass_path,omitempty"`
+	SRTPath                string            `json:"srt_path,omitempty"`
+	KeepSource             bool              `json:"keep_source"`
+	SourceExists           bool              `json:"source_exists"`
+	LastError              string            `json:"last_error,omitempty"`
+	ActualProvider         string            `json:"actual_provider,omitempty"`
+	ActualModel            string            `json:"actual_model,omitempty"`
+	ActualBurnProvider     string            `json:"actual_burn_provider,omitempty"`
+	RenderPreset           string            `json:"render_preset,omitempty"`
+	RendererStatus         Status            `json:"renderer_status,omitempty"`
+	RendererError          string            `json:"renderer_error,omitempty"`
+	Segments               []Segment         `json:"segments,omitempty"`
+	RecordMeta             map[string]any    `json:"record_meta,omitempty"`
+	KnowledgeSyncStatus    Status            `json:"knowledge_sync_status,omitempty"`
+	KnowledgeSyncTaskID    string            `json:"knowledge_sync_task_id,omitempty"`
+	KnowledgeSyncSourceID  string            `json:"knowledge_sync_source_id,omitempty"`
+	KnowledgeSyncError     string            `json:"knowledge_sync_error,omitempty"`
+	KnowledgeSyncAttempts  int               `json:"knowledge_sync_attempts,omitempty"`
+	KnowledgeSyncUpdatedAt *time.Time        `json:"knowledge_sync_updated_at,omitempty"`
+	CreatedAt              time.Time         `json:"created_at,omitempty"`
+	UpdatedAt              time.Time         `json:"updated_at,omitempty"`
+	CompletedAt            *time.Time        `json:"completed_at,omitempty"`
+	SourceDeletedAt        *time.Time        `json:"source_deleted_at,omitempty"`
+	RecordingSources       []RecordingSource `json:"recording_sources,omitempty"`
+	SourcePublicationPath  string            `json:"source_publication_path,omitempty"`
 }
 
 func sidecarPathForVideo(videoPath string) string {

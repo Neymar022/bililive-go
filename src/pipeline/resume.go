@@ -7,6 +7,11 @@ import (
 	"fmt"
 	"os"
 	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/bililive-go/bililive-go/src/configs"
+	"github.com/bililive-go/bililive-go/src/subtitle"
 )
 
 // ResumeTask 校验保留下来的阶段输入后续跑，不重置时间计划或已完成结果。
@@ -27,6 +32,9 @@ func (m *Manager) ResumeTask(taskID int64) error {
 	for _, input := range task.CurrentFiles {
 		file, err := os.Open(input.Path)
 		if err != nil {
+			if os.IsNotExist(err) && m.hasPublishedRecordingInput(task, input.Path) {
+				continue
+			}
 			return fmt.Errorf("checkpoint input unavailable: %w", err)
 		}
 		info, err := file.Stat()
@@ -53,6 +61,42 @@ func (m *Manager) ResumeTask(taskID int64) error {
 	}
 	// 复用既有轮询，避免绕过 not_before 或在维护批次内直接启动 worker。
 	return err
+}
+
+func (m *Manager) hasPublishedRecordingInput(task *PipelineTask, input string) bool {
+	if task.PipelineConfig.Stages[task.CurrentStage].Name != StageNameSubtitleGenerate || task.RecordInfo.RecordingProducerID == "" {
+		return false
+	}
+	store, err := m.recordingStore()
+	if err != nil {
+		return false
+	}
+	session, err := store.RecordingSession(m.ctx, task.RecordInfo.LiveSessionID)
+	if err != nil || !session.Ready() {
+		return false
+	}
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil {
+		return false
+	}
+	for _, source := range session.Sources() {
+		if source.TaskID != task.ID || source.InputPath != input || source.ProducerID != task.RecordInfo.RecordingProducerID {
+			continue
+		}
+		meta, err := subtitle.LoadMetadata(source.MetadataPath)
+		stem := strings.TrimSuffix(source.LibraryPath, ".mp4")
+		if err != nil || meta.Status != subtitle.StatusCompleted || len(meta.Segments) == 0 || meta.SourcePath != input || meta.OutputPath != source.LibraryPath || meta.SRTPath != stem+".srt" || meta.ASSPath != stem+".ass" || meta.RecordMeta["live_session_id"] != session.ID || meta.RecordMeta["recording_producer_id"] != source.ProducerID || meta.RecordMeta["pipeline_task_id"] != strconv.FormatInt(task.ID, 10) {
+			return false
+		}
+		for _, path := range []string{source.LibraryPath, meta.SRTPath, meta.ASSPath} {
+			info, err := os.Lstat(path)
+			if err != nil || !info.Mode().IsRegular() || info.Size() == 0 {
+				return false
+			}
+		}
+		return subtitle.ValidateRecordingSourcePublication(cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath), meta.SourcePublicationPath, input, session.ID, source.ProducerID) == nil
+	}
+	return false
 }
 
 // ResumeTask 用预期检查点比较并交换状态，拒绝覆盖并发取消或重试。

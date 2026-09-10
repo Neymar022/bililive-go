@@ -962,6 +962,25 @@ func prepareLiveSessionAggregateSidecars(
 		RecordMeta:         recordMeta,
 		CompletedAt:        &now,
 	}
+	if manifest.PublicationVersion > 0 {
+		var sources []subtitle.RecordingSource
+		keep := false
+		for _, input := range inputs {
+			source, err := subtitle.CaptureRecordingSource(libraryRoot, manifest.LiveSessionID, *input.Metadata)
+			if err != nil {
+				// 历史采用或来源不明时保留原片，不影响已验证的媒体发布。
+				sources = nil
+				break
+			}
+			sources = append(sources, source)
+			keep = keep || input.Metadata.KeepSource
+		}
+		if len(sources) == len(inputs) {
+			metadata.RecordingSources = sources
+			metadata.KeepSource = keep
+			metadata.SourceExists = true
+		}
+	}
 	stagedMetadataPath := stagedStem + ".subtitle.json"
 	if err := subtitle.SaveMetadata(stagedMetadataPath, metadata); err != nil {
 		return subtitle.Metadata{}, nil, err

@@ -16,7 +16,6 @@ import (
 	"github.com/bililive-go/bililive-go/src/live"
 	"github.com/bililive-go/bililive-go/src/pkg/livelogger"
 	"github.com/bililive-go/bililive-go/src/pkg/parser"
-	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
 	"github.com/bililive-go/bililive-go/src/pkg/utils"
 
 	"github.com/kira1928/remotetools/pkg/tools"
@@ -62,6 +61,7 @@ type Parser struct {
 	closeOnce *sync.Once
 	stopCh    chan struct{}
 	cmdLock   sync.Mutex
+	finished  bool
 	cfg       map[string]string
 	logger    *livelogger.LiveLogger
 }
@@ -116,6 +116,11 @@ func GetToolPaths() (dotnetPath, recorderPath string, err error) {
 
 // ParseLiveStream 使用 BililiveRecorder CLI 下载直播流
 func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.StreamUrlInfo, live live.Live, file string) error {
+	select {
+	case <-p.stopCh:
+		return nil
+	default:
+	}
 	dotnetPath, recorderPath, err := GetToolPaths()
 	if err != nil {
 		return err
@@ -167,6 +172,12 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	}
 
 	p.cmdLock.Lock()
+	select {
+	case <-p.stopCh:
+		p.cmdLock.Unlock()
+		return nil
+	default:
+	}
 	p.cmd = exec.Command(dotnetPath, args...)
 
 	var cmdErr error
@@ -194,32 +205,22 @@ func (p *Parser) ParseLiveStream(ctx context.Context, streamUrlInfo *live.Stream
 	}
 	p.cmdLock.Unlock()
 
-	// 等待命令完成或接收停止信号
-	cmdDone := make(chan error, 1)
-	bilisentry.Go(func() {
-		cmdDone <- p.cmd.Wait()
-	})
-
-	select {
-	case <-p.stopCh:
-		// 收到停止信号，发送 'q' 优雅停止
-		if p.cmdStdIn != nil {
-			p.cmdStdIn.Write([]byte("q\n"))
-		}
-		return <-cmdDone
-	case err := <-cmdDone:
-		return err
-	}
+	// Stop 负责发送停止命令；必须等进程写完尾段才能交给后处理。
+	err = p.cmd.Wait()
+	p.cmdLock.Lock()
+	p.finished = true
+	p.cmdLock.Unlock()
+	return err
 }
 
 // Stop 停止下载
 func (p *Parser) Stop() error {
 	var err error
 	p.closeOnce.Do(func() {
-		close(p.stopCh)
 		p.cmdLock.Lock()
 		defer p.cmdLock.Unlock()
-		if p.cmd != nil && p.cmd.ProcessState == nil {
+		close(p.stopCh)
+		if p.cmd != nil && !p.finished {
 			if p.cmdStdIn != nil && p.cmd.Process != nil {
 				// 发送 'q' 命令优雅停止
 				if _, writeErr := p.cmdStdIn.Write([]byte("q\n")); writeErr != nil {
