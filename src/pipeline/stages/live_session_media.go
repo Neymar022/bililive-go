@@ -201,13 +201,21 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		return nil, err
 	}
 	aggregateStem := strings.TrimSuffix(aggregatePath, filepath.Ext(aggregatePath))
+	aggregateMetadataPath := aggregateStem + ".subtitle.json"
+	reuseOnly := false
 	if len(publicationContexts) > 0 && publicationContexts[0] != nil && publicationContexts[0].LibraryPublication != nil {
 		hook := publicationContexts[0]
 		recordedAt, _ := liveSessionInputRecordedAt(inputs[0])
 		request := pipeline.LibraryPublicationRequest{LibraryRoot: absoluteLibraryRoot, Path: aggregatePath, SessionID: manifest.LiveSessionID, TaskID: hook.TaskID, RecordedAt: recordedAt, Phase: "before"}
+		if manifest.PublicationVersion > 0 && oldAggregatePath != "" && !identityChanged {
+			meta, exists, err := loadLiveSessionAggregateMetadata(aggregatePath, manifest)
+			request.ReusePublished = err == nil && exists &&
+				meta.RecordMeta["live_session_media_content_hash"] == knowledgeSessionManifestContentHash(*manifest)
+		}
 		if err := hook.LibraryPublication(ctx, request); err != nil {
 			return nil, err
 		}
+		reuseOnly = request.ReusePublished
 	}
 	finishRecovery := func() error {
 		if len(publicationContexts) == 0 || publicationContexts[0] == nil || publicationContexts[0].LibraryPublication == nil {
@@ -216,27 +224,9 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		hook := publicationContexts[0]
 		return hook.LibraryPublication(ctx, pipeline.LibraryPublicationRequest{LibraryRoot: absoluteLibraryRoot, Path: aggregatePath, SessionID: manifest.LiveSessionID, TaskID: hook.TaskID, Phase: "published"})
 	}
-	aggregateMetadataPath := aggregateStem + ".subtitle.json"
-
-	aggregateMetadata, metadataExists := loadCompletedSubtitleMetadata(
-		aggregateMetadataPath,
-		aggregatePath,
-		aggregateStem+".srt",
-		aggregateStem+".ass",
-	)
-	if metadataExists && aggregateMetadata.RecordMeta["live_session_media_role"] != "aggregate" {
-		metadataExists = false
-	}
-	if manifest.PublicationVersion > 0 && metadataExists {
-		if err := validateCompletedCheckpoint(aggregateMetadata, aggregatePath); err != nil {
-			return nil, err
-		}
-		if aggregateMetadata.RecordMeta["live_session_id"] != manifest.LiveSessionID {
-			return nil, errors.New("published session identity mismatch")
-		}
-		if err := subtitle.ValidatePublishedLibraryEpisode(aggregatePath); err != nil {
-			return nil, err
-		}
+	aggregateMetadata, metadataExists, err := loadLiveSessionAggregateMetadata(aggregatePath, manifest)
+	if err != nil {
+		return nil, err
 	}
 	if manifest.PreviousAggregatePath != "" &&
 		!sameCleanPath(manifest.PreviousAggregatePath, aggregatePath) &&
@@ -270,6 +260,10 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	if manifest.PublicationVersion > 0 && !metadataExists {
 		if _, err := os.Lstat(aggregatePath); err == nil || !os.IsNotExist(err) {
 			return nil, fmt.Errorf("unverified target already exists: %s", aggregatePath)
+		}
+		if reuseOnly {
+			// 本次已按复用通过门禁，成品消失后须重新判断发布资格。
+			return nil, pipeline.NewRetryLaterError(errors.New("published_reuse_target_missing"), 0)
 		}
 	}
 	if metadataExists && manifest.PreviousAggregatePath != "" {
@@ -394,6 +388,31 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		MetadataPath: aggregateMetadataPath,
 		Metadata:     aggregateMetadata,
 	}, nil
+}
+
+func loadLiveSessionAggregateMetadata(aggregatePath string, manifest *knowledgeSessionManifest) (subtitle.Metadata, bool, error) {
+	aggregateStem := strings.TrimSuffix(aggregatePath, filepath.Ext(aggregatePath))
+	aggregateMetadata, metadataExists := loadCompletedSubtitleMetadata(
+		aggregateStem+".subtitle.json",
+		aggregatePath,
+		aggregateStem+".srt",
+		aggregateStem+".ass",
+	)
+	if metadataExists && aggregateMetadata.RecordMeta["live_session_media_role"] != "aggregate" {
+		metadataExists = false
+	}
+	if manifest.PublicationVersion > 0 && metadataExists {
+		if err := validateCompletedCheckpoint(aggregateMetadata, aggregatePath); err != nil {
+			return aggregateMetadata, false, err
+		}
+		if aggregateMetadata.RecordMeta["live_session_id"] != manifest.LiveSessionID {
+			return aggregateMetadata, false, errors.New("published session identity mismatch")
+		}
+		if err := subtitle.ValidatePublishedLibraryEpisode(aggregatePath); err != nil {
+			return aggregateMetadata, false, err
+		}
+	}
+	return aggregateMetadata, metadataExists, nil
 }
 
 func archiveDistinctLiveSessionAggregateVersion(

@@ -3,12 +3,14 @@ package stages
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -464,4 +466,199 @@ func TestSealedSessionPublicationPreservesTargetsCreatedDuringPreparation(t *tes
 			}
 		})
 	}
+}
+
+func TestCompletedSessionReuseWithEarlierFailedSeasonTask(t *testing.T) {
+	for _, scenario := range []string{"reuse", "new", "replacement", "changed_sources", "recovery_marker", "season_moved"} {
+		t.Run(scenario, func(t *testing.T) { testCompletedSessionReuseWithEarlierFailedSeasonTask(t, scenario) })
+	}
+}
+
+func testCompletedSessionReuseWithEarlierFailedSeasonTask(t *testing.T, scenario string) {
+	t.Helper()
+	ctx := context.Background()
+	root := t.TempDir()
+	library := filepath.Join(root, "video")
+	require.NoError(t, os.Mkdir(library, 0o755))
+	cfg := configs.NewConfig()
+	cfg.Subtitle.Enabled = true
+	cfg.Subtitle.LibraryRoot = library
+	cfg.Subtitle.Schedule.Enabled = false
+	cfg.Subtitle.DeleteSourceOnCompletion = false
+	cfg.Subtitle.KnowledgeSync.Enabled = false
+	t.Setenv("SUBTITLE_WORKER_URL", "http://127.0.0.1:1")
+	previous := configs.GetCurrentConfig()
+	configs.SetCurrentConfig(cfg)
+	t.Cleanup(func() { configs.SetCurrentConfig(previous) })
+	stubLiveSessionMediaForEpisodeList(t, []float64{3, 3}, []string{"S01E1685894400000000", "S01E1685923200000000"})
+	stubLiveSessionCoverExtraction(t, nil)
+	store, err := pipeline.NewSQLiteStore(filepath.Join(root, "pipeline.db"))
+	require.NoError(t, err)
+	manager := pipeline.NewManager(ctx, store, &pipeline.ManagerConfig{MaxConcurrent: 1, PollInterval: 10 * time.Millisecond}, nil)
+	t.Cleanup(func() { manager.Close(ctx) })
+	RegisterBuiltinStagesToManager(manager)
+	var concatCalls atomic.Int32
+	if scenario == "season_moved" {
+		concat := liveSessionMediaConcat
+		liveSessionMediaConcat = func(ctx context.Context, ffmpeg string, inputs []string, output string) error {
+			concatCalls.Add(1)
+			return concat(ctx, ffmpeg, inputs, output)
+		}
+		manager.RegisterStage(pipeline.StageNameSubtitleGenerate, func(cfg pipeline.StageConfig) (pipeline.Stage, error) {
+			stage, err := NewSubtitleGenerateStage(cfg)
+			return moveSeasonAfterReuseApprovedStage{stage}, err
+		})
+	}
+	require.NoError(t, store.OpenRecordingSession(ctx, "42", "room"))
+	origin, err := store.BeginRecordingProducer(ctx, "room")
+	require.NoError(t, err)
+	stageConfig := &pipeline.PipelineConfig{Stages: []pipeline.StageConfig{{Name: pipeline.StageNameSubtitleGenerate}}}
+	var tasks []*pipeline.PipelineTask
+	var checkpoints []string
+	for _, hour := range []int{10, 11} {
+		start := time.Date(2026, 9, 5, hour, 0, 0, 0, mediaLibraryLocation)
+		input, err := subtitle.RecordingCapturePath(library, origin.SessionID, origin.ProducerID, fmt.Sprintf("Host - 2026-09-05 %02d-00-00 - Room.mp4", hour))
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(input, []byte("original"), 0o644))
+		task := pipeline.NewPipelineTask(pipeline.RecordInfo{LiveID: "room", LiveSessionID: origin.SessionID, RecordingProducerID: origin.ProducerID, HostName: "Host", StartTime: start}, stageConfig, []pipeline.FileInfo{pipeline.NewVideoFileInfo(input)})
+		if len(tasks) == 1 || scenario == "new" {
+			task.MarkFailed(errors.New("分段检查点已保存，任务仍待收尾"))
+		}
+		require.NoError(t, store.CreateTask(ctx, task))
+		tasks = append(tasks, task)
+
+		work, err := subtitle.RecordingWorkPath(library, origin.SessionID, task.ID, 0, input, "Host", start)
+		require.NoError(t, err)
+		stem := strings.TrimSuffix(work, ".mp4")
+		for _, path := range []string{work, stem + ".srt", stem + ".ass"} {
+			require.NoError(t, os.WriteFile(path, []byte("burned"), 0o644))
+		}
+		meta := subtitle.Metadata{Status: subtitle.StatusCompleted, SourcePath: input, OutputPath: work, SRTPath: stem + ".srt", ASSPath: stem + ".ass",
+			Segments:   []subtitle.Segment{{Start: "00:00:00,000", End: "00:00:03,000", Text: "字幕"}},
+			RecordMeta: map[string]any{"live_session_id": origin.SessionID, "recording_producer_id": origin.ProducerID, "pipeline_task_id": fmt.Sprint(task.ID), "start_time": start.Format(time.RFC3339Nano)},
+		}
+		metadataPath := stem + ".subtitle.json"
+		checkpoints = append(checkpoints, metadataPath)
+		require.NoError(t, subtitle.SaveMetadata(metadataPath, meta))
+		require.NoError(t, store.CompleteRecordingTaskMedia(ctx, origin.SessionID, task.ID, []pipeline.SessionMediaSource{
+			{InputPath: input, LibraryPath: work, MetadataPath: metadataPath},
+		}))
+	}
+	require.NoError(t, store.EndRecordingSession(ctx, "room", "normal"))
+	require.NoError(t, store.FinishRecordingProducer(ctx, origin, ""))
+	require.NoError(t, manager.Start(ctx))
+	awaitStage := func(id int64) *pipeline.PipelineTask {
+		t.Helper()
+		var current *pipeline.PipelineTask
+		require.Eventually(t, func() bool {
+			task, err := manager.GetTask(id)
+			if err != nil || task.Status == pipeline.PipelineStatusRunning || len(task.StageResults) == 0 {
+				return false
+			}
+			current = task
+			return true
+		}, 5*time.Second, 10*time.Millisecond)
+		return current
+	}
+
+	var first *pipeline.PipelineTask
+	var product, nfo string
+	var before os.FileInfo
+	var beforeNFO, beforeMedia []byte
+	season := filepath.Join(library, "Host", "Season 01")
+	if scenario != "new" {
+		first = awaitStage(tasks[0].ID)
+		require.Equal(t, pipeline.PipelineStatusCompleted, first.Status, first.ErrorMessage)
+		product = first.CurrentFiles[0].Path
+		nfo = strings.TrimSuffix(product, ".mp4") + ".nfo"
+		beforeNFO = mustReadStageFile(t, nfo)
+		require.Contains(t, string(beforeNFO), "<episode>1</episode>")
+		before, err = os.Stat(product)
+		require.NoError(t, err)
+		beforeMedia = mustReadStageFile(t, product)
+		require.Equal(t, []string{filepath.Base(product)}, visibleMP4Files(t, season))
+	}
+	switch scenario {
+	case "replacement":
+		path := knowledgeSessionManifestPath(library, origin.SessionID)
+		manifest, err := loadKnowledgeSessionManifest(path)
+		require.NoError(t, err)
+		manifest.AggregatePath = filepath.Join(filepath.Dir(product), "旧目标.mp4")
+		require.NoError(t, saveKnowledgeSessionManifest(path, manifest))
+	case "changed_sources":
+		meta, err := subtitle.LoadMetadata(checkpoints[0])
+		require.NoError(t, err)
+		meta.Segments[0].Text = "合集发布后分段内容已改变"
+		require.NoError(t, subtitle.SaveMetadata(checkpoints[0], meta))
+	case "recovery_marker":
+		marker := subtitle.LibraryRecoveryMarker(product)
+		require.NoError(t, os.MkdirAll(filepath.Dir(marker), 0o700))
+		require.NoError(t, os.WriteFile(marker, []byte("另有恢复记录"), 0o600))
+	}
+
+	earlier := pipeline.NewPipelineTask(pipeline.RecordInfo{LiveSessionID: "29", HostName: "Host", StartTime: time.Date(2026, 9, 4, 10, 0, 0, 0, mediaLibraryLocation)}, stageConfig, nil)
+	earlier.MarkFailed(errors.New("已失败的前序场次"))
+	require.NoError(t, store.CreateTask(ctx, earlier))
+	require.NoError(t, manager.ResumeTask(tasks[1].ID))
+	finished := awaitStage(tasks[1].ID)
+	prior, err := manager.GetTask(earlier.ID)
+	require.NoError(t, err)
+	require.Equal(t, pipeline.PipelineStatusFailed, prior.Status)
+	switch scenario {
+	case "season_moved":
+		moved := filepath.Join(season+" moved", filepath.Base(product))
+		original, err := os.Stat(moved)
+		require.NoError(t, err)
+		require.True(t, os.SameFile(before, original))
+		require.True(t, before.ModTime().Equal(original.ModTime()))
+		require.Equal(t, beforeMedia, mustReadStageFile(t, moved))
+		require.Equal(t, beforeNFO, mustReadStageFile(t, strings.TrimSuffix(moved, ".mp4")+".nfo"))
+		_, oldPathErr := os.Lstat(product)
+		t.Logf("续跑状态=%s 原路径状态=%v 合并调用次数=%d", finished.Status, oldPathErr, concatCalls.Load())
+		require.Equal(t, pipeline.PipelineStatusPending, finished.Status, finished.ErrorMessage)
+		require.NotNil(t, finished.NotBefore)
+		require.Nil(t, finished.CompletedAt)
+		require.ErrorIs(t, oldPathErr, os.ErrNotExist)
+		require.EqualValues(t, 1, concatCalls.Load(), "只有首次发布执行合并")
+		return
+	case "reuse":
+		require.Equal(t, pipeline.PipelineStatusCompleted, finished.Status, finished.ErrorMessage)
+		require.NotNil(t, finished.CompletedAt)
+		require.Equal(t, first.CurrentFiles, finished.CurrentFiles)
+	case "recovery_marker":
+		require.Equal(t, pipeline.PipelineStatusFailed, finished.Status, finished.ErrorMessage)
+		require.Contains(t, finished.ErrorMessage, "recovery_marker_conflict")
+	default:
+		require.Equal(t, pipeline.PipelineStatusPending, finished.Status, finished.ErrorMessage)
+		require.Contains(t, finished.ErrorMessage, "waiting_for_earlier_season_session")
+		require.Nil(t, finished.CompletedAt)
+	}
+	if scenario == "new" {
+		require.Empty(t, visibleMP4Files(t, season))
+		return
+	}
+	require.Equal(t, []string{filepath.Base(product)}, visibleMP4Files(t, season))
+	require.Equal(t, beforeNFO, mustReadStageFile(t, nfo))
+	after, err := os.Stat(product)
+	require.NoError(t, err)
+	require.True(t, os.SameFile(before, after))
+	require.True(t, before.ModTime().Equal(after.ModTime()))
+	require.Equal(t, beforeMedia, mustReadStageFile(t, product))
+}
+
+type moveSeasonAfterReuseApprovedStage struct{ pipeline.Stage }
+
+func (s moveSeasonAfterReuseApprovedStage) Execute(ctx *pipeline.PipelineContext, input []pipeline.FileInfo) ([]pipeline.FileInfo, error) {
+	before := ctx.LibraryPublication
+	ctx.LibraryPublication = func(ctx context.Context, req pipeline.LibraryPublicationRequest) error {
+		if err := before(ctx, req); err != nil {
+			return err
+		}
+		if req.Phase == "before" && req.ReusePublished {
+			season := filepath.Dir(req.Path)
+			return os.Rename(season, season+" moved")
+		}
+		return nil
+	}
+	return s.Stage.Execute(ctx, input)
 }

@@ -58,11 +58,13 @@ type LibraryPublicationRequest struct {
 	LibraryRoot, Path, SessionID, Phase string
 	TaskID                              int64
 	RecordedAt                          time.Time
-	AppendCommit                        *LibraryAppendCommitRequest
-	CommitFiles                         func() error
-	ComputeAllowed                      *bool
-	ComputeDue                          *time.Time
-	IndexObservation                    *LibraryIndexObservation
+	// ReusePublished 由持有季锁的正式发布入口在验证原成品后设置。
+	ReusePublished   bool
+	AppendCommit     *LibraryAppendCommitRequest
+	CommitFiles      func() error
+	ComputeAllowed   *bool
+	ComputeDue       *time.Time
+	IndexObservation *LibraryIndexObservation
 }
 
 // LibraryRecoveryHooks 只在隔离测试替换时钟/崩溃点；生产没有自动能力豁免。
@@ -168,12 +170,20 @@ func (m *Manager) EnsureLibraryPublication(ctx context.Context, req LibraryPubli
 			}
 		}
 	}
-	if err = m.libraryPublicationTurn(ctx, req); err != nil {
-		return err
+	verifiedReuse := req.ReusePublished && req.Phase == "before"
+	reusePublished := verifiedReuse && r == nil
+	if !reusePublished {
+		if err = m.libraryPublicationTurn(ctx, req); err != nil {
+			return err
+		}
 	}
 	if enabled, e := subtitle.LibraryAppendEnabled(season); e != nil {
 		return e
 	} else if enabled {
+		if verifiedReuse {
+			// 取季锁前账本可能已启用，交由 append 入口处理，避免 published 回调重入季锁。
+			return NewRetryLaterError(errors.New("library_publication_mode_changed"), 0)
+		}
 		// append季禁止落入旧的按录制时间修复/重排流程。
 		_, e = subtitle.BuildLibraryEpisodeNFO(req.Path, req.RecordedAt, "")
 		return e
@@ -208,6 +218,9 @@ func (m *Manager) EnsureLibraryPublication(ctx context.Context, req LibraryPubli
 				}
 			}
 			return nil
+		}
+		if reusePublished {
+			return err
 		}
 		if !subtitle.LibraryRecoverySupported() {
 			return &subtitle.LibraryRecoveryError{Reason: "capability_unavailable_non_linux", Path: season}
