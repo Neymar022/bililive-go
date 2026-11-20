@@ -1,0 +1,20 @@
+{
+  "seasons": {
+    "fixture-season": {
+      "entries": [
+        {
+          "episode": "1",
+          "recorded_identity": [
+            {
+              "type": "bililive-recorded-at",
+              "value": "1035417600000000"
+            }
+          ],
+          "media": {
+            "exists": true
+          }
+        }
+      ]
+    }
+  }
+}

@@ -204,6 +204,9 @@ func (s *DeleteSourceStage) Name() string {
 }
 
 func (s *DeleteSourceStage) Execute(ctx *pipeline.PipelineContext, input []pipeline.FileInfo) ([]pipeline.FileInfo, error) {
+	if ctx.PreserveRecoverySources != nil && ctx.PreserveRecoverySources() {
+		return input, nil
+	}
 	var output []pipeline.FileInfo
 
 	for _, file := range input {

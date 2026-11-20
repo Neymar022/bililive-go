@@ -23,6 +23,9 @@ func RegisterPipelineHandlers(r *mux.Router, pm *pipeline.Manager) {
 		return
 	}
 
+	// 只读维护状态；写入口待既有管理 API 的鉴权边界明确后注册。
+	r.HandleFunc("/pipeline/worker-submissions", makeWorkerSubmissionsStatusHandler(pm)).Methods("GET")
+
 	// 获取 Pipeline 任务列表
 	r.HandleFunc("/pipeline/tasks", makePipelineListTasksHandler(pm)).Methods("GET")
 
@@ -119,6 +122,16 @@ func makePipelineClearCompletedHandler(pm *pipeline.Manager) http.HandlerFunc {
 	}
 }
 
+// pipelineRecoveryStatus 只公开可用于呈现任务状态的字段。
+type pipelineRecoveryStatus struct {
+	State           string     `json:"state"`
+	ReasonCode      string     `json:"reason_code,omitempty"`
+	RecoveryClass   string     `json:"recovery_class,omitempty"`
+	CompletionState string     `json:"completion_state,omitempty"`
+	Attempts        int        `json:"attempts,omitempty"`
+	NextAttempt     *time.Time `json:"next_attempt_at,omitempty"`
+}
+
 // makePipelineGetTaskHandler 获取单个任务
 func makePipelineGetTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
@@ -139,8 +152,22 @@ func makePipelineGetTaskHandler(pm *pipeline.Manager) http.HandlerFunc {
 			return
 		}
 
+		detail := struct {
+			*pipeline.PipelineTask
+			Recovery *pipelineRecoveryStatus `json:"library_recovery,omitempty"`
+		}{PipelineTask: task}
+		if record := task.LibraryRecovery; record != nil {
+			detail.Recovery = &pipelineRecoveryStatus{
+				State: record.State, ReasonCode: record.ReasonCode,
+				RecoveryClass: record.RecoveryClass, CompletionState: record.CompletionState,
+				Attempts: record.Attempts,
+			}
+			if !record.NextAttempt.IsZero() {
+				detail.Recovery.NextAttempt = &record.NextAttempt
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(task)
+		json.NewEncoder(w).Encode(detail)
 	}
 }
 
@@ -265,10 +292,10 @@ func makeBatchBurnHandler(pm *pipeline.Manager) http.HandlerFunc {
 				{
 					Name: pipeline.StageNameBurnSubtitles,
 					Options: map[string]any{
-						pipeline.OptionCodec:           codec,
-						pipeline.OptionCrf:             crf,
-						pipeline.OptionPreset:          preset,
-						pipeline.OptionBurnDeleteAss:   legacy.BurnDeleteAss,
+						pipeline.OptionCodec:            codec,
+						pipeline.OptionCrf:              crf,
+						pipeline.OptionPreset:           preset,
+						pipeline.OptionBurnDeleteAss:    legacy.BurnDeleteAss,
 						pipeline.OptionBurnDeleteSource: legacy.BurnDeleteSource,
 					},
 				},
@@ -344,5 +371,18 @@ func makeBatchBurnHandler(pm *pipeline.Manager) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(result)
+	}
+}
+
+// makeWorkerSubmissionsStatusHandler 不把本地 RPC 为零解释为远端排空。
+func makeWorkerSubmissionsStatusHandler(pm *pipeline.Manager) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		status, err := pm.WorkerSubmissionsStatus()
+		if err != nil {
+			http.Error(w, "worker submission control unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(status)
 	}
 }

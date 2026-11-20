@@ -18,6 +18,14 @@ func LockRecordingWork(path string) func() {
 
 // RecordingWorkPath 只准备库外工作路径，不创建可被媒体库扫描的占位视频或集号。
 func RecordingWorkPath(libraryRoot, sessionID string, taskID int64, inputIndex int, source, host string, recordedAt time.Time) (string, error) {
+	return recordingWorkPath(libraryRoot, sessionID, taskID, inputIndex, source, host, recordedAt, true)
+}
+
+// ExistingRecordingWorkPath 纯读取规划，不创建工作目录或调用可能 promotion 的 loader。
+func ExistingRecordingWorkPath(libraryRoot, sessionID string, taskID int64, inputIndex int, source, host string, recordedAt time.Time) (string, error) {
+	return recordingWorkPath(libraryRoot, sessionID, taskID, inputIndex, source, host, recordedAt, false)
+}
+func recordingWorkPath(libraryRoot, sessionID string, taskID int64, inputIndex int, source, host string, recordedAt time.Time, prepare bool) (string, error) {
 	if sessionID == "" || taskID <= 0 || recordedAt.IsZero() {
 		return "", fmt.Errorf("recording work path requires registered session and recording time")
 	}
@@ -27,7 +35,7 @@ func RecordingWorkPath(libraryRoot, sessionID string, taskID int64, inputIndex i
 		return "", fmt.Errorf("invalid recording time: %s", source)
 	}
 	sessionHash := sha256.Sum256([]byte(sessionID))
-	dir, err := recordingWorkDirectory(libraryRoot, "processing", fmt.Sprintf("%x", sessionHash[:16]), fmt.Sprintf("%d-%d", taskID, inputIndex), meta.aliasName, "Season 01")
+	dir, err := recordingWorkDirectoryPrepared(libraryRoot, prepare, "processing", fmt.Sprintf("%x", sessionHash[:16]), fmt.Sprintf("%d-%d", taskID, inputIndex), meta.aliasName, "Season 01")
 	if err != nil {
 		return "", err
 	}
@@ -53,6 +61,9 @@ func RecordingCapturePath(libraryRoot, sessionID, producerID, name string) (stri
 }
 
 func recordingWorkDirectory(libraryRoot string, components ...string) (string, error) {
+	return recordingWorkDirectoryPrepared(libraryRoot, true, components...)
+}
+func recordingWorkDirectoryPrepared(libraryRoot string, prepare bool, components ...string) (string, error) {
 	root, err := filepath.Abs(libraryRoot)
 	if err != nil {
 		return "", err
@@ -67,8 +78,10 @@ func recordingWorkDirectory(libraryRoot string, components ...string) (string, e
 	dir := filepath.Dir(root)
 	for _, component := range append([]string{".live_session_segments"}, components...) {
 		dir = filepath.Join(dir, component)
-		if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
-			return "", err
+		if prepare {
+			if err := os.Mkdir(dir, 0o755); err != nil && !os.IsExist(err) {
+				return "", err
+			}
 		}
 		info, err := os.Lstat(dir)
 		if err != nil {
@@ -87,4 +100,45 @@ func recordingWorkDirectory(libraryRoot string, components ...string) (string, e
 		return "", fmt.Errorf("recording work path resolves inside media library")
 	}
 	return dir, nil
+}
+
+// TryLockRecordingWork 后台只尝试一次，不与活跃 stage 争写。
+func TryLockRecordingWork(path string) (func(), bool) {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	if resolved, e := filepath.EvalSymlinks(filepath.Dir(key)); e == nil {
+		key = filepath.Join(resolved, filepath.Base(key))
+	}
+	locks := &recordingWorkLocks
+	locks.mutex.Lock()
+	if locks.entries == nil {
+		locks.entries = make(map[string]*keyedPathLockEntry)
+	}
+	entry := locks.entries[key]
+	if entry == nil {
+		entry = &keyedPathLockEntry{}
+		locks.entries[key] = entry
+	}
+	entry.refs++
+	locks.mutex.Unlock()
+	if !entry.mutex.TryLock() {
+		locks.mutex.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(locks.entries, key)
+		}
+		locks.mutex.Unlock()
+		return nil, false
+	}
+	return func() {
+		entry.mutex.Unlock()
+		locks.mutex.Lock()
+		entry.refs--
+		if entry.refs == 0 {
+			delete(locks.entries, key)
+		}
+		locks.mutex.Unlock()
+	}, true
 }

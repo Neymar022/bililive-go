@@ -36,7 +36,6 @@ bililive:
 dev:
 	@go run build.go dev $(if $(VERSION),--version $(VERSION),) $(if $(PLATFORM),--platform $(PLATFORM),) $(if $(ARCH),--arch $(ARCH),) $(if $(NO_TELEMETRY),--no-telemetry,)
 
-
 # 收集所有 Go 源文件作为依赖（使用通配符，兼容 Windows）
 GO_SOURCES := $(wildcard src/**/*.go src/**/**/*.go src/**/**/**/*.go)
 GO_MOD_FILES := go.mod go.sum

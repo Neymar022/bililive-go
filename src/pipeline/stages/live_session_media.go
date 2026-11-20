@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/pipeline"
-	"github.com/bililive-go/bililive-go/src/pkg/utils"
 	"github.com/bililive-go/bililive-go/src/subtitle"
 	"github.com/bililive-go/bililive-go/src/tools"
 )
@@ -124,7 +122,7 @@ type liveSessionSegmentJournalEntry struct {
 	BackupMetadata string `json:"backup_metadata"`
 }
 
-func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, libraryRoot string, manifest *knowledgeSessionManifest) (*liveSessionMediaAggregate, error) {
+func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, libraryRoot string, manifest *knowledgeSessionManifest, publicationContexts ...*pipeline.PipelineContext) (*liveSessionMediaAggregate, error) {
 	if manifest == nil || len(manifest.Sources) == 0 || (manifest.PublicationVersion == 0 && len(manifest.Sources) < 2) {
 		return nil, nil
 	}
@@ -166,6 +164,21 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 	if err != nil {
 		return nil, err
 	}
+	if enabled, e := subtitle.LibraryAppendEnabled(filepath.Dir(desiredAggregatePath)); e != nil {
+		return nil, e
+	} else if enabled {
+		return publishAppendLiveSessionMedia(ctx, ffmpegPath, absoluteLibraryRoot, desiredAggregatePath, manifest, inputs, publicationContexts...)
+	}
+	unlockPublication, lockErr := subtitle.LockLibraryPublicationContext(ctx, desiredAggregatePath)
+	if lockErr != nil {
+		return nil, lockErr
+	}
+	defer unlockPublication()
+	if len(publicationContexts) == 0 || publicationContexts[0] == nil || publicationContexts[0].LibraryPublication == nil {
+		if err := subtitle.AssertLibraryPublicationReady(desiredAggregatePath); err != nil {
+			return nil, err
+		}
+	}
 	aggregatePath := strings.TrimSpace(manifest.AggregatePath)
 	oldAggregatePath := strings.TrimSpace(manifest.PreviousAggregatePath)
 	if oldAggregatePath == "" {
@@ -188,8 +201,21 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		return nil, err
 	}
 	aggregateStem := strings.TrimSuffix(aggregatePath, filepath.Ext(aggregatePath))
-	unlockPublication := subtitle.LockLibraryPublication(aggregatePath)
-	defer unlockPublication()
+	if len(publicationContexts) > 0 && publicationContexts[0] != nil && publicationContexts[0].LibraryPublication != nil {
+		hook := publicationContexts[0]
+		recordedAt, _ := liveSessionInputRecordedAt(inputs[0])
+		request := pipeline.LibraryPublicationRequest{LibraryRoot: absoluteLibraryRoot, Path: aggregatePath, SessionID: manifest.LiveSessionID, TaskID: hook.TaskID, RecordedAt: recordedAt, Phase: "before"}
+		if err := hook.LibraryPublication(ctx, request); err != nil {
+			return nil, err
+		}
+	}
+	finishRecovery := func() error {
+		if len(publicationContexts) == 0 || publicationContexts[0] == nil || publicationContexts[0].LibraryPublication == nil {
+			return nil
+		}
+		hook := publicationContexts[0]
+		return hook.LibraryPublication(ctx, pipeline.LibraryPublicationRequest{LibraryRoot: absoluteLibraryRoot, Path: aggregatePath, SessionID: manifest.LiveSessionID, TaskID: hook.TaskID, Phase: "published"})
+	}
 	aggregateMetadataPath := aggregateStem + ".subtitle.json"
 
 	aggregateMetadata, metadataExists := loadCompletedSubtitleMetadata(
@@ -258,37 +284,18 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		}
 	}
 	if !metadataExists {
-		segmentPaths, err := liveSessionSegmentVideoPaths(inputs)
+		prepared, err := prepareLiveSessionAggregate(ctx, ffmpegPath, absoluteLibraryRoot, aggregatePath, manifest, inputs, "", false)
 		if err != nil {
 			return nil, err
 		}
-		ext := filepath.Ext(aggregatePath)
-		videoStage, err := newLiveSessionSidecarStage(absoluteLibraryRoot)
-		if err != nil {
-			return nil, err
-		}
-		// 未完成的 MP4 必须在扫描根之外；失败时只清理空目录，不移除恢复锚点。
-		defer os.Remove(videoStage.root)
-		tmpPath := filepath.Join(videoStage.root, strings.TrimSuffix(filepath.Base(aggregatePath), ext)+".tmp"+ext)
-		if err := os.MkdirAll(filepath.Dir(aggregatePath), 0o755); err != nil {
-			return nil, err
-		}
-		var mediaErr error
-		if len(segmentPaths) == 1 {
-			mediaErr = os.Link(segmentPaths[0], tmpPath)
-		} else {
-			mediaErr = liveSessionMediaConcat(ctx, ffmpegPath, segmentPaths, tmpPath)
-		}
-		if mediaErr != nil {
-			_ = os.Remove(tmpPath)
-			return nil, mediaErr
-		}
-
-		var sidecarStage *liveSessionSidecarStage
-		aggregateMetadata, sidecarStage, err = prepareLiveSessionAggregateSidecars(ctx, ffmpegPath, absoluteLibraryRoot, aggregatePath, tmpPath, manifest, inputs, segmentPaths)
-		if err != nil {
-			_ = os.Remove(tmpPath)
-			return nil, err
+		tmpPath, sidecarStage := prepared.video, prepared.sidecars
+		aggregateMetadata = prepared.metadata
+		defer os.Remove(prepared.videoRoot)
+		if len(publicationContexts) > 0 && publicationContexts[0] != nil && publicationContexts[0].PreserveRecoverySources != nil && publicationContexts[0].PreserveRecoverySources() {
+			aggregateMetadata.KeepSource = true
+			if err := subtitle.SaveMetadata(sidecarStage.metadata.staged, aggregateMetadata); err != nil {
+				return nil, err
+			}
 		}
 		if err := sidecarStage.promoteBeforeVideo(); err != nil {
 			_ = os.Remove(tmpPath)
@@ -350,6 +357,9 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 			segmentTransaction.commit()
 		}
 		sidecarStage.commit()
+		if err := finishRecovery(); err != nil {
+			return nil, err
+		}
 		return &liveSessionMediaAggregate{
 			LibraryPath:  aggregatePath,
 			MetadataPath: aggregateMetadataPath,
@@ -376,6 +386,9 @@ func publishLiveSessionMediaAggregate(ctx context.Context, ffmpegPath string, li
 		segmentTransaction.commit()
 	}
 
+	if err := finishRecovery(); err != nil {
+		return nil, err
+	}
 	return &liveSessionMediaAggregate{
 		LibraryPath:  aggregatePath,
 		MetadataPath: aggregateMetadataPath,
@@ -813,61 +826,19 @@ func resolveLiveSessionSegmentVideoPath(input knowledgeSessionPayloadInput) (str
 }
 
 func concatLiveSessionMediaWithFFmpeg(ctx context.Context, ffmpegPath string, inputs []string, outputPath string) error {
-	if len(inputs) == 0 {
-		return fmt.Errorf("live session media concat has no inputs")
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	if ffmpegPath == "" {
-		var err error
-		ffmpegPath, err = utils.GetFFmpegPath(ctx)
-		if err != nil {
-			return fmt.Errorf("ffmpeg not available for live session media concat: %w", err)
-		}
-	}
-
-	listFile, err := os.CreateTemp(filepath.Dir(outputPath), ".live-session-concat-*.txt")
-	if err != nil {
-		return err
-	}
-	listPath := listFile.Name()
-	defer os.Remove(listPath)
-	for _, input := range inputs {
-		if _, err := fmt.Fprintf(listFile, "file '%s'\n", escapeFFmpegConcatPath(input)); err != nil {
-			_ = listFile.Close()
-			return err
-		}
-	}
-	if err := listFile.Close(); err != nil {
-		return err
-	}
-
-	args := []string{"-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", "-f", "mp4", outputPath}
-	output, err := exec.CommandContext(ctx, ffmpegPath, args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("ffmpeg concat failed: %w: %s", err, trimCommandOutput(output))
-	}
-	return nil
+	return concatLiveSessionMediaSafely(ctx, ffmpegPath, inputs, outputPath)
 }
 
 func probeLiveSessionMediaDuration(ctx context.Context, ffmpegPath string, inputPath string) (float64, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	if ffmpegPath == "" {
-		var err error
-		ffmpegPath, err = utils.GetFFmpegPath(ctx)
-		if err != nil {
-			return 0, err
-		}
-	}
-	cmd := exec.CommandContext(ctx, ffmpegPath, "-i", inputPath, "-hide_banner")
-	output, err := cmd.CombinedOutput()
-	if err != nil && len(output) == 0 {
+	_, ffprobePath, err := liveSessionMediaTools(ctx, ffmpegPath)
+	if err != nil {
 		return 0, err
 	}
-	return parseFFmpegDurationSeconds(string(output))
+	media, err := probeLiveSessionMediaContract(ctx, ffprobePath, inputPath, false)
+	return media.duration, err
 }
 
 func escapeFFmpegConcatPath(path string) string {
@@ -891,8 +862,17 @@ func prepareLiveSessionAggregateSidecars(
 	manifest *knowledgeSessionManifest,
 	inputs []knowledgeSessionPayloadInput,
 	segmentPaths []string,
+	ownedRoot ...string,
 ) (subtitle.Metadata, *liveSessionSidecarStage, error) {
 	stage, err := newLiveSessionSidecarStage(libraryRoot)
+	if len(ownedRoot) > 0 && ownedRoot[0] != "" {
+		if stage != nil {
+			stage.cleanup()
+		}
+		stage = &liveSessionSidecarStage{root: filepath.Join(ownedRoot[0], "sidecars")}
+		err = os.MkdirAll(stage.root, 0700)
+	}
+
 	if err != nil {
 		return subtitle.Metadata{}, nil, err
 	}
@@ -1635,7 +1615,17 @@ func mergedLiveSessionSubtitleSegments(ctx context.Context, ffmpegPath string, i
 		if input.Metadata == nil {
 			return nil, nil, fmt.Errorf("live session input %d has no metadata", sourceIndex)
 		}
-		var maxEnd float64
+		if sourceIndex >= len(segmentPaths) {
+			return nil, nil, fmt.Errorf("live session input %d has no media path", sourceIndex)
+		}
+		duration, err := liveSessionMediaProbeDuration(ctx, ffmpegPath, segmentPaths[sourceIndex])
+		if err != nil {
+			return nil, nil, fmt.Errorf("live session subtitle media duration: %w", err)
+		}
+		if math.IsNaN(duration) || math.IsInf(duration, 0) || duration <= 0 {
+			return nil, nil, fmt.Errorf("live session invalid subtitle media duration: %v", duration)
+		}
+		clipped, dropped := 0, 0
 		for _, segment := range input.Metadata.Segments {
 			text := strings.TrimSpace(segment.Text)
 			if text == "" {
@@ -1649,8 +1639,14 @@ func mergedLiveSessionSubtitleSegments(ctx context.Context, ffmpegPath string, i
 			if err != nil {
 				return nil, nil, err
 			}
-			if end > maxEnd {
-				maxEnd = end
+			if start >= duration || end <= start || end <= 0 {
+				dropped++
+				continue
+			}
+			if end > duration || start < 0 {
+				start = math.Max(0, start)
+				end = math.Min(duration, end)
+				clipped++
 			}
 			merged = append(merged, subtitle.Segment{
 				Index: len(merged) + 1,
@@ -1659,18 +1655,14 @@ func mergedLiveSessionSubtitleSegments(ctx context.Context, ffmpegPath string, i
 				Text:  text,
 			})
 		}
-		duration := maxEnd
-		if sourceIndex < len(segmentPaths) {
-			if probed, err := liveSessionMediaProbeDuration(ctx, ffmpegPath, segmentPaths[sourceIndex]); err == nil && probed > maxEnd {
-				duration = probed
-			}
-		}
 		sources = append(sources, map[string]any{
-			"library_path":  input.LibraryPath,
-			"metadata_path": input.MetadataPath,
-			"output_path":   input.Metadata.OutputPath,
-			"offset":        offset,
-			"duration":      duration,
+			"library_path":     input.LibraryPath,
+			"metadata_path":    input.MetadataPath,
+			"output_path":      input.Metadata.OutputPath,
+			"offset":           offset,
+			"duration":         duration,
+			"clipped_segments": clipped,
+			"dropped_segments": dropped,
 		})
 		offset += duration
 	}
@@ -2330,4 +2322,55 @@ func xmlEscape(s string) string {
 		"'", "&apos;",
 	)
 	return replacer.Replace(s)
+}
+
+// preparedLiveSessionAggregate只准备隐藏文件；公开安装由原流程或append短提交负责。
+type preparedLiveSessionAggregate struct {
+	video     string
+	videoRoot string
+	sidecars  *liveSessionSidecarStage
+	metadata  subtitle.Metadata
+}
+
+func prepareLiveSessionAggregate(ctx context.Context, ffmpegPath, libraryRoot, target string, manifest *knowledgeSessionManifest, inputs []knowledgeSessionPayloadInput, ownedRoot string, resultOnly bool) (*preparedLiveSessionAggregate, error) {
+	paths, err := liveSessionSegmentVideoPaths(inputs)
+	if err != nil {
+		return nil, err
+	}
+	videoStage, err := newLiveSessionSidecarStage(libraryRoot)
+	if err != nil {
+		return nil, err
+	}
+	if ownedRoot != "" {
+		_ = os.Remove(videoStage.root)
+		videoStage.root = ownedRoot
+	}
+	video := filepath.Join(videoStage.root, strings.TrimSuffix(filepath.Base(target), filepath.Ext(target))+".tmp.mp4")
+	if ownedRoot != "" {
+		if _, e := os.Lstat(video); e == nil {
+			_ = os.Remove(video)
+		}
+		_ = os.RemoveAll(filepath.Join(ownedRoot, "sidecars"))
+	}
+	if resultOnly {
+		err = concatLiveSessionMediaResultOnly(ctx, ffmpegPath, paths, video)
+	} else {
+		err = liveSessionMediaConcat(ctx, ffmpegPath, paths, video)
+	}
+	if err != nil {
+		_ = os.Remove(video)
+		return nil, err
+	}
+	var meta subtitle.Metadata
+	var stage *liveSessionSidecarStage
+	if ownedRoot != "" {
+		meta, stage, err = prepareLiveSessionAggregateSidecars(ctx, ffmpegPath, libraryRoot, target, video, manifest, inputs, paths, ownedRoot)
+	} else {
+		meta, stage, err = prepareLiveSessionAggregateSidecars(ctx, ffmpegPath, libraryRoot, target, video, manifest, inputs, paths)
+	}
+	if err != nil {
+		_ = os.Remove(video)
+		return nil, err
+	}
+	return &preparedLiveSessionAggregate{video, videoStage.root, stage, meta}, nil
 }

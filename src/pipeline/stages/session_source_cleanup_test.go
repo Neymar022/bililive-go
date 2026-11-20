@@ -69,7 +69,7 @@ func TestPublishedSessionSourceCleanup(t *testing.T) {
 				previous := configs.GetCurrentConfig()
 				configs.SetCurrentConfig(cfg)
 				t.Cleanup(func() { configs.SetCurrentConfig(previous) })
-				stubLiveSessionMediaForEpisodeList(t, []float64{3, 3}, []string{"S01E1685894400000000", "S01E1685894400000000"})
+				stubLiveSessionMediaForEpisodeList(t, []float64{3, 3}[:count], []string{"S01E1685894400000000", "S01E1685894400000000"}[:count])
 				stubLiveSessionCoverExtraction(t, nil)
 				stage := &SubtitleGenerateStage{}
 				_, err = stage.Execute(stageCtx, files)

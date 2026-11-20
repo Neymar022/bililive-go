@@ -36,7 +36,7 @@ WORKDIR /app
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir --index-url "$PIP_INDEX_URL" -r /app/requirements.txt
 
-COPY app.py worker_core.py ass_generator.py segmenter.py /app/
+COPY app.py completion_receipt.py worker_core.py ass_generator.py segmenter.py /app/
 
 EXPOSE 8091
 

@@ -1,6 +1,14 @@
 from __future__ import annotations
 
 import errno
+import fcntl
+import hashlib
+import math
+import re
+import stat
+import uuid
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -16,6 +24,18 @@ from typing import Any, Optional
 import requests
 
 _logger = logging.getLogger(__name__)
+_completion_v1_logs = ContextVar("completion_v1_logs", default=False)
+
+
+@contextmanager
+def completion_v1_logging():
+    """同步 core/chain 留在当前请求上下文，绝不改变其他线程的 logger。"""
+    token = _completion_v1_logs.set(True)
+    try:
+        yield
+    finally:
+        _completion_v1_logs.reset(token)
+
 
 from ass_generator import build_ass_document, normalize_render_preset, probe_video_size
 
@@ -493,68 +513,173 @@ DEFAULT_MAC_TRANSCRIBER_TIMEOUT_SECONDS = 3600
 DEFAULT_MAC_HEALTH_TIMEOUT_SECONDS = 3.0
 
 
+def _mac_asr_retry() -> WorkerRetryLater:
+    return WorkerRetryLater(MAC_TRANSCRIBER_UNAVAILABLE,
+                            "Mac 转录尚未完成或临时不可用，等待原任务结果")
+
+
+@contextmanager
+def _mac_asr_state(source_path: str | None):
+    """只使用显式配置的既有私有目录；同源跨 attempt 非阻塞互斥。"""
+    configured = os.getenv("SUBTITLE_MAC_ASR_STATE_DIR")
+    if not configured or not source_path:
+        raise WorkerSafeError("缺少 Mac ASR 持久凭据目录或源文件身份")
+    root = Path(configured)
+    try:
+        info = root.lstat()
+        if (not root.is_absolute() or not stat.S_ISDIR(info.st_mode)
+                or info.st_mode & 0o077 or info.st_uid != os.geteuid()):
+            raise WorkerSafeError("Mac ASR 持久凭据目录不安全")
+        source_id = hashlib.sha256(os.path.realpath(source_path).encode()).hexdigest()
+        lock_fd = os.open(root / (source_id + ".lock"),
+                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(lock_fd, "r+") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise _mac_asr_retry() from None
+            yield root / (source_id + ".json")
+    except OSError:
+        raise WorkerSafeError("Mac ASR 持久凭据目录不可读写") from None
+
+
+def _save_mac_asr_receipt(path: Path, data: dict) -> None:
+    temporary = path.with_suffix(f".{uuid.uuid4()}.tmp")
+    try:
+        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as stream:
+            json.dump(data, stream, allow_nan=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.replace(path)
+        directory = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _mac_asr_segments(payload: Any) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict) or not isinstance(payload.get("segments"), list):
+        raise WorkerSafeError("Mac 转录结果结构无效")
+    output = []
+    for index, segment in enumerate(payload["segments"], start=1):
+        if not isinstance(segment, dict) or not isinstance(segment.get("text"), str):
+            raise WorkerSafeError("Mac 转录结果结构无效")
+        start, end = segment.get("start"), segment.get("end")
+        if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) for value in (start, end))
+                or start < 0 or end < start):
+            raise WorkerSafeError("Mac 转录结果时间戳无效")
+        text = segment["text"].strip()
+        if text:
+            output.append({"index": index, "start_ms": int(start * 1000),
+                           "end_ms": int(end * 1000), "text": text})
+    return output
+
+
 def run_remote_mac_mlx(
     audio_path: str,
     language: str,
     mac_url: str,
     mac_token: Optional[str],
     timeout_seconds: float = DEFAULT_MAC_TRANSCRIBER_TIMEOUT_SECONDS,
+    *,
+    source_path: str | None = None,
 ) -> list[dict[str, Any]]:
-    """通过 HTTP 上传音频到 BiliNote 的 mac_transcriber_service，
-    复用其 mlx-whisper + Apple Silicon GPU 算力。
+    """先领取跨 attempt 的原任务；只有 404 才同音频、同 key 重新提交。"""
+    headers = {"Authorization": f"Bearer {mac_token}"} if mac_token else {}
+    with _mac_asr_state(source_path) as path:
+        digest = hashlib.sha256()
+        with open(audio_path, "rb") as audio:
+            while chunk := audio.read(1024 * 1024):
+                digest.update(chunk)
+        audio_hash = digest.hexdigest()
+        receipt = None
+        if path.exists() or path.is_symlink():
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+                with os.fdopen(fd) as stream:
+                    receipt = json.load(stream)
+                if (not isinstance(receipt, dict)
+                        or any(not isinstance(receipt.get(k), str) or not re.fullmatch(r"[0-9a-f]{64}", receipt[k])
+                               for k in ("audio_hash", "config_id"))
+                        or receipt.get("key") != "bl1-" + hashlib.sha256(
+                            f"{receipt['audio_hash']}\n{receipt['config_id']}".encode()).hexdigest()):
+                    raise ValueError("identity")
+            except (OSError, ValueError, TypeError):
+                raise WorkerSafeError("Mac ASR 持久凭据无效，禁止重新提交") from None
+            if receipt["audio_hash"] != audio_hash:
+                raise WorkerSafeError("源文件抽取的音频已变化，保留原 Mac ASR 凭据")
+            if receipt.get("terminal_error"):
+                raise WorkerSafeError("Mac ASR 原任务已确定失败，需人工确认")
 
-    上游服务（BiliNote/mac_transcriber_service）已用 threading.Semaphore(1)
-    串行 GPU 访问，多任务并发 POST 时 HTTP 层接受、应用层 FIFO 排队，
-    所以这里**不需要再加锁**——单次请求阻塞等响应即可。
+        def terminal(message: str):
+            if receipt is not None:
+                receipt["terminal_error"] = message
+                _save_mac_asr_receipt(path, receipt)
+            raise WorkerSafeError(message)
 
-    BiliNote 返回 schema：
-        { "language": "zh", "full_text": "...",
-          "segments": [{"start": 0.0, "end": 2.5, "text": "..."}, ...] }
-    转成 worker_core 内部使用的 ms-based 格式。
-    """
-    headers = {}
-    if mac_token:
-        headers["Authorization"] = f"Bearer {mac_token}"
+        def checked(response, *, job=False):
+            if response.status_code in (202, 429, 503):
+                raise _mac_asr_retry()
+            if response.status_code == 409:
+                terminal("Mac ASR 音频或配置身份冲突")
+            if response.status_code in (401, 422):
+                raise WorkerSafeError("Mac ASR 认证或请求被拒绝")
+            if response.status_code != 200:
+                raise WorkerSafeError("Mac ASR 返回非预期 HTTP 状态")
+            try:
+                payload = response.json()
+            except ValueError:
+                terminal("Mac ASR 结果契约无效")
+            if job:
+                if not isinstance(payload, dict) or payload.get("status") != "completed":
+                    terminal("Mac ASR 原任务失败、中断或状态无效")
+                if (payload.get("audio_hash") != receipt["audio_hash"]
+                        or payload.get("config_id") != receipt["config_id"]):
+                    terminal("Mac ASR 结果身份不匹配")
+                payload = payload.get("result")
+            try:
+                return _mac_asr_segments(payload)
+            except WorkerSafeError:
+                terminal("Mac ASR 结果契约无效")
 
-    # 用 with 显式管理 Session 生命周期：long-running NAS worker 进程每天数次到
-    # 数十次转写，未关闭的 Session 会让 urllib3 连接池累积 fd——几个月不重启
-    # 容器后会撞 ulimit。trust_env=False 跟 dashscope 那边保持一致，避免读
-    # HTTP_PROXY 把局域网请求转出公网。
-    with requests.Session() as session:
-        session.trust_env = False
-        with open(audio_path, "rb") as f:
-            files = {"audio": (os.path.basename(audio_path), f, "audio/wav")}
-            response = session.post(
-                f"{mac_url.rstrip('/')}/transcribe",
-                headers=headers,
-                files=files,
-                timeout=timeout_seconds,
-            )
-
-    response.raise_for_status()
-    payload = response.json()
-
-    output: list[dict[str, Any]] = []
-    for index, segment in enumerate(payload.get("segments", []), start=1):
-        try:
-            start_ms = int(float(segment["start"]) * 1000)
-            end_ms = int(float(segment["end"]) * 1000)
-        except (KeyError, TypeError, ValueError):
-            # 异常段直接跳过——MLX 偶发 NaN/inf 时间戳，BiliNote 那边已修了，
-            # 这里再加一道兜底防御性。
-            continue
-        text = str(segment.get("text", "")).strip()
-        if not text:
-            continue
-        output.append(
-            {
-                "index": index,
-                "start_ms": start_ms,
-                "end_ms": end_ms,
-                "text": text,
-            }
-        )
-    return output
+        # 每轮独立 Session，认证仅放在 header 中，不持久保存。
+        with requests.Session() as session:
+            session.trust_env = False
+            base = mac_url.rstrip("/")
+            try:
+                if receipt is not None:
+                    response = session.get(f"{base}/transcribe/jobs/{receipt['key']}",
+                                           headers=headers, timeout=timeout_seconds)
+                    if response.status_code != 404:
+                        return checked(response, job=True)
+                else:
+                    response = session.get(f"{base}/healthz", headers=headers, timeout=timeout_seconds)
+                    if response.status_code in (202, 429, 503):
+                        raise _mac_asr_retry()
+                    if response.status_code != 200:
+                        raise WorkerSafeError("Mac ASR 配置查询被拒绝")
+                    try:
+                        config_id = response.json().get("config_id")
+                    except (ValueError, AttributeError):
+                        config_id = None
+                    if not isinstance(config_id, str) or not re.fullmatch(r"[0-9a-f]{64}", config_id):
+                        raise WorkerSafeError("Mac ASR 服务缺少实际配置身份，不兼容当前 worker")
+                    key = "bl1-" + hashlib.sha256(f"{audio_hash}\n{config_id}".encode()).hexdigest()
+                    receipt = {"audio_hash": audio_hash, "config_id": config_id, "key": key}
+                    _save_mac_asr_receipt(path, receipt)
+                headers["Idempotency-Key"] = receipt["key"]
+                with open(audio_path, "rb") as audio:
+                    response = session.post(f"{base}/transcribe", headers=headers,
+                                            files={"audio": (os.path.basename(audio_path), audio, "audio/wav")},
+                                            timeout=timeout_seconds)
+                return checked(response)
+            except (requests.Timeout, requests.ConnectionError):
+                raise _mac_asr_retry() from None
 
 
 # Mac /burn 单次任务上限：60 分钟视频 burn 在 VideoToolbox + Apple GPU 大约
@@ -706,10 +831,16 @@ def check_mac_burn_supported(
                 timeout=timeout_seconds,
             )
     except Exception as exc:  # noqa: BLE001
-        _logger.info("mac burn-support probe failed (%s): %s", mac_url, exc)
+        if _completion_v1_logs.get():
+            _logger.info("mac burn-support probe failed (%s)", type(exc).__name__)
+        else:
+            _logger.info("mac burn-support probe failed (%s): %s", mac_url, exc)
         return False
 
     if response.status_code == 401:
+        if _completion_v1_logs.get():
+            _logger.warning("mac transcriber rejected burn-support probe with 401; check token configuration")
+            return False
         _logger.warning(
             "mac transcriber rejected burn-support probe with 401: token 错配？"
             "检查 NAS SUBTITLE_MAC_BURN_TOKEN 与 Mac MAC_TRANSCRIBER_TOKEN 是否一致 (%s)",
@@ -750,10 +881,16 @@ def check_mac_transcriber_health(
                 timeout=timeout_seconds,
             )
     except Exception as exc:  # noqa: BLE001 - 探测失败一律视为不健康
-        _logger.info("mac transcriber health probe failed (%s): %s", mac_url, exc)
+        if _completion_v1_logs.get():
+            _logger.info("mac transcriber health probe failed (%s)", type(exc).__name__)
+        else:
+            _logger.info("mac transcriber health probe failed (%s): %s", mac_url, exc)
         return False
 
     if response.status_code == 401:
+        if _completion_v1_logs.get():
+            _logger.warning("mac transcriber rejected health probe with 401; check token configuration")
+            return False
         _logger.warning(
             "mac transcriber rejected health probe with 401: token 错配？"
             "检查 NAS SUBTITLE_MAC_TRANSCRIBER_TOKEN 与 Mac MAC_TRANSCRIBER_TOKEN 是否一致 (%s)",
@@ -778,6 +915,7 @@ def _transcribe_with_provider(
     mac_transcriber_url: Optional[str],
     mac_transcriber_token: Optional[str],
     mac_transcriber_timeout_seconds: float,
+    source_path: str | None = None,
 ) -> list[dict[str, Any]]:
     """根据 provider 名跑对应的 ASR 引擎，返回 segments。
     抽出来是为了让 ProviderChain fallback 逻辑能复用：转写阶段失败可切下一档，
@@ -811,6 +949,7 @@ def _transcribe_with_provider(
             mac_transcriber_url,
             mac_transcriber_token,
             timeout_seconds=mac_transcriber_timeout_seconds,
+            source_path=source_path,
         )
     raise WorkerSafeError(f"不支持的字幕 provider: {provider}")
 
@@ -825,9 +964,9 @@ def _transcribe_with_chain(
     """按 provider_chain 顺序尝试，返回 (实际成功的 provider, segments)。
 
     fallback 触发条件：
-    - remote-mac-mlx：先 GET /healthz，不通 → 跳过（不消耗 timeout）
-    - 任何 provider 抛 WorkerSafeError（明确 message）→ 记下来，跳下一个
-    - 任何 provider 抛其它异常（网络/dashscope task 失败/未知）→ 也跳下一个
+    - remote-mac-mlx：先领取既有凭据，临时或确定失败均原样上抛
+    - 其它 provider 抛 WorkerSafeError（明确 message）→ 记下来，跳下一个
+    - 其它 provider 抛其它异常 → 也跳下一个
 
     异常路径有两种语义区分：
       1. 链是空的（配置错） → WorkerSafeError 提示用户配 SUBTITLE_PROVIDER_CHAIN
@@ -841,10 +980,7 @@ def _transcribe_with_chain(
         )
 
     last_error: Optional[Exception] = None
-    mac_unavailable_reason: Optional[str] = None
     attempt_log: list[tuple[str, str]] = []  # 结构化记录每档结局，便于运维查日志
-
-    health_timeout = float(os.getenv("SUBTITLE_MAC_HEALTH_TIMEOUT_SECONDS", str(DEFAULT_MAC_HEALTH_TIMEOUT_SECONDS)))
 
     for provider in provider_chain:
         if provider in CLOUD_ASR_PROVIDERS and not allow_cloud_asr:
@@ -852,38 +988,24 @@ def _transcribe_with_chain(
             _logger.info("subtitle chain skipped cloud provider=%s because cloud ASR is disabled", provider)
             continue
 
-        # remote-mac-mlx 有便宜的健康探测，不健康直接跳——避免用 60s+ timeout 才发现
-        if provider == "remote-mac-mlx":
-            mac_url = kwargs.get("mac_transcriber_url")
-            if not mac_url or not check_mac_transcriber_health(
-                mac_url,
-                kwargs.get("mac_transcriber_token"),
-                timeout_seconds=health_timeout,
-            ):
-                attempt_log.append((provider, "skipped:health"))
-                mac_unavailable_reason = "Mac 转写服务健康检查失败"
-                continue
-
         try:
             segments = _transcribe_with_provider(provider, audio_path, language, **kwargs)
             attempt_log.append((provider, "ok"))
             _logger.info("subtitle chain chose provider=%s after attempts=%s", provider, attempt_log)
             return provider, segments
-        except Exception as exc:  # noqa: BLE001 - 故意拦截一切，让链能往下走
-            last_error = exc
+        except Exception as exc:  # noqa: BLE001 - 其它 provider 保留原 fallback
             if provider == "remote-mac-mlx":
-                mac_unavailable_reason = f"Mac 转写服务调用失败: {exc}"
+                raise  # 原任务 pending 或确定失败均禁止切到其它 ASR。
+            last_error = exc
             attempt_log.append((provider, f"failed:{type(exc).__name__}"))
-            _logger.warning("subtitle chain provider=%s failed: %s", provider, exc)
+            if _completion_v1_logs.get():
+                _logger.warning("subtitle chain provider=%s failed (%s)", provider, type(exc).__name__)
+            else:
+                _logger.warning("subtitle chain provider=%s failed: %s", provider, exc)
             continue
 
-    # 所有 provider 都跳/失败；若 last_error 为空说明全被健康检查跳过
+    # 其它 provider 全部跳过或失败。
     _logger.error("subtitle chain exhausted, attempts=%s", attempt_log)
-    if mac_unavailable_reason and not allow_cloud_asr:
-        raise WorkerRetryLater(
-            MAC_TRANSCRIBER_UNAVAILABLE,
-            f"{MAC_TRANSCRIBER_UNAVAILABLE}: {mac_unavailable_reason}；云端 ASR 回退已禁用，等待 Mac 恢复后重试",
-        )
     if last_error is not None:
         raise last_error
     raise WorkerSafeError(f"provider chain 全部不可用: {provider_chain}")
@@ -990,7 +1112,10 @@ def _burn_with_chain(
         except Exception as exc:  # noqa: BLE001 - chain 故意拦截一切让降级生效
             last_error = exc
             attempt_log.append((provider, f"failed:{type(exc).__name__}"))
-            _logger.warning("burn chain provider=%s failed: %s", provider, exc)
+            if _completion_v1_logs.get():
+                _logger.warning("burn chain provider=%s failed (%s)", provider, type(exc).__name__)
+            else:
+                _logger.warning("burn chain provider=%s failed: %s", provider, exc)
             continue
 
     _logger.error("burn chain exhausted, attempts=%s", attempt_log)
@@ -1043,6 +1168,7 @@ def transcribe_and_burn(
         extract_audio(source_path, audio_path, ffmpeg_bin=ffmpeg_bin)
 
         provider_kwargs = dict(
+            source_path=source_path,
             source_root=source_root,
             public_url_base=public_url_base,
             dashscope_api_key=dashscope_api_key,

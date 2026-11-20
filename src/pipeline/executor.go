@@ -8,6 +8,7 @@ import (
 	"time"
 
 	bilisentry "github.com/bililive-go/bililive-go/src/pkg/sentry"
+	"github.com/bililive-go/bililive-go/src/subtitle"
 	"github.com/sirupsen/logrus"
 )
 
@@ -20,6 +21,7 @@ type Executor struct {
 
 // DeferredExecution 表示管道在某个阶段前暂停，等待 NotBefore 后恢复。
 type DeferredExecution struct {
+	Reason       string
 	NotBefore    time.Time
 	StageIndex   int
 	StageName    string
@@ -97,6 +99,7 @@ func (e *Executor) Execute(
 		if ctx.ShouldDeferStage != nil {
 			if notBefore, shouldDefer := ctx.ShouldDeferStage(stageIndex, stageCfg); shouldDefer && notBefore != nil {
 				return results, &DeferredExecution{
+					Reason:       "compute_due",
 					NotBefore:    *notBefore,
 					StageIndex:   stageIndex,
 					StageName:    stageCfg.Name,
@@ -151,7 +154,12 @@ func (e *Executor) Execute(
 
 			var retryLater *RetryLaterError
 			if errors.As(err, &retryLater) {
+				reason := "retry_due"
+				if errors.Is(err, subtitle.ErrLibraryComputeRequired) {
+					reason = "aggregate_compute_due"
+				}
 				return results, &DeferredExecution{
+					Reason:       reason,
 					NotBefore:    time.Now().UTC().Add(retryLater.Delay),
 					StageIndex:   stageIndex,
 					StageName:    stageCfg.Name,

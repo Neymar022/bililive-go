@@ -1,11 +1,14 @@
+import json
 import logging
 import os
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
-from worker_core import WorkerRetryLater, WorkerSafeError, transcribe_and_burn
+from worker_core import WorkerRetryLater, WorkerSafeError, transcribe_and_burn, completion_v1_logging
+from completion_receipt import (CompletionError, CompletionRequest, capability,
+                                execute_completion)
 
 _logger = logging.getLogger("subtitle_worker")
 
@@ -34,14 +37,37 @@ class ProcessRequest(BaseModel):
     language: str = "zh"
     burn_style: BurnStyle = Field(default_factory=BurnStyle)
     record_meta: dict[str, Any] = Field(default_factory=dict)
+    completion_v1: CompletionRequest | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_completion_snapshot(cls, value):
+        if isinstance(value, dict) and value.get('completion_v1') is not None:
+            protocol = value['completion_v1']
+            if isinstance(protocol, CompletionRequest):
+                protocol = protocol.model_dump(by_alias=True)
+            snapshot = dict(provider=value.get('provider', 'dashscope'),
+                            language=value.get('language', 'zh'),
+                            burn_style=value.get('burn_style', {}))
+            if isinstance(snapshot['burn_style'], BurnStyle):
+                snapshot['burn_style'] = snapshot['burn_style'].model_dump(exclude_unset=True)
+            if (set(value) - set(cls.model_fields) or
+                not isinstance(protocol, dict) or
+                type(protocol.get('schema')) is not int or protocol.get('schema') != 1 or
+                not isinstance(snapshot['burn_style'], dict) or
+                json.dumps(protocol.get('request_snapshot'), sort_keys=True, allow_nan=False) !=
+                json.dumps(snapshot, sort_keys=True, allow_nan=False) or
+                set(snapshot['burn_style']) - set(BurnStyle.model_fields)):
+                raise ValueError('completion_request_snapshot_mismatch')
+        return value
 
 
 app = FastAPI(title="bililive-go subtitle worker")
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
-    return {"status": "ok"}
+def healthz() -> dict[str, Any]:
+    return {"status": "ok", "completion_v1": capability()}
 
 
 def _parse_provider_chain() -> list[str]:
@@ -76,45 +102,57 @@ def _parse_bool_env(name: str, default: bool) -> bool:
     return default
 
 
+def _core_options(req: ProcessRequest) -> dict[str, Any]:
+    return dict(
+        source_path=req.source_path,
+        output_video_path=req.output_video_path,
+        output_srt_path=req.output_srt_path,
+        provider=req.provider,
+        language=req.language,
+        burn_style=req.burn_style.model_dump(),
+        provider_chain=_parse_provider_chain(),
+        ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
+        source_root=os.getenv("SUBTITLE_SOURCE_ROOT"),
+        public_url_base=os.getenv("SUBTITLE_PUBLIC_URL_BASE"),
+        dashscope_api_key=os.getenv("DASHSCOPE_API_KEY"),
+        dashscope_base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com"),
+        dashscope_model=os.getenv("SUBTITLE_DASHSCOPE_MODEL", "qwen3-asr-flash-filetrans"),
+        local_model=os.getenv("SUBTITLE_LOCAL_MODEL", "small"),
+        local_compute_type=os.getenv("SUBTITLE_LOCAL_COMPUTE_TYPE", "int8"),
+        allow_cloud_asr=_parse_bool_env("SUBTITLE_ALLOW_CLOUD_ASR", True),
+        mac_transcriber_url=os.getenv("SUBTITLE_MAC_TRANSCRIBER_URL"),
+        mac_transcriber_token=os.getenv("SUBTITLE_MAC_TRANSCRIBER_TOKEN"),
+        mac_transcriber_model=os.getenv("SUBTITLE_MAC_TRANSCRIBER_MODEL", "large-v3-turbo"),
+        mac_transcriber_timeout_seconds=float(os.getenv("SUBTITLE_MAC_TRANSCRIBER_TIMEOUT", "3600")),
+        video_encoder=os.getenv("SUBTITLE_VIDEO_ENCODER", "software"),
+        vaapi_device=os.getenv("SUBTITLE_VAAPI_DEVICE", "/dev/dri/renderD128"),
+        vaapi_qp=int(os.getenv("SUBTITLE_VAAPI_QP", "23")),
+        # P7: burn 链式 fallback 配置
+        burn_chain=_parse_burn_chain() or None,
+        mac_burn_url=os.getenv("SUBTITLE_MAC_BURN_URL"),
+        mac_burn_token=os.getenv("SUBTITLE_MAC_BURN_TOKEN"),
+        mac_burn_codec=os.getenv("SUBTITLE_MAC_BURN_CODEC", "h264_videotoolbox"),
+        mac_burn_bitrate=os.getenv("SUBTITLE_MAC_BURN_BITRATE", "5M"),
+        # P15 修：默认从 1200s（旧 P9 era 值，会让 long video burn timeout 触发
+        # NAS-software 兜底失败链）提到 18000s（5h），跟 worker_core.py 的
+        # DEFAULT_MAC_BURN_TIMEOUT_SECONDS + Mac burn_handler.py 的
+        # DEFAULT_FFMPEG_TIMEOUT_SECONDS 三层对齐。
+        mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "18000")),
+    )
+
+
 @app.post("/api/v1/process")
 def process(req: ProcessRequest) -> dict[str, Any]:
     try:
-        return transcribe_and_burn(
-            source_path=req.source_path,
-            output_video_path=req.output_video_path,
-            output_srt_path=req.output_srt_path,
-            provider=req.provider,
-            language=req.language,
-            burn_style=req.burn_style.model_dump(),
-            provider_chain=_parse_provider_chain(),
-            ffmpeg_bin=os.getenv("FFMPEG_BIN", "ffmpeg"),
-            source_root=os.getenv("SUBTITLE_SOURCE_ROOT"),
-            public_url_base=os.getenv("SUBTITLE_PUBLIC_URL_BASE"),
-            dashscope_api_key=os.getenv("DASHSCOPE_API_KEY"),
-            dashscope_base_url=os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com"),
-            dashscope_model=os.getenv("SUBTITLE_DASHSCOPE_MODEL", "qwen3-asr-flash-filetrans"),
-            local_model=os.getenv("SUBTITLE_LOCAL_MODEL", "small"),
-            local_compute_type=os.getenv("SUBTITLE_LOCAL_COMPUTE_TYPE", "int8"),
-            allow_cloud_asr=_parse_bool_env("SUBTITLE_ALLOW_CLOUD_ASR", True),
-            mac_transcriber_url=os.getenv("SUBTITLE_MAC_TRANSCRIBER_URL"),
-            mac_transcriber_token=os.getenv("SUBTITLE_MAC_TRANSCRIBER_TOKEN"),
-            mac_transcriber_model=os.getenv("SUBTITLE_MAC_TRANSCRIBER_MODEL", "large-v3-turbo"),
-            mac_transcriber_timeout_seconds=float(os.getenv("SUBTITLE_MAC_TRANSCRIBER_TIMEOUT", "3600")),
-            video_encoder=os.getenv("SUBTITLE_VIDEO_ENCODER", "software"),
-            vaapi_device=os.getenv("SUBTITLE_VAAPI_DEVICE", "/dev/dri/renderD128"),
-            vaapi_qp=int(os.getenv("SUBTITLE_VAAPI_QP", "23")),
-            # P7: burn 链式 fallback 配置
-            burn_chain=_parse_burn_chain() or None,
-            mac_burn_url=os.getenv("SUBTITLE_MAC_BURN_URL"),
-            mac_burn_token=os.getenv("SUBTITLE_MAC_BURN_TOKEN"),
-            mac_burn_codec=os.getenv("SUBTITLE_MAC_BURN_CODEC", "h264_videotoolbox"),
-            mac_burn_bitrate=os.getenv("SUBTITLE_MAC_BURN_BITRATE", "5M"),
-            # P15 修：默认从 1200s（旧 P9 era 值，会让 long video burn timeout 触发
-            # NAS-software 兜底失败链）提到 18000s（5h），跟 worker_core.py 的
-            # DEFAULT_MAC_BURN_TIMEOUT_SECONDS + Mac burn_handler.py 的
-            # DEFAULT_FFMPEG_TIMEOUT_SECONDS 三层对齐。
-            mac_burn_timeout_seconds=float(os.getenv("SUBTITLE_MAC_BURN_TIMEOUT", "18000")),
-        )
+        if req.completion_v1 is None:
+            return transcribe_and_burn(**_core_options(req))
+        posted = req.model_dump(exclude={'completion_v1'})
+        posted['request_snapshot'] = req.completion_v1.request_snapshot
+        with completion_v1_logging():
+            return execute_completion(req.completion_v1, posted, lambda: _core_options(req),
+                                      transcribe_and_burn)
+    except CompletionError as exc:
+        raise HTTPException(status_code=exc.status, detail={"code": exc.code}) from None
     except WorkerRetryLater as exc:
         raise HTTPException(
             status_code=503,
@@ -128,8 +166,11 @@ def process(req: ProcessRequest) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         # 未知异常：message 可能含 ffmpeg stderr、文件路径、API key、OSS 临时凭据。
-        # 完整 traceback 写到容器 stderr 供运维排查；客户端只见通用错误。
-        _logger.exception("worker process failed")
+        # 旧请求保留原日志；v1 只记固定短语，避免私有请求或凭据进入日志。
+        if req.completion_v1 is None:
+            _logger.exception("worker process failed")
+        else:
+            _logger.error("completion_v1 worker failed; result remains unknown")
         raise HTTPException(
             status_code=500,
             detail="internal worker error; check worker logs",
