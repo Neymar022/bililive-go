@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"crypto/sha256"
 	"fmt"
 	"os"
@@ -62,8 +63,14 @@ func CaptureRecordingSource(libraryRoot, sessionID string, metadata Metadata) (R
 
 // DeletePublishedRecordingSources 与 retention 共用，先全量校验再删除，不重建历史清单。
 func DeletePublishedRecordingSources(videoPath string) error {
-	unlock := LockLibraryPublication(videoPath)
+	unlock, lockErr := LockLibraryPublicationContext(context.Background(), videoPath)
+	if lockErr != nil {
+		return lockErr
+	}
 	defer unlock()
+	if err := AssertLibraryPublicationReady(videoPath); err != nil {
+		return err
+	}
 	defer InvalidateRecordCache()
 	info, err := os.Lstat(videoPath)
 	if err != nil {

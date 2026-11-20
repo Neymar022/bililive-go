@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -97,8 +98,14 @@ func GetRecord(libraryRoot, sourceRoot, relativePath string, retentionDays int) 
 }
 
 func SetKeepSource(videoPath string, keep bool) error {
-	unlock := LockLibraryPublication(videoPath)
+	unlock, err := LockLibraryPublicationContext(context.Background(), videoPath)
+	if err != nil {
+		return err
+	}
 	defer unlock()
+	if err = AssertLibraryPublicationReady(videoPath); err != nil {
+		return err
+	}
 	metadataPath := sidecarPathForVideo(videoPath)
 	metadata, err := LoadMetadata(metadataPath)
 	if err != nil {
@@ -111,6 +118,14 @@ func SetKeepSource(videoPath string, keep bool) error {
 func DeleteSourceFile(videoPath, sourceRoot string) error {
 	if metadata, err := LoadMetadata(sidecarPathForVideo(videoPath)); err == nil && len(metadata.RecordingSources) > 0 {
 		return DeletePublishedRecordingSources(videoPath)
+	}
+	unlock, lockErr := LockLibraryPublicationContext(context.Background(), videoPath)
+	if lockErr != nil {
+		return lockErr
+	}
+	defer unlock()
+	if err := AssertLibraryPublicationReady(videoPath); err != nil {
+		return err
 	}
 	sourcePath, err := ResolveSourcePath(videoPath, sourceRoot)
 	if err != nil {

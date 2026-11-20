@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,10 +17,54 @@ import (
 
 // ResumeTask 校验保留下来的阶段输入后续跑，不重置时间计划或已完成结果。
 func (m *Manager) ResumeTask(taskID int64) error {
+	unlock := m.lockCompletionTask(taskID)
+	defer unlock()
 	task, err := m.store.GetTask(m.ctx, taskID)
 	if err != nil {
 		return err
 	}
+	if err = m.validateTaskResume(task); err != nil {
+		return err
+	}
+	if store, ok := m.store.(*SQLiteStore); ok {
+		records, err := store.libraryRecoveries(m.ctx)
+		if err != nil {
+			return err
+		}
+		for _, record := range records {
+			if record.Kind == "task" && record.TaskID == taskID && len(record.PublishedMissingSources) > 0 {
+				if err := validateRecoverySources(record); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	store, ok := m.store.(interface {
+		ResumeTask(context.Context, *PipelineTask) error
+	})
+	if !ok {
+		return errors.New("task store does not support atomic checkpoint resume")
+	}
+	if err := store.ResumeTask(m.ctx, task); err != nil {
+		return err
+	}
+	if err := m.recoveryBoundary("resume_committed"); err != nil {
+		return err
+	}
+	updated, err := m.store.GetTask(m.ctx, taskID)
+	if err == nil {
+		m.broadcastTaskUpdate(updated)
+	}
+	if err == nil {
+		if e := m.recoveryBoundary("resume_response"); e != nil {
+			return e
+		}
+	}
+	// 复用既有轮询，避免绕过 not_before 或在维护批次内直接启动 worker。
+	return err
+}
+
+func (m *Manager) validateTaskResume(task *PipelineTask) error {
 	if task.Status != PipelineStatusFailed || !task.CanRetry {
 		return errors.New("only retryable failed tasks can resume")
 	}
@@ -46,21 +91,7 @@ func (m *Manager) ResumeTask(taskID int64) error {
 			return fmt.Errorf("checkpoint input is not a nonempty regular file: %s", input.Path)
 		}
 	}
-	store, ok := m.store.(interface {
-		ResumeTask(context.Context, *PipelineTask) error
-	})
-	if !ok {
-		return errors.New("task store does not support atomic checkpoint resume")
-	}
-	if err := store.ResumeTask(m.ctx, task); err != nil {
-		return err
-	}
-	updated, err := m.store.GetTask(m.ctx, taskID)
-	if err == nil {
-		m.broadcastTaskUpdate(updated)
-	}
-	// 复用既有轮询，避免绕过 not_before 或在维护批次内直接启动 worker。
-	return err
+	return nil
 }
 
 func (m *Manager) hasPublishedRecordingInput(task *PipelineTask, input string) bool {
@@ -108,25 +139,53 @@ func (s *SQLiteStore) ResumeTask(ctx context.Context, expected *PipelineTask) er
 		return err
 	}
 	defer tx.Rollback()
-	var currentFiles, stageResults string
+	var currentFiles, stageResults, initialFiles string
 	var stage int
 	var status PipelineStatus
 	var retry bool
 	var recordInfo, config string
-	err = tx.QueryRowContext(ctx, `SELECT status, current_stage, current_files_json, stage_results_json, can_retry, record_info_json, pipeline_config_json FROM pipeline_tasks WHERE id = ?`, expected.ID).Scan(&status, &stage, &currentFiles, &stageResults, &retry, &recordInfo, &config)
+	var currentNotBefore, currentStartedAt sql.NullTime
+	err = tx.QueryRowContext(ctx, `SELECT status, current_stage, current_files_json, stage_results_json, can_retry, record_info_json, pipeline_config_json, not_before,started_at,initial_files_json FROM pipeline_tasks WHERE id = ?`, expected.ID).Scan(&status, &stage, &currentFiles, &stageResults, &retry, &recordInfo, &config, &currentNotBefore, &currentStartedAt, &initialFiles)
 	if err != nil {
 		return err
 	}
-	var files []FileInfo
+	var files, initial []FileInfo
 	var results []StageResult
 	var record RecordInfo
 	var pipelineConfig *PipelineConfig
-	if json.Unmarshal([]byte(currentFiles), &files) != nil || json.Unmarshal([]byte(stageResults), &results) != nil || json.Unmarshal([]byte(recordInfo), &record) != nil || json.Unmarshal([]byte(config), &pipelineConfig) != nil ||
-		status != PipelineStatusFailed || !retry || stage != expected.CurrentStage || !reflect.DeepEqual(files, expected.CurrentFiles) || !reflect.DeepEqual(results, expected.StageResults) || !reflect.DeepEqual(record, expected.RecordInfo) || !reflect.DeepEqual(pipelineConfig, expected.PipelineConfig) {
+	// 只容许并发延长暂停时间。事务不会缩短当前时间或覆盖其来源。
+	deadlineChanged := currentNotBefore.Valid != (expected.NotBefore != nil) ||
+		(currentNotBefore.Valid && expected.NotBefore != nil && !currentNotBefore.Time.Equal(*expected.NotBefore))
+	holdExtended := currentNotBefore.Valid && (expected.NotBefore == nil || currentNotBefore.Time.After(*expected.NotBefore))
+	if json.Unmarshal([]byte(currentFiles), &files) != nil || json.Unmarshal([]byte(initialFiles), &initial) != nil || json.Unmarshal([]byte(stageResults), &results) != nil || json.Unmarshal([]byte(recordInfo), &record) != nil || json.Unmarshal([]byte(config), &pipelineConfig) != nil ||
+		status != PipelineStatusFailed || expected.Status != PipelineStatusFailed || !retry || retry != expected.CanRetry || !reflect.DeepEqual(initial, expected.InitialFiles) || (deadlineChanged && !holdExtended) || currentStartedAt.Valid != (expected.StartedAt != nil) || currentStartedAt.Valid && !currentStartedAt.Time.Equal(*expected.StartedAt) || stage != expected.CurrentStage || !reflect.DeepEqual(files, expected.CurrentFiles) || !reflect.DeepEqual(results, expected.StageResults) || !reflect.DeepEqual(record, expected.RecordInfo) || !reflect.DeepEqual(pipelineConfig, expected.PipelineConfig) {
 		return errors.New("task checkpoint changed; resume refused")
 	}
 	_, err = tx.ExecContext(ctx, `UPDATE pipeline_tasks SET status = ?, started_at = NULL, completed_at = NULL, error_message = '' WHERE id = ?`, PipelineStatusPending, expected.ID)
 	if err != nil {
+		return err
+	}
+	var recoveryJSON string
+	if err = tx.QueryRowContext(ctx, `SELECT record_json FROM pipeline_library_recoveries WHERE operation_id=?`, fmt.Sprintf("task-%d", expected.ID)).Scan(&recoveryJSON); err == nil {
+		var recovery LibraryRecoveryRecord
+		if err = json.Unmarshal([]byte(recoveryJSON), &recovery); err != nil {
+			return err
+		}
+		if recovery.State == "resume_requested" && recovery.RecoveryClass != "worker_completion" {
+			recovery.State = "resumed"
+			recovery.Revision++
+			data, _ := json.Marshal(recovery)
+			if _, err = tx.ExecContext(ctx, `UPDATE pipeline_library_recoveries SET state='resumed',revision=?,record_json=? WHERE operation_id=?`, recovery.Revision, string(data), recovery.OperationID); err != nil {
+				return err
+			}
+			// 保留更晚 hold；due 来自本次恢复入队时间，不使用历史 created_at。
+			if !currentNotBefore.Valid || currentNotBefore.Time.Before(recovery.NextAttempt) {
+				if _, err = tx.ExecContext(ctx, `UPDATE pipeline_tasks SET not_before=? WHERE id=?`, recovery.NextAttempt.UTC(), expected.ID); err != nil {
+					return err
+				}
+			}
+		}
+	} else if err != sql.ErrNoRows {
 		return err
 	}
 	return tx.Commit()

@@ -76,12 +76,16 @@ func NewRecordInfo(info *live.Info) RecordInfo {
 
 // PipelineContext 管道执行上下文
 type PipelineContext struct {
-	TaskID     int64                  // 当前 pipeline 任务 ID
-	Ctx        context.Context        // 取消控制
-	RecordInfo RecordInfo             // 录制信息
-	Logger     *livelogger.LiveLogger // 日志记录器
-	WorkDir    string                 // 工作目录
-	TempDir    string                 // 临时文件目录
+	SavedCompletions     func() ([]CompletionRef, error)
+	RegisterCompletion   func(CompletionRef) error
+	CompletionNotSent    func(string) error
+	WithCompletionCommit func(*CompletionRef, string, func() error) error
+	TaskID               int64                  // 当前 pipeline 任务 ID
+	Ctx                  context.Context        // 取消控制
+	RecordInfo           RecordInfo             // 录制信息
+	Logger               *livelogger.LiveLogger // 日志记录器
+	WorkDir              string                 // 工作目录
+	TempDir              string                 // 临时文件目录
 
 	// FFmpegPath 是 ffmpeg 可执行文件的路径
 	FFmpegPath string
@@ -94,6 +98,10 @@ type PipelineContext struct {
 	OnStageCompleted func(stageIndex int, result StageResult, output []FileInfo)
 	// SessionMediaReady 登记本任务全部处理产物并返回完整场次快照，不等待任务整体 completed。
 	SessionMediaReady func([]SessionMediaSource) (RecordingSession, error)
+	// LibraryPublication 由 Manager 注入，恢复在正式发布锁内执行。
+	LibraryPublication       func(context.Context, LibraryPublicationRequest) error
+	PreserveRecoverySources  func() bool
+	SubtitleRecoveryRequired func() (bool, error)
 }
 
 // Stage 管道阶段接口
@@ -238,22 +246,23 @@ type StageResult struct {
 
 // PipelineTask 管道任务（持久化到数据库）
 type PipelineTask struct {
-	ID             int64           `json:"id"`
-	Status         PipelineStatus  `json:"status"`
-	RecordInfo     RecordInfo      `json:"record_info"`
-	PipelineConfig *PipelineConfig `json:"pipeline_config"` // 使用的管道配置
-	InitialFiles   []FileInfo      `json:"initial_files"`   // 初始输入文件
-	CurrentFiles   []FileInfo      `json:"current_files"`   // 当前文件列表
-	CurrentStage   int             `json:"current_stage"`   // 当前执行到第几个阶段（0-indexed）
-	TotalStages    int             `json:"total_stages"`    // 总阶段数
-	StageResults   []StageResult   `json:"stage_results"`   // 各阶段执行结果
-	Progress       int             `json:"progress"`        // 整体进度 (0-100)
-	CreatedAt      time.Time       `json:"created_at"`
-	StartedAt      *time.Time      `json:"started_at,omitempty"`
-	CompletedAt    *time.Time      `json:"completed_at,omitempty"`
-	NotBefore      *time.Time      `json:"not_before,omitempty"`
-	ErrorMessage   string          `json:"error_message,omitempty"`
-	CanRetry       bool            `json:"can_retry"` // 是否可以重试
+	ID              int64                  `json:"id"`
+	Status          PipelineStatus         `json:"status"`
+	RecordInfo      RecordInfo             `json:"record_info"`
+	PipelineConfig  *PipelineConfig        `json:"pipeline_config"` // 使用的管道配置
+	InitialFiles    []FileInfo             `json:"initial_files"`   // 初始输入文件
+	CurrentFiles    []FileInfo             `json:"current_files"`   // 当前文件列表
+	CurrentStage    int                    `json:"current_stage"`   // 当前执行到第几个阶段（0-indexed）
+	TotalStages     int                    `json:"total_stages"`    // 总阶段数
+	StageResults    []StageResult          `json:"stage_results"`   // 各阶段执行结果
+	Progress        int                    `json:"progress"`        // 整体进度 (0-100)
+	CreatedAt       time.Time              `json:"created_at"`
+	StartedAt       *time.Time             `json:"started_at,omitempty"`
+	CompletedAt     *time.Time             `json:"completed_at,omitempty"`
+	NotBefore       *time.Time             `json:"not_before,omitempty"`
+	ErrorMessage    string                 `json:"error_message,omitempty"`
+	LibraryRecovery *LibraryRecoveryRecord `json:"-"`
+	CanRetry        bool                   `json:"can_retry"` // 是否可以重试
 }
 
 // NewPipelineTask 创建新的管道任务
@@ -313,7 +322,6 @@ func (pt *PipelineTask) MarkFailed(err error) {
 	now := time.Now()
 	pt.Status = PipelineStatusFailed
 	pt.CompletedAt = &now
-	pt.NotBefore = nil
 	if err != nil {
 		pt.ErrorMessage = err.Error()
 	}
@@ -332,6 +340,9 @@ func (pt *PipelineTask) MarkDeferred(notBefore time.Time, stageIndex int, curren
 	pt.Status = PipelineStatusPending
 	pt.StartedAt = nil
 	pt.CompletedAt = nil
+	if pt.NotBefore != nil && pt.NotBefore.After(notBefore) {
+		notBefore = *pt.NotBefore
+	}
 	pt.NotBefore = &notBefore
 	pt.ErrorMessage = ""
 	pt.CurrentStage = stageIndex

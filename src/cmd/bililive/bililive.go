@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -387,6 +388,19 @@ func main() {
 	// 注册所有内置阶段
 	stages.RegisterBuiltinStagesToManager(pipelineManager)
 	inst.PipelineManager = pipelineManager
+
+	// 本机控制不可用时仅关闭新增字幕提交，保留录制、结果领取及现有服务。
+	workerControl, controlErr := servers.StartWorkerSubmissionControl(config.AppDataPath, pipelineManager)
+	if controlErr != nil {
+		if errors.Is(controlErr, servers.ErrWorkerSubmissionControlUnsupported) && !subtitle.CompletionV1Enabled() {
+			logger.Info("本平台不启用 Unix worker 控制，保留旧请求路径")
+		} else {
+			logger.WithError(controlErr).Error("本机 worker 提交控制不可用")
+			if closeErr := pipelineManager.SetWorkerSubmissions(false); closeErr != nil {
+				logger.WithError(closeErr).Error("无法持久关闭新增 worker 提交")
+			}
+		}
+	}
 	subtitleModule := subtitle.NewModule()
 
 	// 初始化直播间状态管理器
@@ -710,6 +724,13 @@ func main() {
 		// 关闭管理器
 		inst.ListenerManager.Close(ctx)
 		inst.RecorderManager.Close(ctx)
+		if workerControl != nil {
+			controlCtx, controlCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			if closeErr := workerControl.Close(controlCtx); closeErr != nil {
+				logger.WithError(closeErr).Error("本机 worker 提交控制关闭失败")
+			}
+			controlCancel()
+		}
 		// 关闭 Pipeline 管道管理器
 		if inst.PipelineManager != nil {
 			inst.PipelineManager.Close(ctx)

@@ -59,13 +59,18 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("failed to create database directory: %w", err)
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)")
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=synchronous(FULL)")
 	if err != nil {
 		return nil, fmt.Errorf("failed to open database: %w", err)
 	}
 
 	store := &SQLiteStore{db: db}
 
+	// 首次扩表前使用 SQLite 在线备份，包含已提交 WAL。
+	if err := store.initLibraryRecoverySchema(dbPath); err != nil {
+		db.Close()
+		return nil, err
+	}
 	// 初始化表结构
 	if err := store.initSchema(); err != nil {
 		db.Close()
@@ -199,6 +204,11 @@ func (s *SQLiteStore) CreateTask(ctx context.Context, task *PipelineTask) error 
 	if err := registerRecordingTask(ctx, tx, task); err != nil {
 		return err
 	}
+	if task.NotBefore != nil {
+		if err := saveCompletionDeadlineTx(ctx, tx, task.ID, nil, task.NotBefore, "", time.Time{}); err != nil {
+			return err
+		}
+	}
 	return tx.Commit()
 }
 
@@ -227,7 +237,16 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task *PipelineTask) error 
 	currentFilesJSON, _ := json.Marshal(task.CurrentFiles)
 	stageResultsJSON, _ := json.Marshal(task.StageResults)
 
-	_, err := s.db.ExecContext(ctx, `
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	current, err := scanTask(tx.QueryRowContext(ctx, taskCompletionSelect, task.ID))
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
 		UPDATE pipeline_tasks SET
 			status = ?,
 			current_files_json = ?,
@@ -253,7 +272,13 @@ func (s *SQLiteStore) UpdateTask(ctx context.Context, task *PipelineTask) error 
 		boolToInt(task.CanRetry),
 		task.ID,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	if err = saveCompletionDeadlineTx(ctx, tx, task.ID, current.NotBefore, task.NotBefore, "", time.Time{}); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // DeleteTask 删除任务

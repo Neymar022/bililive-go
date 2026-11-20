@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"sort"
 	"sync"
 	"time"
 
@@ -32,6 +34,12 @@ type Manager struct {
 	wake                     chan struct{}
 	recordingSessions        map[string]string
 	initializedRecordingRuns map[string]bool
+	taskLocks                sync.Map
+	gateMu                   sync.Mutex
+	scheduleMu               sync.Mutex
+	indexObserver            LibraryIndexObserver
+	libraryIndexCursor       string
+	recoveryHooks            LibraryRecoveryHooks
 }
 
 // ManagerConfig 管理器配置
@@ -74,6 +82,9 @@ func NewManager(ctx context.Context, store Store, config *ManagerConfig, dispatc
 		recordingSessions: make(map[string]string),
 	}
 
+	if path := os.Getenv("BILILIVE_LIBRARY_INDEX_SNAPSHOT"); path != "" {
+		m.indexObserver = NewLibraryIndexSnapshotObserver(path)
+	}
 	return m
 }
 
@@ -84,6 +95,9 @@ func (m *Manager) RegisterStage(name string, factory StageFactory) {
 
 // Start 启动管理器（实现 Module 接口）
 func (m *Manager) Start(ctx context.Context) error {
+	if err := m.restoreWorkerSubmissions(); err != nil {
+		return err
+	}
 	if store, err := m.recordingStore(); err == nil {
 		if err := store.RecoverRecordingSessions(m.ctx); err != nil {
 			return fmt.Errorf("recover recording session closure: %w", err)
@@ -94,6 +108,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		logrus.WithError(err).Warn("failed to reset running pipeline tasks")
 	}
 
+	if err := m.recoverLibraryJournals(); err != nil {
+		logrus.WithError(err).Warn("library recovery remains blocked")
+	}
 	// 启动轮询调度
 	m.ticker = time.NewTicker(m.config.PollInterval)
 	m.wg.Add(1)
@@ -136,6 +153,13 @@ func (m *Manager) pollLoop() {
 
 // scheduleNextTasks 调度下一批任务
 func (m *Manager) scheduleNextTasks() {
+	m.scheduleMu.Lock()
+	defer m.scheduleMu.Unlock()
+	if err := m.ReconcileSavedCompletions(); err != nil {
+		logrus.WithError(err).Error("completion journal unavailable; scheduler stopped")
+		return
+	}
+	m.compensateLibraryFailures()
 	m.mu.RLock()
 	runningCount := len(m.runningTasks)
 	maxConcurrent := m.config.MaxConcurrent
@@ -148,19 +172,37 @@ func (m *Manager) scheduleNextTasks() {
 	}
 
 	// 获取待执行的任务
-	tasks, err := m.store.GetPendingTasks(m.ctx, availableSlots)
+	tasks, err := m.store.GetPendingTasks(m.ctx, 0)
 	if err != nil {
 		logrus.WithError(err).Error("failed to get pending pipeline tasks")
 		return
 	}
 
+	sort.SliceStable(tasks, func(i, j int) bool {
+		a, b := tasks[i], tasks[j]
+		if a.RecordInfo.StartTime.Equal(b.RecordInfo.StartTime) {
+			return a.ID < b.ID
+		}
+		return a.RecordInfo.StartTime.Before(b.RecordInfo.StartTime)
+	})
 	for _, task := range tasks {
+		m.mu.RLock()
+		full := len(m.runningTasks) >= maxConcurrent
+		m.mu.RUnlock()
+		if full {
+			break
+		}
+		if !m.libraryTaskCanStart(task) {
+			continue
+		}
 		m.startTask(task)
 	}
 }
 
 // startTask 启动任务执行
 func (m *Manager) startTask(task *PipelineTask) {
+	unlock := m.lockCompletionTask(task.ID)
+	defer unlock()
 	m.mu.Lock()
 	// 检查是否已经在运行
 	if _, exists := m.runningTasks[task.ID]; exists {
@@ -173,10 +215,24 @@ func (m *Manager) startTask(task *PipelineTask) {
 	m.runningTasks[task.ID] = cancel
 	m.mu.Unlock()
 
-	// 更新任务状态为运行中
-	task.MarkStarted()
-	if err := m.store.UpdateTask(m.ctx, task); err != nil {
-		logrus.WithError(err).Error("failed to update pipeline task status")
+	// 原子领取；取出 pending 后的取消不能被旧对象覆盖。
+	if store, ok := m.store.(*SQLiteStore); ok {
+		if err := store.ClaimTask(m.ctx, task, time.Now()); err != nil {
+			cancel()
+			m.mu.Lock()
+			delete(m.runningTasks, task.ID)
+			m.mu.Unlock()
+			return
+		}
+	} else {
+		task.MarkStarted()
+		if err := m.store.UpdateTask(m.ctx, task); err != nil {
+			cancel()
+			m.mu.Lock()
+			delete(m.runningTasks, task.ID)
+			m.mu.Unlock()
+			return
+		}
 	}
 
 	// 广播任务状态变化
@@ -192,6 +248,20 @@ func (m *Manager) startTask(task *PipelineTask) {
 
 // executeTask 执行任务
 func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
+	claim := time.Time{}
+	if task.StartedAt != nil {
+		claim = *task.StartedAt
+	}
+	deferReason := ""
+	var deferDue time.Time
+	save := func(saveCtx context.Context) error {
+		unlock := m.lockCompletionTask(task.ID)
+		defer unlock()
+		if store, ok := m.store.(*SQLiteStore); ok && !claim.IsZero() {
+			return store.saveClaimedTaskDeadline(saveCtx, task, claim, deferReason, deferDue)
+		}
+		return m.store.UpdateTask(saveCtx, task)
+	}
 	defer func() {
 		m.mu.Lock()
 		delete(m.runningTasks, task.ID)
@@ -217,18 +287,32 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 		WorkDir:    "", // 后续可以从配置获取
 		StartStage: task.CurrentStage,
 	}
+	m.bindCompletionContext(pipelineCtx, task)
+	pipelineCtx.LibraryPublication = m.EnsureLibraryPublication
+	pipelineCtx.PreserveRecoverySources = func() bool { return m.librarySourcesProtected(task.ID) }
+	pipelineCtx.SubtitleRecoveryRequired = func() (bool, error) { return m.subtitleRecoveryRequired(task.ID) }
 	pipelineCtx.ShouldDeferStage = func(stageIndex int, stage StageConfig) (*time.Time, bool) {
 		return m.shouldDeferStage(task, stageIndex, stage)
 	}
 	pipelineCtx.SessionMediaReady = func(sources []SessionMediaSource) (RecordingSession, error) {
+		unlock := m.lockCompletionTask(task.ID)
+		defer unlock()
+		current, err := m.store.GetTask(m.ctx, task.ID)
+		if err != nil || !sameCompletionTask(current, task) || current.Status == PipelineStatusCancelled {
+			return RecordingSession{}, errors.New("completion_task_changed")
+		}
 		return m.completeSessionMedia(task, sources)
 	}
 	pipelineCtx.OnStageCompleted = func(stageIndex int, result StageResult, output []FileInfo) {
 		task.CurrentStage = stageIndex + 1
 		task.CurrentFiles = append([]FileInfo(nil), output...)
 		task.UpdateProgress()
-		if err := m.store.UpdateTask(ctx, task); err != nil {
+		if err := save(ctx); err != nil {
 			logrus.WithError(err).Warn("failed to update pipeline task current files")
+			if current, e := m.store.GetTask(m.ctx, task.ID); e == nil {
+				m.broadcastTaskUpdate(current)
+			}
+			return
 		}
 		m.broadcastTaskUpdate(task)
 	}
@@ -243,8 +327,12 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 			// 更新任务进度
 			task.CurrentStage = stageIndex
 			task.UpdateProgress()
-			if err := m.store.UpdateTask(ctx, task); err != nil {
+			if err := save(ctx); err != nil {
 				logrus.WithError(err).Warn("failed to update pipeline task progress")
+				if current, e := m.store.GetTask(m.ctx, task.ID); e == nil {
+					m.broadcastTaskUpdate(current)
+				}
+				return
 			}
 			m.broadcastTaskUpdate(task)
 		},
@@ -256,6 +344,8 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 	if err != nil {
 		var deferred *DeferredExecution
 		if errors.As(err, &deferred) {
+			deferReason = deferred.Reason
+			deferDue = deferred.NotBefore
 			task.MarkDeferred(deferred.NotBefore, deferred.StageIndex, deferred.CurrentFiles)
 			if deferred.Err != nil {
 				task.ErrorMessage = deferred.Err.Error()
@@ -283,8 +373,12 @@ func (m *Manager) executeTask(ctx context.Context, task *PipelineTask) {
 	}
 
 	// 更新任务状态
-	if err := m.store.UpdateTask(m.ctx, task); err != nil {
+	if err := save(m.ctx); err != nil {
 		logrus.WithError(err).Error("failed to update pipeline task status after execution")
+		if current, e := m.store.GetTask(m.ctx, task.ID); e == nil {
+			m.broadcastTaskUpdate(current)
+		}
+		return
 	}
 
 	// 广播任务状态变化
@@ -300,6 +394,18 @@ func (m *Manager) wakeScheduler() {
 
 func (m *Manager) shouldDeferStage(task *PipelineTask, stageIndex int, stage StageConfig) (*time.Time, bool) {
 	if stage.Name != StageNameSubtitleGenerate || !stage.GetBoolOption(OptionSubtitleScheduled, false) {
+		return nil, false
+	}
+	if record, err := m.completionRecord(task.ID); err == nil && record.AggregateCompute != nil && record.AggregateCompute.Required && record.AggregateCompute.SessionID == task.RecordInfo.LiveSessionID {
+		due := record.AggregateCompute.DueAt
+		if !due.IsZero() && m.recoveryNow().Before(due) {
+			return &due, true
+		}
+		if !due.IsZero() {
+			return nil, false
+		}
+	}
+	if m.completionResultOnly(task) {
 		return nil, false
 	}
 	cfg := configs.GetCurrentConfig()
@@ -378,33 +484,42 @@ func (m *Manager) EnqueueRecordingTask(
 
 // CancelTask 取消任务
 func (m *Manager) CancelTask(taskID int64) error {
+	unlock := m.lockCompletionTask(taskID)
+	defer unlock()
 	task, err := m.store.GetTask(m.ctx, taskID)
 	if err != nil {
 		return err
 	}
 
-	m.mu.Lock()
-	cancel, isRunning := m.runningTasks[taskID]
-	m.mu.Unlock()
-
-	if isRunning {
-		// 取消正在运行的任务
-		cancel()
-		// 状态更新会在 executeTask 中完成
-	} else if task.Status == PipelineStatusPending {
-		// 取消待执行的任务
+	if task.Status == PipelineStatusCompleted || task.Status == PipelineStatusCancelled {
+		return nil
+	}
+	if store, ok := m.store.(*SQLiteStore); ok {
+		if err := store.cancelTask(m.ctx, taskID); err != nil {
+			return err
+		}
+	} else {
 		task.MarkCancelled()
 		if err := m.store.UpdateTask(m.ctx, task); err != nil {
 			return err
 		}
-		m.broadcastTaskUpdate(task)
 	}
+	m.mu.Lock()
+	cancel, isRunning := m.runningTasks[taskID]
+	m.mu.Unlock()
+	if isRunning {
+		cancel()
+	}
+	task.MarkCancelled()
+	m.broadcastTaskUpdate(task)
 
 	return nil
 }
 
 // RetryTask 重试失败的任务
 func (m *Manager) RetryTask(taskID int64) error {
+	unlock := m.lockCompletionTask(taskID)
+	defer unlock()
 	task, err := m.store.GetTask(m.ctx, taskID)
 	if err != nil {
 		return err
@@ -418,6 +533,19 @@ func (m *Manager) RetryTask(taskID int64) error {
 		return fmt.Errorf("only failed or cancelled tasks can be retried")
 	}
 
+	if record, e := m.completionRecord(taskID); e == nil && len(record.CompletionRefs) > 0 {
+		for i := range record.CompletionRefs {
+			record.CompletionRefs[i].State = "superseded"
+		}
+		record.ReasonCode = "explicit_retry"
+		if e = m.store.(*SQLiteStore).saveLibraryRecovery(m.ctx, record); e != nil {
+			return e
+		}
+	} else if e != nil {
+		if _, ok := m.store.(*SQLiteStore); ok {
+			return e
+		}
+	}
 	// 重置任务状态
 	task.Status = PipelineStatusPending
 	task.StartedAt = nil
@@ -443,7 +571,11 @@ func (m *Manager) RetryTask(taskID int64) error {
 
 // GetTask 获取任务详情
 func (m *Manager) GetTask(taskID int64) (*PipelineTask, error) {
-	return m.store.GetTask(m.ctx, taskID)
+	task, err := m.store.GetTask(m.ctx, taskID)
+	if err == nil {
+		task.LibraryRecovery = m.libraryTaskRecovery(taskID)
+	}
+	return task, err
 }
 
 // ListTasks 列出任务
@@ -453,6 +585,8 @@ func (m *Manager) ListTasks(filter TaskFilter) ([]*PipelineTask, error) {
 
 // DeleteTask 删除任务
 func (m *Manager) DeleteTask(taskID int64) error {
+	unlock := m.lockCompletionTask(taskID)
+	defer unlock()
 	// 不能删除运行中的任务
 	m.mu.RLock()
 	_, isRunning := m.runningTasks[taskID]

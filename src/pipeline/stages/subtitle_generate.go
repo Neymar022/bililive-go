@@ -2,6 +2,7 @@ package stages
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,13 +35,23 @@ func (s *SubtitleGenerateStage) Name() string {
 }
 
 func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []pipeline.FileInfo) ([]pipeline.FileInfo, error) {
+	cfg := configs.GetCurrentConfig()
+	enabled := cfg != nil && cfg.Subtitle.Enabled
+	if !enabled && ctx.SubtitleRecoveryRequired != nil {
+		required, err := ctx.SubtitleRecoveryRequired()
+		if err != nil {
+			return nil, err
+		}
+		if required {
+			return nil, pipeline.NewRetryLaterError(errors.New("subtitle_recovery_disabled"), 0)
+		}
+	}
 	if len(input) == 0 {
 		s.logs = "没有输入文件"
 		return input, nil
 	}
 
-	cfg := configs.GetCurrentConfig()
-	if cfg == nil || !cfg.Subtitle.Enabled {
+	if !enabled {
 		s.logs = "字幕功能未启用，跳过处理"
 		return input, nil
 	}
@@ -52,6 +63,9 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 	libraryRoot := cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath)
 	sourceRoot := cfg.Subtitle.GetEffectiveSourceRoot(cfg.OutPutPath)
 	sessionRecording := strings.TrimSpace(ctx.RecordInfo.LiveSessionID) != ""
+	if sessionRecording && ctx.Ctx != nil && ctx.Ctx.Err() != nil {
+		return nil, ctx.Ctx.Err()
+	}
 	if sessionRecording && (ctx.RecordInfo.RecordingProducerID == "" || ctx.SessionMediaReady == nil) {
 		return nil, errors.New("historical live session requires verified input closure migration")
 	}
@@ -124,6 +138,25 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		assPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".ass"
 		metadataPath := strings.TrimSuffix(libraryPath, filepath.Ext(libraryPath)) + ".subtitle.json"
 
+		var priorRef *pipeline.CompletionRef
+		if sessionRecording && ctx.SavedCompletions != nil {
+			refs, e := ctx.SavedCompletions()
+			if e != nil {
+				return nil, e
+			}
+			for i := range refs {
+				if refs[i].InputIndex == index && refs[i].State != "superseded" {
+					copy := refs[i]
+					priorRef = &copy
+					break
+				}
+			}
+			if priorRef != nil && priorRef.State != "queued_unsent" {
+				if e = s.acceptSavedCompletion(ctx, *priorRef); e != nil {
+					return nil, e
+				}
+			}
+		}
 		var completed subtitle.Metadata
 		var complete bool
 		if sessionRecording {
@@ -164,11 +197,36 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			continue
 		}
 
+		// failed只说明本地失败，不证明此前worker未接收；先允许上面的已确认结果领取。
+		// 无持久未发送证明时保守拒绝，禁止根据LastError或空attempt再次提交。
+		if sessionRecording && completed.Status == subtitle.StatusFailed {
+			return nil, errors.New("worker completion is unconfirmed; failed checkpoint recovery required")
+		}
+		if err := subtitle.CheckWorkerSubmissions(); err != nil {
+			return nil, pipeline.NewRetryLaterError(err, subtitleRetryLaterDelay())
+		}
+		useCompletion := sessionRecording && (subtitle.CompletionV1Enabled() || priorRef != nil)
+		if useCompletion {
+			if ctx.RegisterCompletion == nil {
+				return nil, errors.New("completion registration unavailable")
+			}
+			if err := subtitle.VerifyWorkerCompletionCapability(cfg.Subtitle.GetWorkerURL()); err != nil {
+				return nil, err
+			}
+		}
 		saveMetadata := subtitle.SaveMetadata
+		recordingWriter := saveMetadata
 		if sessionRecording {
 			saveMetadata, err = recordingMetadataWriter(metadataPath, completed)
 			if err != nil {
 				return nil, err
+			}
+		}
+		recordingWriter = saveMetadata
+		if sessionRecording && ctx.WithCompletionCommit != nil {
+			writer := saveMetadata
+			saveMetadata = func(path string, value subtitle.Metadata) error {
+				return ctx.WithCompletionCommit(nil, "", func() error { return writer(path, value) })
 			}
 		}
 		workerVideoPath, workerSRTPath := libraryPath, srtPath
@@ -183,7 +241,13 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			recordMeta["live_session_media_role"] = "segment"
 			recordMeta["recording_producer_id"] = ctx.RecordInfo.RecordingProducerID
 			recordMeta["pipeline_task_id"] = strconv.FormatInt(ctx.TaskID, 10)
-			attemptDir, err := os.MkdirTemp(filepath.Dir(libraryPath), ".attempt-*")
+			attemptDir := ""
+			var err error
+			if priorRef != nil {
+				attemptDir = priorRef.AttemptPath
+			} else {
+				attemptDir, err = os.MkdirTemp(filepath.Dir(libraryPath), ".attempt-*")
+			}
 			if err != nil {
 				return nil, err
 			}
@@ -205,10 +269,6 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			RendererStatus: subtitle.StatusRunning,
 			RecordMeta:     recordMeta,
 		}
-		if err := saveMetadata(metadataPath, metadata); err != nil {
-			return nil, err
-		}
-
 		request := subtitle.ProcessRequest{
 			SourcePath:      file.Path,
 			OutputVideoPath: workerVideoPath,
@@ -219,6 +279,37 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			RecordMeta:      recordMeta,
 		}
 		request.BurnStyle.Preset = preset
+
+		if useCompletion {
+			if priorRef != nil {
+				request.CompletionV1 = &priorRef.Request
+				if !subtitle.CompletionJSONEqual(request.RecordMeta, priorRef.Request.RecordMeta) || !subtitle.CompletionJSONEqual(map[string]any{"provider": request.Provider, "language": request.Language, "burn_style": request.BurnStyle}, priorRef.Request.RequestSnapshot) {
+					return nil, errors.New("completion retry request changed")
+				}
+			} else {
+				request.CompletionV1, err = subtitle.PrepareCompletionRequest(request, libraryPath, subtitle.WorkerCompletionOwner{TaskID: ctx.TaskID, SessionID: ctx.RecordInfo.LiveSessionID, ProducerID: ctx.RecordInfo.RecordingProducerID, InputIndex: index})
+				if err != nil {
+					return nil, err
+				}
+			}
+			protocol := request.CompletionV1
+			ref := pipeline.CompletionRef{InputIndex: index, Source: file.Path, FormalPath: libraryPath, AttemptPath: protocol.AttemptDirectory, RequestID: protocol.RequestID, RequestPath: filepath.Join(protocol.AttemptDirectory, "worker-request.json"), ReceiptPath: filepath.Join(protocol.AttemptDirectory, "worker-result.json"), Request: *protocol, RequestSnapshot: protocol.RequestSnapshot}
+			if err = ctx.RegisterCompletion(ref); err != nil {
+				return nil, err
+			}
+			priorRef = &ref
+		}
+		var sourceRevision, metadataRevision liveSessionFileRevision
+		if sessionRecording {
+			sourceRevision, err = captureLiveSessionFileRevision(file.Path, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := saveMetadata(metadataPath, metadata); err != nil {
+			return nil, err
+		}
+
 		maxAttempts := subtitle.DefaultProcessMaxAttempts
 		if sessionRecording {
 			// 网络结果不确定时保留独立 attempt，不盲目再次烧录。
@@ -226,9 +317,38 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		}
 		s.commands = append(s.commands, fmt.Sprintf("POST %s/api/v1/process (最多 %d 次尝试)", strings.TrimRight(cfg.Subtitle.GetWorkerURL(), "/"), maxAttempts))
 
+		if sessionRecording {
+			metadataRevision, err = captureLiveSessionFileRevision(metadataPath, true)
+			if err != nil {
+				return nil, err
+			}
+			if ctx.Ctx != nil && ctx.Ctx.Err() != nil {
+				return nil, ctx.Ctx.Err()
+			}
+		}
 		response, err := subtitle.ProcessFileWithRetry(cfg.Subtitle.GetWorkerURL(), request, maxAttempts)
 		if err != nil {
-			if subtitle.IsMacTranscriberUnavailable(err) {
+			if sessionRecording && (subtitle.IsWorkerRequestNotSent(err, request) || errors.Is(err, subtitle.ErrWorkerSubmissionsClosed)) {
+				if checkErr := checkUnsentRecordingCheckpoint(ctx, metadataPath, metadata, sourceRevision, &metadataRevision, request.CompletionV1); checkErr != nil {
+					return nil, checkErr
+				}
+				metadata.Status, metadata.RendererStatus = subtitle.StatusQueued, subtitle.StatusQueued
+				metadata.LastError, metadata.RendererError = err.Error(), err.Error()
+				metadata.SourceExists = true
+				if saveErr := saveMetadata(metadataPath, metadata); saveErr != nil {
+					return nil, saveErr
+				}
+				if checkErr := checkUnsentRecordingCheckpoint(ctx, metadataPath, metadata, sourceRevision, nil, request.CompletionV1); checkErr != nil {
+					return nil, checkErr
+				}
+				if request.CompletionV1 != nil && ctx.CompletionNotSent != nil {
+					if e := ctx.CompletionNotSent(request.CompletionV1.RequestID); e != nil {
+						return nil, e
+					}
+				}
+				return nil, pipeline.NewRetryLaterError(err, subtitleRetryLaterDelay())
+			}
+			if request.CompletionV1 == nil && subtitle.IsMacTranscriberUnavailable(err) {
 				metadata.Status = subtitle.StatusQueued
 				metadata.LastError = err.Error()
 				metadata.RendererStatus = subtitle.StatusQueued
@@ -254,6 +374,18 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 			return nil, err
 		}
 
+		if useCompletion {
+			if err = s.acceptSavedCompletion(ctx, *priorRef); err != nil {
+				return nil, err
+			}
+			accepted, e := subtitle.LoadMetadata(metadataPath)
+			if e != nil {
+				return nil, e
+			}
+			sessionSources = append(sessionSources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: libraryPath, MetadataPath: metadataPath})
+			output = append(output, pipeline.FileInfo{Path: libraryPath, Type: pipeline.FileTypeVideo, SourcePath: file.Path}, pipeline.FileInfo{Path: accepted.SRTPath, Type: pipeline.FileTypeOther, SourcePath: file.Path}, pipeline.FileInfo{Path: accepted.ASSPath, Type: pipeline.FileTypeOther, SourcePath: file.Path})
+			continue
+		}
 		now := time.Now().UTC()
 		metadata.Status = subtitle.StatusCompleted
 		metadata.LastError = ""
@@ -276,24 +408,33 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		metadata.CompletedAt = &now
 		metadata.SourceExists = fileExists(file.Path)
 		if sessionRecording {
-			staged, err := recordingAttemptMetadata(metadata)
+			commit := func() error {
+				staged, e := recordingAttemptMetadata(metadata)
+				if e != nil {
+					return e
+				}
+				if e = subtitle.SaveMetadata(strings.TrimSuffix(workerVideoPath, ".mp4")+".subtitle.json", staged); e != nil {
+					return e
+				}
+				if e = recordingWriter(metadataPath, metadata); e != nil {
+					return e
+				}
+				return promoteRecordingAttempt(metadata)
+			}
+			if ctx.WithCompletionCommit != nil {
+				err = ctx.WithCompletionCommit(nil, filepath.Dir(workerVideoPath), commit)
+			} else {
+				err = commit()
+			}
 			if err != nil {
-				return nil, err
-			}
-			if err := subtitle.SaveMetadata(strings.TrimSuffix(workerVideoPath, ".mp4")+".subtitle.json", staged); err != nil {
-				return nil, err
-			}
-		}
-		if err := saveMetadata(metadataPath, metadata); err != nil {
-			return nil, err
-		}
-
-		if sessionRecording {
-			if err := promoteRecordingAttempt(metadata); err != nil {
 				return nil, err
 			}
 			sessionSources = append(sessionSources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: libraryPath, MetadataPath: metadataPath})
 		} else {
+			if err = saveMetadata(metadataPath, metadata); err != nil {
+				return nil, err
+			}
+
 			s.deleteSourceAfterCompletion(cfg.Subtitle, libraryPath, sourceRoot, metadataPath, &metadata)
 			if err := s.syncKnowledge(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, libraryPath, metadataPath, &metadata); err != nil {
 				return nil, err
@@ -325,6 +466,68 @@ func (s *SubtitleGenerateStage) Execute(ctx *pipeline.PipelineContext, input []p
 		return s.publishCompletedSession(ctx, cfg.Subtitle.KnowledgeSync, libraryRoot, sessionSources)
 	}
 	return output, nil
+}
+
+// 只核本次明确未发送的会话；现有unknown仍先被loadRecordingCheckpoint拒绝。
+// work锁覆盖stage；writer自身负责metadata revision比较与原子保存。
+func checkUnsentRecordingCheckpoint(ctx *pipeline.PipelineContext, metadataPath string, expected subtitle.Metadata, source liveSessionFileRevision, revision *liveSessionFileRevision, protocol *subtitle.WorkerCompletionRequest) error {
+	if ctx.Ctx != nil && ctx.Ctx.Err() != nil {
+		return ctx.Ctx.Err()
+	}
+	if err := liveSessionFileUnchanged(expected.SourcePath, source); err != nil {
+		return err
+	}
+	if revision != nil {
+		if err := liveSessionFileUnchanged(metadataPath, *revision); err != nil {
+			return err
+		}
+	}
+	current, err := subtitle.LoadMetadata(metadataPath)
+	if err != nil {
+		return err
+	}
+	currentRecord, currentErr := json.Marshal(current.RecordMeta)
+	expectedRecord, expectedErr := json.Marshal(expected.RecordMeta)
+	if currentErr != nil || expectedErr != nil || string(currentRecord) != string(expectedRecord) || current.Status != expected.Status || current.RendererStatus != expected.RendererStatus || current.SourcePath != expected.SourcePath || current.OutputPath != expected.OutputPath || current.SRTPath != expected.SRTPath || current.ASSPath != expected.ASSPath {
+		return errors.New("recording checkpoint changed before unsent deferral")
+	}
+	attempt, err := validatedRecordingAttemptPath(expected)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(filepath.Dir(attempt))
+	if err != nil {
+		return err
+	}
+	if protocol == nil && len(entries) != 0 {
+		return errors.New("recording attempt gained a result before unsent deferral")
+	}
+	// 只在本次私有未发送证明成立后，允许预置 request/锁；它们不能证明普通 unknown 未发送。
+	if protocol != nil {
+		if protocol.AttemptDirectory != filepath.Dir(attempt) || !subtitle.CompletionJSONEqual(protocol.RecordMeta, expected.RecordMeta) {
+			return errors.New("completion unsent request mismatch")
+		}
+		for _, entry := range entries {
+			if entry.Name() != "worker-request.json" && entry.Name() != ".worker.lock" {
+				return errors.New("recording attempt gained a result before unsent deferral")
+			}
+			info, e := os.Lstat(filepath.Join(protocol.AttemptDirectory, entry.Name()))
+			if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 {
+				return errors.New("completion unsent proof file changed")
+			}
+		}
+		data, e := os.ReadFile(filepath.Join(protocol.AttemptDirectory, "worker-request.json"))
+		var saved subtitle.WorkerCompletionRequest
+		if e != nil || json.Unmarshal(data, &saved) != nil || !subtitle.CompletionJSONEqual(saved, protocol) {
+			return errors.New("completion unsent request changed")
+		}
+	}
+	for _, path := range []string{expected.OutputPath, expected.SRTPath, expected.ASSPath} {
+		if _, err := os.Lstat(path); !os.IsNotExist(err) {
+			return errors.New("recording output changed before unsent deferral")
+		}
+	}
+	return nil
 }
 
 func loadCompletedSubtitleMetadata(metadataPath, libraryPath, srtPath, assPath string) (subtitle.Metadata, bool) {

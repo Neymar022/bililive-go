@@ -320,6 +320,18 @@ func libraryEpisodeStem(name string) (string, bool) {
 }
 
 func compatibleEpisodeOrdinalForRecordedAt(dir string, recordedAt time.Time, existingPath ...string) (int64, error) {
+	if len(existingPath) == 0 {
+		if enabled, err := LibraryAppendEnabled(canonicalLibrarySeason(dir)); err != nil {
+			return 0, err
+		} else if enabled {
+			return 0, errors.New("append writer requires durable assignment before new publication")
+		}
+	}
+	if len(existingPath) > 0 {
+		if ordinal, enabled, err := AssignmentOrdinal(canonicalLibrarySeason(dir), existingPath[0]); enabled {
+			return ordinal, err
+		}
+	}
 	if recordedAt.IsZero() {
 		return 0, errors.New("no reliable recording start time")
 	}
@@ -1035,8 +1047,14 @@ func EnsureLibrarySidecars(ctx context.Context, sourcePath, libraryPath, fallbac
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	unlock := lockLibraryPath(&libraryEpisodePublishLocks, filepath.Dir(libraryPath))
+	unlock, lockErr := LockLibraryPublicationContext(ctx, libraryPath)
+	if lockErr != nil {
+		return lockErr
+	}
 	defer unlock()
+	if err := AssertLibraryPublicationReady(libraryPath); err != nil {
+		return err
+	}
 	meta, ok := parseLibraryEpisodeFilename(libraryPath)
 	if !ok {
 		meta = parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
@@ -1333,8 +1351,14 @@ func EnsureLibraryHardlink(ctx context.Context, sourcePath, libraryRoot, fallbac
 	meta := parseSourceFilename(sourcePath, fallbackHost, fallbackTime)
 
 	seasonDir := filepath.Join(libraryRoot, meta.aliasName, "Season 01")
-	unlock := lockLibraryPath(&libraryEpisodePublishLocks, seasonDir)
+	unlock, lockErr := LockLibraryPublicationContext(ctx, filepath.Join(seasonDir, ".publication"))
+	if lockErr != nil {
+		return "", lockErr
+	}
 	defer unlock()
+	if err := AssertLibraryPublicationReady(filepath.Join(seasonDir, ".publication")); err != nil {
+		return "", err
+	}
 
 	// Step 0: if a completed subtitle sidecar already records this source path,
 	// prefer its rendered output. Burning usually replaces the hardlink inode, so

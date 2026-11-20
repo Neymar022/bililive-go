@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/pipeline"
 	"github.com/bililive-go/bililive-go/src/subtitle"
 )
@@ -44,6 +45,27 @@ func validateCompletedCheckpoint(metadata subtitle.Metadata, path string) error 
 }
 
 func loadRecordingCheckpoint(ctx *pipeline.PipelineContext, source, path string) (subtitle.Metadata, bool, error) {
+	if ctx.WithCompletionCommit == nil {
+		return loadRecordingCheckpointUnlocked(ctx, source, path)
+	}
+	var metadata subtitle.Metadata
+	var complete bool
+	attempt := ""
+	if previous, err := subtitle.LoadMetadata(strings.TrimSuffix(path, ".mp4") + ".subtitle.json"); err == nil && previous.RecordMeta["recording_attempt_path"] != nil {
+		p, e := validatedRecordingAttemptPath(previous)
+		if e != nil {
+			return previous, false, e
+		}
+		attempt = filepath.Dir(p)
+	}
+	err := ctx.WithCompletionCommit(nil, attempt, func() error {
+		var err error
+		metadata, complete, err = loadRecordingCheckpointUnlocked(ctx, source, path)
+		return err
+	})
+	return metadata, complete, err
+}
+func loadRecordingCheckpointUnlocked(ctx *pipeline.PipelineContext, source, path string) (subtitle.Metadata, bool, error) {
 	stem := strings.TrimSuffix(path, filepath.Ext(path))
 	metadataPath := stem + ".subtitle.json"
 	_, err := os.Lstat(metadataPath)
@@ -237,4 +259,198 @@ func promoteRecordingAttempt(metadata subtitle.Metadata) error {
 		return err
 	}
 	return validateCompletedCheckpoint(metadata, metadata.OutputPath)
+}
+
+// acceptSavedCompletion 只能在 work→task→attempt→DB 守卫内写文件，正常 HTTP 和后台复用。
+func (s *SubtitleGenerateStage) acceptSavedCompletion(ctx *pipeline.PipelineContext, ref pipeline.CompletionRef) error {
+	if ctx.WithCompletionCommit == nil {
+		return fmt.Errorf("completion commit guard unavailable")
+	}
+	return ctx.WithCompletionCommit(&ref, ref.AttemptPath, func() error {
+		cfg := configs.GetCurrentConfig()
+		if cfg == nil {
+			return fmt.Errorf("completion config unavailable")
+		}
+		style := cfg.Subtitle.BurnStyle
+		style.Preset = subtitle.ResolveRenderPreset(s.config.GetStringOption("preset", ""), "", style)
+		snapshot := map[string]any{"provider": s.config.GetStringOption("provider", cfg.Subtitle.DefaultProvider), "language": s.config.GetStringOption("language", cfg.Subtitle.Language), "burn_style": style}
+		if !subtitle.CompletionJSONEqual(snapshot, ref.RequestSnapshot) {
+			return fmt.Errorf("completion request config changed")
+		}
+		receipt, err := subtitle.ReadWorkerCompletion(ref.Request)
+		if err != nil {
+			return err
+		}
+		path := strings.TrimSuffix(ref.FormalPath, ".mp4") + ".subtitle.json"
+		metadata, err := subtitle.LoadMetadata(path)
+		missing := os.IsNotExist(err)
+		if os.IsNotExist(err) {
+			metadata = subtitle.Metadata{SourcePath: ref.Source, OutputPath: ref.FormalPath, SRTPath: strings.TrimSuffix(ref.FormalPath, ".mp4") + ".srt", ASSPath: strings.TrimSuffix(ref.FormalPath, ".mp4") + ".ass", RecordMeta: ref.Request.RecordMeta}
+			err = nil
+		}
+		if err != nil {
+			return err
+		}
+		if metadata.SourcePath != ref.Source || metadata.OutputPath != ref.FormalPath || !subtitle.CompletionJSONEqual(metadata.RecordMeta, ref.Request.RecordMeta) {
+			return fmt.Errorf("completion checkpoint owner changed")
+		}
+		if metadata.Status == subtitle.StatusCompleted {
+			if !subtitle.CompletionJSONEqual(metadata.Segments, receipt.Response.Segments) || metadata.ActualProvider != receipt.Response.ActualProvider || metadata.ActualModel != receipt.Response.ActualModel || metadata.ActualBurnProvider != receipt.Response.ActualBurnProvider || metadata.RenderPreset != receipt.Response.RenderPreset || metadata.CompletedAt == nil || !metadata.CompletedAt.Equal(receipt.CompletedAt) {
+				return fmt.Errorf("completion completed checkpoint differs from receipt")
+			}
+			return promoteRecordingAttempt(metadata)
+		}
+		expected := metadata
+		if missing {
+			expected = subtitle.Metadata{}
+		}
+		writer, err := recordingMetadataWriter(path, expected)
+		if err != nil {
+			return err
+		}
+		response := receipt.Response
+		metadata.Status = subtitle.StatusCompleted
+		metadata.RendererStatus = subtitle.StatusCompleted
+		metadata.LastError = ""
+		metadata.RendererError = ""
+		metadata.SourceExists = true
+		metadata.Provider, _ = ref.Request.RequestSnapshot["provider"].(string)
+		metadata.Language, _ = ref.Request.RequestSnapshot["language"].(string)
+		metadata.RenderPreset = response.RenderPreset
+		metadata.ActualProvider = response.ActualProvider
+		metadata.ActualModel = response.ActualModel
+		metadata.ActualBurnProvider = response.ActualBurnProvider
+		metadata.Segments = response.Segments
+		metadata.CompletedAt = &receipt.CompletedAt
+		metadata.UpdatedAt = receipt.CompletedAt
+		if metadata.CreatedAt.IsZero() {
+			metadata.CreatedAt = receipt.CompletedAt
+		}
+		staged, err := recordingAttemptMetadata(metadata)
+		if err != nil {
+			return err
+		}
+		if err = subtitle.DurableCompletionJSON(strings.TrimSuffix(ref.Request.OutputVideoPath, ".mp4")+".subtitle.json", staged); err != nil {
+			return err
+		}
+		if err = writer(path, metadata); err != nil {
+			return err
+		}
+		return promoteRecordingAttempt(metadata)
+	})
+}
+
+func (s *SubtitleGenerateStage) ReconcileSavedCompletion(ctx *pipeline.PipelineContext, input []pipeline.FileInfo) (pipeline.CompletionReconcileResult, error) {
+	result := pipeline.CompletionReconcileResult{AllInputsComplete: true}
+	if ctx.SavedCompletions == nil {
+		return result, fmt.Errorf("completion refs unavailable")
+	}
+	refs, err := ctx.SavedCompletions()
+	if err != nil {
+		return result, err
+	}
+	var first error
+	for index, file := range input {
+		if file.Type != pipeline.FileTypeVideo {
+			continue
+		}
+		if !strings.EqualFold(filepath.Ext(file.Path), ".mp4") {
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			if first == nil {
+				first = fmt.Errorf("completion input requires mp4")
+			}
+			continue
+		}
+		var ref *pipeline.CompletionRef
+		for i := range refs {
+			if refs[i].InputIndex == index && refs[i].State != "superseded" {
+				ref = &refs[i]
+				break
+			}
+		}
+		if ref == nil {
+			cfg := configs.GetCurrentConfig()
+			if cfg == nil {
+				return result, fmt.Errorf("completion config unavailable")
+			}
+			path, e := subtitle.ExistingRecordingWorkPath(cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath), ctx.RecordInfo.LiveSessionID, ctx.TaskID, index, file.Path, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime)
+			if e == nil {
+				release, locked := subtitle.TryLockRecordingWork(path)
+				if locked {
+					metadata, complete, loadErr := loadRecordingCheckpoint(ctx, file.Path, path)
+					release()
+					if loadErr == nil && complete {
+						result.Sources = append(result.Sources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: path, MetadataPath: strings.TrimSuffix(metadata.OutputPath, ".mp4") + ".subtitle.json"})
+						continue
+					}
+				}
+			}
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			continue
+		}
+		if ref.State == "queued_unsent" {
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			continue
+		}
+		cfg := configs.GetCurrentConfig()
+		if cfg == nil {
+			return result, fmt.Errorf("completion config unavailable")
+		}
+		style := cfg.Subtitle.BurnStyle
+		style.Preset = subtitle.ResolveRenderPreset(s.config.GetStringOption("preset", ""), "", style)
+		snapshot := map[string]any{"provider": s.config.GetStringOption("provider", cfg.Subtitle.DefaultProvider), "language": s.config.GetStringOption("language", cfg.Subtitle.Language), "burn_style": style}
+		if !subtitle.CompletionJSONEqual(snapshot, ref.RequestSnapshot) {
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			if first == nil {
+				first = fmt.Errorf("completion request config changed")
+			}
+			continue
+		}
+		release, locked := subtitle.TryLockRecordingWork(ref.FormalPath)
+		if !locked {
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			continue
+		}
+		err = s.acceptSavedCompletion(ctx, *ref)
+		release()
+		if err != nil {
+			if first == nil {
+				first = err
+			}
+			result.AllInputsComplete = false
+			result.BlockingInputs = append(result.BlockingInputs, index)
+			continue
+		}
+		result.Sources = append(result.Sources, pipeline.SessionMediaSource{InputPath: file.Path, LibraryPath: ref.FormalPath, MetadataPath: strings.TrimSuffix(ref.FormalPath, ".mp4") + ".subtitle.json"})
+	}
+	return result, first
+}
+
+// HasCompletedInputs 只读取已完成前像，不写 metadata、不 promotion、不访问 worker。
+func (s *SubtitleGenerateStage) HasCompletedInputs(ctx *pipeline.PipelineContext, input []pipeline.FileInfo) bool {
+	cfg := configs.GetCurrentConfig()
+	if cfg == nil || ctx.RecordInfo.LiveSessionID == "" {
+		return false
+	}
+	found := false
+	for index, file := range input {
+		if file.Type != pipeline.FileTypeVideo {
+			continue
+		}
+		found = true
+		path, err := subtitle.ExistingRecordingWorkPath(cfg.Subtitle.GetEffectiveLibraryRoot(cfg.OutPutPath), ctx.RecordInfo.LiveSessionID, ctx.TaskID, index, file.Path, ctx.RecordInfo.HostName, ctx.RecordInfo.StartTime)
+		if err != nil {
+			return false
+		}
+		metadata, err := subtitle.LoadMetadata(strings.TrimSuffix(path, ".mp4") + ".subtitle.json")
+		if err != nil || metadata.SourcePath != file.Path || metadata.RecordMeta["live_session_id"] != ctx.RecordInfo.LiveSessionID || metadata.RecordMeta["recording_producer_id"] != ctx.RecordInfo.RecordingProducerID || metadata.RecordMeta["pipeline_task_id"] != strconv.FormatInt(ctx.TaskID, 10) || validateCompletedCheckpoint(metadata, path) != nil {
+			return false
+		}
+	}
+	return found
 }

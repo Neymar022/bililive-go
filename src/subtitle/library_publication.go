@@ -1,6 +1,7 @@
 package subtitle
 
 import (
+	"context"
 	"encoding/xml"
 	"fmt"
 	"os"
@@ -16,11 +17,33 @@ func LockLibraryPublication(libraryPath string) func() {
 	return lockLibraryPath(&libraryEpisodePublishLocks, filepath.Dir(libraryPath))
 }
 
+// LockLibraryPublicationContext 为所有真实 writer 取得 OS 锁，再取得既有 Season 锁。
+func LockLibraryPublicationContext(ctx context.Context, libraryPath string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	osUnlock, err := libraryPublicationOSLock(ctx, filepath.Dir(libraryPath))
+	if err != nil {
+		return nil, err
+	}
+	unlock := LockLibraryPublication(libraryPath)
+	return func() { unlock(); osUnlock() }, nil
+}
+
 // ValidatePublishedLibraryEpisode 在重用成品前核对媒体、身份及合集集号。
 func ValidatePublishedLibraryEpisode(path string) error {
-	_, recordedAt, err := publishedEpisodeMetadata(path, episodeIdentityFromLibraryPath(path))
+	ordinal, recordedAt, err := publishedEpisodeMetadata(path, episodeIdentityFromLibraryPath(path))
 	if err != nil {
 		return err
+	}
+	if assigned, enabled, e := AssignmentOrdinal(canonicalLibrarySeason(filepath.Dir(path)), path); enabled {
+		if e != nil {
+			return e
+		}
+		if assigned != ordinal {
+			return fmt.Errorf("published ordinal differs from assignment: %s", path)
+		}
+		return nil
 	}
 	_, err = compatibleEpisodeOrdinalForRecordedAt(filepath.Dir(path), recordedAt, path)
 	return err
@@ -102,4 +125,20 @@ func publishedEpisodeMetadata(mediaPath string, identity int64) (int64, time.Tim
 		return 0, time.Time{}, fmt.Errorf("published NFO identity mismatch: %s", mediaPath)
 	}
 	return nfo.Episode, recordedAt, nil
+}
+
+func canonicalLibrarySeason(path string) string {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	for parent, suffix := key, ""; ; parent = filepath.Dir(parent) {
+		if resolved, e := filepath.EvalSymlinks(parent); e == nil {
+			return filepath.Join(resolved, suffix)
+		}
+		if filepath.Dir(parent) == parent {
+			return key
+		}
+		suffix = filepath.Join(filepath.Base(parent), suffix)
+	}
 }
