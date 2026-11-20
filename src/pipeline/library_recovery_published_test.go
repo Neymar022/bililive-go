@@ -25,6 +25,7 @@ func publishedRecoveryFixture(t *testing.T, completedSibling ...bool) (*Manager,
 	library := filepath.Join(root, "video")
 	require.NoError(t, os.MkdirAll(filepath.Join(library, "Host", "Season 01"), 0755))
 	cfg := configs.NewConfig()
+	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = library
 	cfg.Subtitle.Schedule.Enabled = false
 	previous := configs.GetCurrentConfig()
@@ -126,6 +127,13 @@ func TestAutomaticRecoveryResumesPublishedMissingSource(t *testing.T) {
 	require.Equal(t, "已发布成品", string(data))
 	// 发布前正式门禁也要通过；只替换只读索引观察，不替换文件校验。
 	library := configs.GetCurrentConfig().Subtitle.LibraryRoot
+	writePublishedRecoveryCapability(t, library)
+	m.SetLibraryIndexObserver(fixtureIndexObserver{})
+	require.NoError(t, m.EnsureLibraryPublication(context.Background(), LibraryPublicationRequest{TaskID: task.ID, LibraryRoot: library, Path: product.OutputPath, SessionID: "42", RecordedAt: task.RecordInfo.StartTime, Phase: "before"}))
+}
+
+func writePublishedRecoveryCapability(t *testing.T, library string) {
+	t.Helper()
 	state, err := subtitle.CaptureLibraryFileState(library, false)
 	require.NoError(t, err)
 	capability := map[string]any{"schema_version": 2, "canonical_library_root": library, "library_dev": state.Device, "library_inode": state.Inode, "service_uid": os.Geteuid(), "service_gid": os.Getegid(), "mode": "exclusive_application_nfo_writer", "platform_build_path": subtitle.LibraryPlatformBuildPath, "platform_build_sha256": strings.Repeat("b", 64), "installed_at": time.Now().Format(time.RFC3339Nano), "probe_evidence_sha256": strings.Repeat("a", 64), "library_attributes": state}
@@ -133,8 +141,78 @@ func TestAutomaticRecoveryResumesPublishedMissingSource(t *testing.T) {
 	encoded, err := json.Marshal(capability)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(subtitle.LibraryRecoveryRoot(library), "capability.json"), encoded, 0600))
-	m.SetLibraryIndexObserver(fixtureIndexObserver{})
-	require.NoError(t, m.EnsureLibraryPublication(context.Background(), LibraryPublicationRequest{TaskID: task.ID, LibraryRoot: library, Path: product.OutputPath, SessionID: "42", RecordedAt: task.RecordInfo.StartTime, Phase: "before"}))
+}
+
+type heldPublicationIndexObserver struct {
+	mapping LibraryIndexMapping
+}
+
+func (o heldPublicationIndexObserver) VerifyPublication(ctx context.Context, expected LibraryIndexExpected) (LibraryIndexObservation, error) {
+	result, err := (fixtureIndexObserver{}).VerifyPublication(ctx, expected)
+	result.Mappings = []LibraryIndexMapping{o.mapping}
+	return result, err
+}
+
+func TestExplicitHoldRetainsCapturedPublicationBaseline(t *testing.T) {
+	m, store, task, product := publishedRecoveryFixture(t)
+	ctx := context.Background()
+	library := configs.GetCurrentConfig().Subtitle.LibraryRoot
+	writePublishedRecoveryCapability(t, library)
+	// 旧 NFO 缺少稳定身份，正式 before 必须进入原位修复并把索引基线写入任务记录。
+	stem := strings.TrimSuffix(product.OutputPath, ".mp4")
+	product.RecordMeta["start_time"] = task.RecordInfo.StartTime.Format(time.RFC3339Nano)
+	require.NoError(t, subtitle.SaveMetadata(stem+".subtitle.json", product))
+	require.NoError(t, os.WriteFile(stem+".nfo", []byte("<episodedetails><season>1</season><episode>1</episode></episodedetails>"), 0644))
+
+	at := task.RecordInfo.StartTime.Add(24 * time.Hour)
+	identity := (at.UnixMicro() - 1577836800000000) * 8
+	season := filepath.Dir(product.OutputPath)
+	req := LibraryPublicationRequest{
+		TaskID: task.ID, LibraryRoot: library, Path: filepath.Join(season, fmt.Sprintf("Host.S01E%d.%s - Next.mp4", identity, at.Format("2006-01-02"))),
+		SessionID: task.RecordInfo.LiveSessionID, RecordedAt: at, Phase: "before",
+	}
+	mapping := LibraryIndexMapping{Path: product.OutputPath, FileID: "11", EpisodeID: "12", ShowID: "13", SeasonID: "14", CategoryID: "15", LibraryID: "16", Ordinal: 1, SeasonNumber: 1}
+	m.SetLibraryIndexObserver(heldPublicationIndexObserver{mapping: mapping})
+	due := at.Add(time.Hour)
+	task.Status, task.NotBefore, task.ErrorMessage = PipelineStatusPending, &due, ""
+	require.NoError(t, store.UpdateTask(ctx, task))
+	held, err := m.GetTask(task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "deadline", held.LibraryRecovery.State)
+	require.False(t, held.LibraryRecovery.BeforeCaptured)
+	_, err = subtitle.BuildLibraryEpisodeNFO(req.Path, req.RecordedAt, "")
+	require.ErrorContains(t, err, "published NFO identity mismatch")
+
+	unlock, err := subtitle.LockLibraryPublicationContext(ctx, req.Path)
+	require.NoError(t, err)
+	err = m.EnsureLibraryPublication(ctx, req)
+	unlock()
+	require.NoError(t, err)
+	captured, err := m.GetTask(task.ID)
+	require.NoError(t, err)
+	baseline := captured.LibraryRecovery
+	require.Equal(t, "deadline", baseline.State)
+	require.True(t, baseline.BeforeCaptured)
+	require.Equal(t, []LibraryIndexMapping{mapping}, baseline.Expected.Protected)
+
+	task.Status, task.ErrorMessage = PipelineStatusFailed, "published NFO identity mismatch"
+	require.NoError(t, store.UpdateTask(ctx, task))
+	m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Now: func() time.Time { return due }})
+	m.compensateLibraryFailures()
+
+	require.NoError(t, store.Close())
+	reopened, err := NewSQLiteStore(filepath.Join(filepath.Dir(library), "pipeline.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { reopened.Close() })
+	got, err := NewManager(ctx, reopened, nil, nil).GetTask(task.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LibraryRecovery)
+	t.Logf("持久保护映射数 %d → %d，恢复状态 %s → %s", len(baseline.Expected.Protected), len(got.LibraryRecovery.Expected.Protected), baseline.State, got.LibraryRecovery.State)
+	require.Equal(t, []LibraryIndexMapping{mapping}, got.LibraryRecovery.Expected.Protected)
+	require.True(t, got.LibraryRecovery.BeforeCaptured)
+	require.Equal(t, baseline, got.LibraryRecovery)
+	require.Equal(t, PipelineStatusFailed, got.Status)
+	require.True(t, got.NotBefore.Equal(due))
 }
 
 func TestPublishedMissingSourceRejectsUnprovenDiscovery(t *testing.T) {
@@ -213,9 +291,10 @@ func TestPublishedMissingSourceEvidenceChangesPreventResumeAndPublication(t *tes
 			require.NoError(t, err)
 			require.Equal(t, PipelineStatusFailed, got.Status)
 			want := "protected_source_changed"
-			if damage == "source_reappeared" || damage == "source_symlink" {
+			switch damage {
+			case "source_reappeared", "source_symlink":
 				want = "published_source_reappeared_or_unreadable"
-			} else if damage == "parent_symlink" {
+			case "parent_symlink":
 				want = "published_source_parent_changed"
 			}
 			require.ErrorContains(t, m.EnsureLibraryPublication(context.Background(), LibraryPublicationRequest{TaskID: task.ID, LibraryRoot: configs.GetCurrentConfig().Subtitle.LibraryRoot, Path: product.OutputPath, SessionID: "42", RecordedAt: task.RecordInfo.StartTime, Phase: "before"}), want)
@@ -224,31 +303,125 @@ func TestPublishedMissingSourceEvidenceChangesPreventResumeAndPublication(t *tes
 }
 
 func TestPublishedMissingSourcePreservesHoldAndCancellation(t *testing.T) {
-	for _, cancel := range []bool{false, true} {
-		t.Run(fmt.Sprint(cancel), func(t *testing.T) {
-			m, store, task, _ := publishedRecoveryFixture(t)
-			due := time.Now().Add(24 * time.Hour).UTC()
-			task.NotBefore = &due
-			require.NoError(t, store.UpdateTask(context.Background(), task))
-			m.compensateLibraryFailures()
-			if cancel {
-				require.NoError(t, m.CancelTask(task.ID))
+	for _, scenario := range []string{"due", "cancelled", "disabled", "extended", "ordinary_failure", "compute_deadline", "next_window", "missing_proof"} {
+		t.Run(scenario, func(t *testing.T) {
+			m, store, task, product := publishedRecoveryFixture(t)
+			ctx := context.Background()
+			now := time.Date(2026, 9, 6, 8, 0, 0, 0, time.UTC)
+			due := now.Add(time.Hour)
+			if scenario == "ordinary_failure" {
+				task.ErrorMessage = "non-publication failure"
 			}
-			m.compensateLibraryFailures()
+			if scenario == "next_window" {
+				cfg := configs.GetCurrentConfig()
+				cfg.Subtitle.Schedule = configs.SubtitleScheduleConfig{Enabled: true, RunAt: "10:00"}
+			}
+			if scenario == "missing_proof" {
+				require.NoError(t, os.Remove(product.OutputPath))
+			}
+			task.NotBefore = &due
+			require.NoError(t, store.UpdateTask(ctx, task))
+			if scenario == "compute_deadline" {
+				tx, err := store.db.BeginTx(ctx, nil)
+				require.NoError(t, err)
+				defer tx.Rollback()
+				require.NoError(t, saveCompletionDeadlineTx(ctx, tx, task.ID, &due, &due, "compute_due", due))
+				require.NoError(t, tx.Commit())
+			}
+			m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Now: func() time.Time { return now }})
 			got, err := m.GetTask(task.ID)
 			require.NoError(t, err)
-			require.True(t, got.NotBefore.Equal(due))
-			if cancel {
-				require.Equal(t, PipelineStatusCancelled, got.Status)
-			} else {
-				require.Equal(t, PipelineStatusFailed, got.Status)
-				m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Now: func() time.Time { return due.Add(time.Second) }})
+			holdOnly := got.LibraryRecovery
+			require.NotNil(t, holdOnly)
+			require.Equal(t, "deadline", holdOnly.State)
+			require.Equal(t, "deadline", holdOnly.RecoveryClass)
+			require.True(t, holdOnly.Deadline.ExplicitHold.Equal(due))
+
+			m.compensateLibraryFailures()
+			got, err = m.GetTask(task.ID)
+			require.NoError(t, err)
+			require.Equal(t, PipelineStatusFailed, got.Status)
+			if scenario == "ordinary_failure" || scenario == "missing_proof" || scenario == "compute_deadline" {
+				now = due.Add(2 * time.Hour)
 				m.compensateLibraryFailures()
 				got, err = m.GetTask(task.ID)
 				require.NoError(t, err)
-				require.Equal(t, PipelineStatusPending, got.Status)
-				require.False(t, got.NotBefore.Before(due))
+				require.Equal(t, PipelineStatusFailed, got.Status)
+				require.Equal(t, holdOnly, got.LibraryRecovery)
+				return
 			}
+			waiting := got.LibraryRecovery
+			require.Equal(t, "waiting", waiting.State)
+			require.Equal(t, holdOnly.Revision+1, waiting.Revision)
+			require.Equal(t, holdOnly.Deadline, waiting.Deadline)
+			require.Equal(t, []string{task.CurrentFiles[0].Path}, waiting.PublishedMissingSources)
+			require.NotEmpty(t, waiting.ProtectedSources)
+
+			now = due.Add(-time.Second)
+			m.compensateLibraryFailures()
+			got, err = m.GetTask(task.ID)
+			require.NoError(t, err)
+			require.Equal(t, PipelineStatusFailed, got.Status)
+			require.True(t, got.NotBefore.Equal(due))
+			require.Equal(t, waiting.Revision, got.LibraryRecovery.Revision)
+
+			now = due.Add(time.Second)
+			switch scenario {
+			case "cancelled":
+				require.NoError(t, m.CancelTask(task.ID))
+				m.compensateLibraryFailures()
+				got, err = m.GetTask(task.ID)
+				require.NoError(t, err)
+				require.Equal(t, PipelineStatusCancelled, got.Status)
+				require.True(t, got.NotBefore.Equal(due))
+				return
+			case "disabled":
+				configs.GetCurrentConfig().Subtitle.Enabled = false
+				m.compensateLibraryFailures()
+				got, err = m.GetTask(task.ID)
+				require.NoError(t, err)
+				require.Equal(t, PipelineStatusFailed, got.Status)
+				require.Equal(t, waiting.Revision, got.LibraryRecovery.Revision)
+				return
+			case "extended":
+				extended := due.Add(time.Hour)
+				m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Now: func() time.Time { return now }, Boundary: func(point string) error {
+					if point == "resume_requested" {
+						current, err := store.GetTask(ctx, task.ID)
+						require.NoError(t, err)
+						current.NotBefore = &extended
+						require.NoError(t, store.UpdateTask(ctx, current))
+					}
+					return nil
+				}})
+				m.compensateLibraryFailures()
+				got, err = m.GetTask(task.ID)
+				require.NoError(t, err)
+				require.Equal(t, PipelineStatusFailed, got.Status)
+				require.True(t, got.NotBefore.Equal(extended))
+				require.True(t, got.LibraryRecovery.Deadline.ExplicitHold.Equal(extended))
+				require.Equal(t, waiting.ProtectedSources, got.LibraryRecovery.ProtectedSources)
+				due = extended
+				now = extended
+				m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Now: func() time.Time { return now }})
+			case "next_window":
+				window := due.Add(time.Hour)
+				require.True(t, waiting.NextAttempt.Equal(window))
+				m.compensateLibraryFailures()
+				got, err = m.GetTask(task.ID)
+				require.NoError(t, err)
+				require.Equal(t, PipelineStatusFailed, got.Status)
+				require.Equal(t, waiting.Revision, got.LibraryRecovery.Revision)
+				now = window
+			}
+			m.compensateLibraryFailures()
+			got, err = m.GetTask(task.ID)
+			require.NoError(t, err)
+			require.Equal(t, PipelineStatusPending, got.Status)
+			require.False(t, got.NotBefore.Before(due))
+			require.Equal(t, "resumed", got.LibraryRecovery.State)
+			require.Equal(t, waiting.ProtectedSources, got.LibraryRecovery.ProtectedSources)
+			t.Logf("持久状态 %s → %s → %s，任务 %s", holdOnly.State, waiting.State, got.LibraryRecovery.State, got.Status)
 		})
 	}
 }

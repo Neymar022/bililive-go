@@ -91,7 +91,7 @@ func (s *SQLiteStore) saveLibraryRecovery(ctx context.Context, r *LibraryRecover
 		_, err = s.db.ExecContext(ctx, `INSERT INTO pipeline_library_recoveries(operation_id,kind,season,task_id,state,active,revision,record_json) VALUES(?,?,?,?,?,?,?,?)`, r.OperationID, r.Kind, r.Season, r.TaskID, r.State, r.Active, copy.Revision, string(data))
 	} else {
 		var result sql.Result
-		result, err = s.db.ExecContext(ctx, `UPDATE pipeline_library_recoveries SET state=?,active=?,revision=?,record_json=? WHERE operation_id=? AND revision=?`, r.State, r.Active, copy.Revision, string(data), r.OperationID, r.Revision)
+		result, err = s.db.ExecContext(ctx, `UPDATE pipeline_library_recoveries SET season=?,state=?,active=?,revision=?,record_json=? WHERE operation_id=? AND revision=?`, r.Season, r.State, r.Active, copy.Revision, string(data), r.OperationID, r.Revision)
 		if err == nil {
 			n, _ := result.RowsAffected()
 			if n != 1 {

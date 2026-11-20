@@ -844,17 +844,29 @@ func (m *Manager) compensateLibraryFailures() {
 	library, _ = filepath.Abs(library)
 	now := m.recoveryNow()
 	for _, task := range tasks {
-		if old := byTask[task.ID]; old != nil && (old.InvalidJournal || old.RecoveryClass == "worker_completion" || old.RecoveryClass == "deadline" || old.RecoveryClass == "completed_media") {
+		r := byTask[task.ID]
+		if r != nil && (r.InvalidJournal || r.RecoveryClass == "worker_completion" || r.RecoveryClass == "completed_media") {
 			continue
+		}
+		deadlineOnly := r != nil && r.RecoveryClass == "deadline" && r.State == "deadline"
+		if r != nil && r.RecoveryClass == "deadline" {
+			// 显式等待可以附在库恢复上。计算、重试、回执和媒体归各自的恢复入口。
+			d := r.Deadline
+			if d == nil || d.ComputeDue != nil || d.RetryDue != nil ||
+				r.CompletionSchema != 0 || len(r.CompletionRefs) != 0 || len(r.CompletedSources) != 0 || r.AggregateCompute != nil ||
+				(deadlineOnly && (d.ExplicitHold == nil || r.BeforeCaptured)) {
+				continue
+			}
 		}
 		if !task.CanRetry || task.RecordInfo.LiveSessionID == "" || task.RecordInfo.RecordingProducerID == "" || task.CurrentStage < 0 || task.PipelineConfig == nil || task.CurrentStage >= len(task.PipelineConfig.Stages) || task.PipelineConfig.Stages[task.CurrentStage].Name != StageNameSubtitleGenerate {
 			continue
 		}
-		appendMode, appendErr := subtitle.LibraryAppendEnabled(m.taskLibrarySeason(task, library))
+		season := m.taskLibrarySeason(task, library)
+		appendMode, appendErr := subtitle.LibraryAppendEnabled(season)
 		if appendErr != nil {
 			continue
 		}
-		if !appendMode && byTask[task.ID] == nil && !strings.Contains(task.ErrorMessage, "NFO") && !strings.Contains(task.ErrorMessage, "nfo_") && !strings.Contains(task.ErrorMessage, "ordinal") {
+		if (deadlineOnly || r == nil && !appendMode) && !strings.Contains(task.ErrorMessage, "NFO") && !strings.Contains(task.ErrorMessage, "nfo_") && !strings.Contains(task.ErrorMessage, "ordinal") {
 			continue
 		}
 		rs, e := m.recordingStore()
@@ -871,8 +883,7 @@ func (m *Manager) compensateLibraryFailures() {
 		if e = m.validateTaskResume(task); e != nil {
 			continue
 		}
-		r := byTask[task.ID]
-		if r == nil {
+		if r == nil || deadlineOnly {
 			due := now
 			if cfg.Subtitle.Schedule.Enabled && !appendMode {
 				due, e = cfg.Subtitle.Schedule.NextRunAfter(now)
@@ -883,7 +894,14 @@ func (m *Manager) compensateLibraryFailures() {
 			if task.NotBefore != nil && task.NotBefore.After(due) {
 				due = *task.NotBefore
 			}
-			r = &LibraryRecoveryRecord{OperationID: fmt.Sprintf("task-%d", task.ID), Kind: "task", Season: m.taskLibrarySeason(task, library), TaskID: task.ID, State: "waiting", NextAttempt: due, Expected: LibraryIndexExpected{LibraryRoot: library, Show: filepath.Base(filepath.Dir(m.taskLibrarySeason(task, library))), Season: m.taskLibrarySeason(task, library)}}
+			if r == nil {
+				r = &LibraryRecoveryRecord{OperationID: fmt.Sprintf("task-%d", task.ID), Kind: "task", TaskID: task.ID}
+			} else {
+				next := *r
+				r = &next
+			}
+			r.State, r.Season, r.NextAttempt = "waiting", season, due
+			r.Expected = LibraryIndexExpected{LibraryRoot: library, Show: filepath.Base(filepath.Dir(season)), Season: season}
 			if subtitle.LibraryRecoverySupported() {
 				for _, source := range session.Sources() {
 					state, err := subtitle.CaptureLibraryFileState(source.InputPath, false)
@@ -957,7 +975,8 @@ func (m *Manager) compensateLibraryFailures() {
 			_ = s.saveLibraryRecovery(m.ctx, r)
 			return
 		}
-		if (r.State != "waiting" && r.State != "resume_requested") || now.Before(r.NextAttempt) {
+		if (r.State != "waiting" && r.State != "resume_requested") || now.Before(r.NextAttempt) ||
+			(task.NotBefore != nil && now.Before(*task.NotBefore)) {
 			continue
 		}
 		r.State = "resume_requested"
@@ -981,7 +1000,7 @@ func (m *Manager) compensateLibraryFailures() {
 			e = validateRecoverySources(r)
 		}
 		if e == nil {
-			e = m.ResumeTask(task.ID)
+			e = m.resumeTask(task.ID, &now)
 		}
 		if e != nil {
 			r.State = "waiting"

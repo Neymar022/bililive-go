@@ -20,6 +20,33 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// recoveryChildRequest 只传递崩溃子进程所需的数据，回调由子进程安装。
+type recoveryChildRequest struct {
+	LibraryRoot, Path, SessionID, Phase string
+	TaskID                              int64
+	RecordedAt                          time.Time
+}
+
+func encodeRecoveryChildRequest(t *testing.T, req LibraryPublicationRequest) string {
+	t.Helper()
+	raw, err := json.Marshal(recoveryChildRequest{
+		LibraryRoot: req.LibraryRoot, Path: req.Path, SessionID: req.SessionID,
+		Phase: req.Phase, TaskID: req.TaskID, RecordedAt: req.RecordedAt,
+	})
+	require.NoError(t, err)
+	return string(raw)
+}
+
+func decodeRecoveryChildRequest(t *testing.T, raw string) LibraryPublicationRequest {
+	t.Helper()
+	var req recoveryChildRequest
+	require.NoError(t, json.Unmarshal([]byte(raw), &req))
+	return LibraryPublicationRequest{
+		LibraryRoot: req.LibraryRoot, Path: req.Path, SessionID: req.SessionID,
+		Phase: req.Phase, TaskID: req.TaskID, RecordedAt: req.RecordedAt,
+	}
+}
+
 func recoveryLinuxFixture(t *testing.T) (string, string, LibraryPublicationRequest) {
 	t.Helper()
 	root := t.TempDir()
@@ -61,10 +88,8 @@ func TestLibraryRecoveryActualSIGKILLReentry(t *testing.T) {
 			library, db, req := recoveryLinuxFixture(t)
 			before, err := subtitle.PlanLibraryIdentityRecovery(filepath.Dir(req.Path))
 			require.NoError(t, err)
-			b, err := json.Marshal(req)
-			require.NoError(t, err)
 			command := exec.Command(os.Args[0], "-test.run", "^TestLibraryRecoveryCrashChild$")
-			command.Env = append(os.Environ(), "RECOVERY_CHILD_DB="+db, "RECOVERY_CHILD_REQUEST="+string(b), "RECOVERY_CHILD_BOUNDARY="+boundary)
+			command.Env = append(os.Environ(), "RECOVERY_CHILD_DB="+db, "RECOVERY_CHILD_REQUEST="+encodeRecoveryChildRequest(t, req), "RECOVERY_CHILD_BOUNDARY="+boundary)
 			output, err := command.CombinedOutput()
 			require.Error(t, err, string(output))
 			exit, ok := err.(*exec.ExitError)
@@ -96,15 +121,14 @@ func TestLibraryRecoveryCrashChild(t *testing.T) {
 	if db == "" {
 		t.Skip("仅由SIGKILL父测试启动")
 	}
-	var req LibraryPublicationRequest
-	require.NoError(t, json.Unmarshal([]byte(os.Getenv("RECOVERY_CHILD_REQUEST")), &req))
+	req := decodeRecoveryChildRequest(t, os.Getenv("RECOVERY_CHILD_REQUEST"))
 	s, err := NewSQLiteStore(db)
 	require.NoError(t, err)
 	m := NewManager(context.Background(), s, nil, nil)
 	m.SetLibraryIndexObserver(fixtureIndexObserver{})
 	m.SetLibraryRecoveryHooks(LibraryRecoveryHooks{Boundary: func(point string) error {
 		if point == os.Getenv("RECOVERY_CHILD_BOUNDARY") {
-			_ = syscall.Kill(os.Getpid(), syscall.SIGKILL)
+			return syscall.Kill(os.Getpid(), syscall.SIGKILL)
 		}
 		return nil
 	}})
@@ -360,6 +384,7 @@ func TestRecoveryResumeCommitSIGKILLDoesNotResetCheckpoint(t *testing.T) {
 			require.NoError(t, s.FinishRecordingProducer(ctx, origin, ""))
 			require.NoError(t, os.MkdirAll(filepath.Join(root, "video"), 0755))
 			cfg := configs.NewConfig()
+			cfg.Subtitle.Enabled = true
 			cfg.Subtitle.LibraryRoot = filepath.Join(root, "video")
 			cfg.Subtitle.Schedule.Enabled = false
 			previous := configs.GetCurrentConfig()
@@ -372,7 +397,9 @@ func TestRecoveryResumeCommitSIGKILLDoesNotResetCheckpoint(t *testing.T) {
 			child.Env = append(os.Environ(), "RECOVERY_RESUME_DB="+db, "RECOVERY_RESUME_BOUNDARY="+point)
 			output, err := child.CombinedOutput()
 			require.Error(t, err, string(output))
-			require.Contains(t, err.Error(), "killed")
+			var exit *exec.ExitError
+			require.ErrorAs(t, err, &exit, string(output))
+			require.Equal(t, syscall.SIGKILL, exit.Sys().(syscall.WaitStatus).Signal(), string(output))
 			s, err = NewSQLiteStore(db)
 			require.NoError(t, err)
 			defer s.Close()
@@ -393,6 +420,7 @@ func TestRecoveryResumeCrashChild(t *testing.T) {
 		t.Skip("仅供resume SIGKILL父测试")
 	}
 	cfg := configs.NewConfig()
+	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = filepath.Join(filepath.Dir(db), "video")
 	cfg.Subtitle.Schedule.Enabled = false
 	configs.SetCurrentConfig(cfg)

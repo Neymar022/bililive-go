@@ -99,10 +99,8 @@ func TestLibraryRecoveryTerminalJournalReconcilesMarker(t *testing.T) {
 // 成品与 journal 均经正式入口提交，在终态提交后真实杀进程。
 func TestLibraryRecoveryTerminalCommitSIGKILL(t *testing.T) {
 	_, db, req := recoveryLinuxFixture(t)
-	raw, err := json.Marshal(req)
-	require.NoError(t, err)
 	command := exec.Command(os.Args[0], "-test.run", "^TestLibraryRecoveryTerminalCommitChild$")
-	command.Env = append(os.Environ(), "RECOVERY_TERMINAL_DB="+db, "RECOVERY_TERMINAL_REQUEST="+string(raw))
+	command.Env = append(os.Environ(), "RECOVERY_TERMINAL_DB="+db, "RECOVERY_TERMINAL_REQUEST="+encodeRecoveryChildRequest(t, req))
 	output, err := command.CombinedOutput()
 	require.Error(t, err, string(output))
 	exit, ok := err.(*exec.ExitError)
@@ -127,8 +125,7 @@ func TestLibraryRecoveryTerminalCommitChild(t *testing.T) {
 	if db == "" {
 		t.Skip("仅由终态SIGKILL父测试启动")
 	}
-	var req LibraryPublicationRequest
-	require.NoError(t, json.Unmarshal([]byte(os.Getenv("RECOVERY_TERMINAL_REQUEST")), &req))
+	req := decodeRecoveryChildRequest(t, os.Getenv("RECOVERY_TERMINAL_REQUEST"))
 	s, err := NewSQLiteStore(db)
 	require.NoError(t, err)
 	m := NewManager(context.Background(), s, nil, nil)
@@ -231,6 +228,7 @@ func TestLibraryRecoveryChangedEvidenceWakesBlockedTask(t *testing.T) {
 	require.NoError(t, err)
 	defer store.Close()
 	cfg := configs.NewConfig()
+	cfg.Subtitle.Enabled = true
 	cfg.Subtitle.LibraryRoot = filepath.Join(root, "video")
 	require.NoError(t, os.MkdirAll(cfg.Subtitle.LibraryRoot, 0755))
 	cfg.Subtitle.Schedule.Enabled = true
@@ -278,6 +276,10 @@ func TestLibraryRecoveryChangedEvidenceWakesBlockedTask(t *testing.T) {
 	hold := now.Add(72 * time.Hour).UTC()
 	task.NotBefore = &hold
 	require.NoError(t, store.UpdateTask(ctx, task))
+	held, err := m.GetTask(task.ID)
+	require.NoError(t, err)
+	require.Equal(t, "blocked", held.LibraryRecovery.State)
+	require.True(t, held.LibraryRecovery.Deadline.ExplicitHold.Equal(hold))
 	require.NoError(t, os.WriteFile(evidence, []byte("new valid source evidence"), 0644))
 	for i := 0; i < 4; i++ {
 		m.compensateLibraryFailures()
@@ -290,7 +292,9 @@ func TestLibraryRecoveryChangedEvidenceWakesBlockedTask(t *testing.T) {
 			require.Equal(t, "waiting", got.State)
 			require.Equal(t, 0, got.Attempts)
 			require.False(t, got.NextAttempt.Before(hold), "证据更新不缩短原hold")
-			require.Equal(t, int64(2), got.Revision, "新证据只安排一次fresh分类")
+			require.Equal(t, held.LibraryRecovery.Revision+1, got.Revision, "新证据只安排一次fresh分类")
+			require.Equal(t, held.LibraryRecovery.Deadline, got.Deadline)
+			t.Logf("持久化 revision %d → %d", held.LibraryRecovery.Revision, got.Revision)
 		}
 	}
 }

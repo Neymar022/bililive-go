@@ -10,6 +10,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/bililive-go/bililive-go/src/configs"
 	"github.com/bililive-go/bililive-go/src/subtitle"
@@ -17,6 +18,10 @@ import (
 
 // ResumeTask 校验保留下来的阶段输入后续跑，不重置时间计划或已完成结果。
 func (m *Manager) ResumeTask(taskID int64) error {
+	return m.resumeTask(taskID, nil)
+}
+
+func (m *Manager) resumeTask(taskID int64, automaticAt *time.Time) error {
 	unlock := m.lockCompletionTask(taskID)
 	defer unlock()
 	task, err := m.store.GetTask(m.ctx, taskID)
@@ -39,13 +44,16 @@ func (m *Manager) ResumeTask(taskID int64) error {
 			}
 		}
 	}
-	store, ok := m.store.(interface {
+	if store, ok := m.store.(*SQLiteStore); ok {
+		err = store.resumeTask(m.ctx, task, automaticAt)
+	} else if store, ok := m.store.(interface {
 		ResumeTask(context.Context, *PipelineTask) error
-	})
-	if !ok {
+	}); ok && automaticAt == nil {
+		err = store.ResumeTask(m.ctx, task)
+	} else {
 		return errors.New("task store does not support atomic checkpoint resume")
 	}
-	if err := store.ResumeTask(m.ctx, task); err != nil {
+	if err != nil {
 		return err
 	}
 	if err := m.recoveryBoundary("resume_committed"); err != nil {
@@ -132,6 +140,10 @@ func (m *Manager) hasPublishedRecordingInput(task *PipelineTask, input string) b
 
 // ResumeTask 用预期检查点比较并交换状态，拒绝覆盖并发取消或重试。
 func (s *SQLiteStore) ResumeTask(ctx context.Context, expected *PipelineTask) error {
+	return s.resumeTask(ctx, expected, nil)
+}
+
+func (s *SQLiteStore) resumeTask(ctx context.Context, expected *PipelineTask, automaticAt *time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -148,6 +160,10 @@ func (s *SQLiteStore) ResumeTask(ctx context.Context, expected *PipelineTask) er
 	err = tx.QueryRowContext(ctx, `SELECT status, current_stage, current_files_json, stage_results_json, can_retry, record_info_json, pipeline_config_json, not_before,started_at,initial_files_json FROM pipeline_tasks WHERE id = ?`, expected.ID).Scan(&status, &stage, &currentFiles, &stageResults, &retry, &recordInfo, &config, &currentNotBefore, &currentStartedAt, &initialFiles)
 	if err != nil {
 		return err
+	}
+	// 自动恢复到期后才入队，事务内复核并发延长的显式等待。
+	if automaticAt != nil && currentNotBefore.Valid && automaticAt.Before(currentNotBefore.Time) {
+		return errors.New("recovery hold not due")
 	}
 	var files, initial []FileInfo
 	var results []StageResult
